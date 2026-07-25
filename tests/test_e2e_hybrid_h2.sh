@@ -124,6 +124,15 @@
 #     (both paths must carry real load, lighter path >=20% of the heavier —
 #     the direct proof against a scheduler that pinned traffic on one path;
 #     the absolute byte floor differs from Test 3's, see the check below).
+#     Like Test 3 this phase runs under netem, and for a reason that is a
+#     property of the scheduler rather than a convenience: TCP-lane traffic
+#     rides QUIC STREAM packets, which carry po_flow_hash == 0, so the WLB
+#     scheduler routes them through its MinRTT fallback rather than the
+#     WRR/flow-pinning path used for datagrams. That fallback only ever
+#     reaches for a second path when the lowest-SRTT one is cwnd-blocked, so
+#     on an UNSHAPED pair — where one veth absorbs the whole offered load —
+#     a 100%-on-one-path result is correct behaviour, not a regression. See
+#     the netem call in the Test 8 body for the measurements that settled it.
 #     A separate long-lived v6 TCP-lane flow then proves failover: path 0's
 #     client-side link is dropped mid-flow and the flow must keep making
 #     progress on the surviving path, the same technique
@@ -1583,6 +1592,29 @@ ip netns exec "$NS_CLIENT" sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
 # addressing note above).
 ip netns exec "$NS_SERVER" ip -6 addr add "${V6_EGRESS_IP}/128" dev lo
 
+# Shape both legs before the tunnel comes up. WITHOUT this the load-share
+# assertion below is not a scheduler check but a coin flip: stream-lane
+# packets take WLB's MinRTT fallback (po_flow_hash == 0), which spills onto a
+# second path only while the lowest-SRTT one is cwnd-blocked, and an unshaped
+# veth pair is fast enough that one path never blocks. Measured on the same
+# binary, 2 runs each: unshaped gave minshare 0.00 / 0.00 (and 0.05 / 0.39 on
+# a build with a larger lwIP window — i.e. the outcome tracked an unrelated
+# buffer size, which is precisely what a load-share gate must NOT do), while
+# this shaped topology gave 0.72 / 0.78 / 0.81 / 0.86 across both builds —
+# a 3.6x margin over the >=0.2 threshold with no window sensitivity left.
+# Shaping also caps the burst at 40+100 mbit, so a slow CI runner measures
+# the same region a fast one does.
+#
+# Ordering: bench_setup_netns_n recreates the namespaces (and with them the
+# qdiscs), so netem MUST be applied after the topology, before the tunnel.
+# The profile is re-derived here rather than reusing Test 3's NETEM_A/NETEM_B
+# for the same reason this phase keeps its own copy of the load-share check:
+# Test 8 must not break silently if Test 3 is reordered or dropped.
+NETEM_PROFILE_T8="lte_starlink"
+NETEM_SPEC_T8="${BENCH_ENV_NETEM[$NETEM_PROFILE_T8]}"
+echo "  profile=${NETEM_PROFILE_T8} pathA='${NETEM_SPEC_T8%%|*}' pathB='${NETEM_SPEC_T8#*|}'"
+bench_apply_netem "${NETEM_SPEC_T8%%|*}" "${NETEM_SPEC_T8#*|}"
+
 N_PATHS=2
 hybrid_run "$INI_T8" "$SERVER_LOG_T8" "$CLIENT_LOG_T8"
 
@@ -1644,6 +1676,10 @@ import sys, json
 # not Test 3's repeated run_iperf3_repeated series, so fewer per-path bytes
 # accumulate before the get_status snapshot — while still being far above
 # handshake/probe noise (an idle path can't reach 50 KB on control frames).
+# Measured under the netem profile applied above: the LIGHTER path carried
+# 31.9-33.5 MB across 4 runs, so the floor sits ~640x below the observed
+# value and is doing what it is meant to do (catch a dead path), not
+# gatekeeping throughput.
 FLOOR = 50000
 try:
     d = json.load(sys.stdin)
