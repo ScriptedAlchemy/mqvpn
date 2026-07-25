@@ -19,7 +19,7 @@ Pool sizing is a three-way split selected in
 | iOS NE | `MQVPN_LWIP_IOS_PROFILE` CMake option | 128 | 512 | 64 |
 
 The **config default stays 256 on every profile** — the ceiling only bounds what an
-operator may configure upward. The desktop/router ceiling was 256 through v0.13.0;
+operator may configure upward. The desktop/router ceiling was 256 through v0.13.4;
 it was raised because the OpenMPTCProuter integration aggregates a whole LAN behind
 one tunnel, where 256 concurrent inner TCP flows is a real limit. Android keeps the
 older pools deliberately: a handset multiplexes far fewer inner flows, and the pools
@@ -34,14 +34,14 @@ Sections 1–4 below describe the **desktop/router** profile unless stated other
 | Constant | Source | Value | Note |
 |---|---|---|---|
 | `TCP_MSS` | lwipopts.h | 8960 B | 9000-byte MTU ceiling − 40 (IP+TCP headers); compile-time upper bound, no per-pcb override in the vendored tree |
-| `TCP_RCV_SCALE` | mqvpn_lwip_profile.h | 3 (`MQVPN_LWIP_RCV_SCALE`) | window-scale shift; `TCP_WND` below is the already-scaled effective window, not the 16-bit wire value. Was 5 (2 MiB) through v0.13.0 — cut on router-topology measurement, §5d |
+| `TCP_RCV_SCALE` | mqvpn_lwip_profile.h | 3 (`MQVPN_LWIP_RCV_SCALE`) | window-scale shift; `TCP_WND` below is the already-scaled effective window, not the 16-bit wire value. Was 5 (2 MiB) through v0.13.4 — cut on router-topology measurement, §5d |
 | `TCP_WND` | lwipopts.h | `65535 << 3` = 524,280 B (≈ 512 KiB) | dominant per-flow bound — worst-case receive-side bytes a pcb may hold once already ACKed on the wire |
 | `TCP_SND_BUF` | lwipopts.h | 2 × 1024 × 1024 = 2,097,152 B (2 MiB) | per-flow send-buffer bound (`tcp_write` returns `ERR_MEM` above this) |
 | `TCP_SNDLOWAT` | lwipopts.h | `TCP_MSS` = 8960 B | inert (netconn/socket-only field, both compiled out); pinned only to satisfy init.c's sanity check |
 | `TCP_SND_QUEUELEN` | lwipopts.h | `(4×TCP_SND_BUF + TCP_MSS−1) / TCP_MSS` = 937 segments | per-pcb segment cap |
 | `MEMP_NUM_TCP_PCB` | mqvpn_lwip_profile.h | 8192 (Android 512) | lwIP-side hard cap; sets the honored `TcpMaxFlows` ceiling at pool/2 = 4096, but is not the real enforcement point (see §2). ≈ 2.44 MiB of `.bss` at 312 B per `struct tcp_pcb` (LP64), faulted in only once a lane exists — `lwip_init()` runs lazily from `lwip_glue.c`, so hybrid-disabled builds pay nothing resident |
 | `MEMP_NUM_TCP_SEG` | mqvpn_lwip_profile.h | 8192 (Android 2048) | global pool shared by every flow (≈ 256 KiB of `.bss` at 32 B per `struct tcp_seg`); a single flow filling its 937-segment `TCP_SND_QUEUELEN` leaves room for only ≈ 8 flows to be simultaneously saturated. Tracks the pcb pool so a fully-occupied flow table still has segments per flow — at the old 2048 against a 4096-flow cap it could not hold even one segment per flow. `tcp_write` returning `ERR_MEM` here is treated as backpressure by `tcp_lane.c`, not as an error |
-| `PBUF_POOL_SIZE` | lwipopts.h | 64 | see §1a — cut from 256 with the window (§5d); 256 was sized for the old 2 MiB `TCP_WND` |
+| `PBUF_POOL_SIZE` | lwipopts.h | 64 (derived) | see §1a — derived from `TCP_WND` through one power-of-two ladder shared by every profile, so a window change carries the pool with it; the old hardcoded 256 was sized for the 2 MiB `TCP_WND` (§5d) |
 | `PBUF_POOL_BUFSIZE` | lwipopts.h | `LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)` ≈ 9000 B aligned | see §1a |
 | `TCP_LANE_RAW_MARKER_CAP` | tcp_lane.c | 4096 | sticky-RAW marker cap, compile-time (`#ifndef`-overridable for tests) |
 | `TCP_LANE_CLOSING_CAP` | tcp_lane.c | 4096 | post-close routing-marker cap, same shape as the RAW cap |
@@ -52,9 +52,13 @@ Sections 1–4 below describe the **desktop/router** profile unless stated other
 ### 1a. PBUF_POOL status
 
 `PBUF_POOL_SIZE` is 64 (≈ 0.55 MiB of static/BSS reservation: 64 pbufs ×
-~9000 usable bytes each). It was 256 while `TCP_WND` was 2 MiB; the window cut (§5d)
-left three quarters of that reservation dead, so it now tracks the check it exists to
-satisfy — `ceil(524280 / 8946) = 59`, rounded to 64. It is kept nonzero to satisfy an unconditional compile-time
+~9000 usable bytes each). It was a hardcoded 256 while `TCP_WND` was 2 MiB; the window
+cut (§5d) left three quarters of that reservation dead, so it now tracks the check it
+exists to satisfy — `ceil(524280 / 8946) = 59`, rounded up the ladder to 64. The ladder
+is shared by every profile and keyed off the selected `TCP_RCV_SCALE` (iOS scale 2 → 32,
+non-iOS scale 3 → 64, and the sweep's scale 4 → 128 / scale 5 → 256): with the value
+hardcoded per profile instead, `benchmarks/bench_router_window.sh` could no longer build
+the 2 MiB reference its own default sweep starts from. It is kept nonzero to satisfy an unconditional compile-time
 check in `init.c` (`TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - headers)` when
 `MEMP_MEM_MALLOC == 0 && PBUF_POOL_SIZE > 0`), independent of whether any code path
 draws from the pool.
@@ -189,7 +193,7 @@ the server's egress fd budget, not this lane's memory.
 - The honest planning figure is the *expected* concurrent-backpressured flow count, not the
   cap; the cap is the ceiling that keeps the worst case finite.
 - The window sizing has already been taken as far as measurement supports (§5d): 512 KiB,
-  down from the 2 MiB shipped through v0.13.0, which is what makes 4096 cost ≈ 3.0 GiB
+  down from the 2 MiB shipped through v0.13.4, which is what makes 4096 cost ≈ 3.0 GiB
   instead of ≈ 9.0 GiB. Going lower needs the watermarks derived from `TCP_WND` the way
   the iOS profile does — the non-iOS `BP_HIGH_WATER` is a fixed 256 KiB, and a scale below
   3 would put it at or above `TCP_WND` (compile-time guarded in mqvpn_lwip_profile.h).
@@ -219,50 +223,7 @@ next to the ~192 MiB flow-table cost at 256 concurrent flows (§3). Only the two
 with the raised ceiling — the marker tables and hash buckets were already sized for 4096
 entries and are unchanged (§1).
 
-### 5d. Router-topology window measurement (desktop/router scale 5 → 3)
-
-§5a retired the window-shrink goodput caveat, but scoped the retirement to a topology
-where the inner TCP peer sits on the *same device* as lwIP. A router breaks that: the
-inner peer is a separate LAN machine, so the window has to cover a real LAN
-bandwidth-delay product. Every pre-existing sweep inherited the same-device shape
-(`bench_env_setup.sh` runs iperf3 inside `NS_CLIENT`), so the desktop/router window could
-not be sized from them without applying §5a outside its stated scope.
-
-`benchmarks/bench_router_window.sh` builds the missing shape — a `bench-lan` netns behind
-a forwarding, MASQUERADE-ing router — and sweeps `MQVPN_LWIP_RCV_SCALE`. Run
-2026-07-22, WAN legs at the harness default (300 Mbit/10 ms + 80 Mbit/30 ms, ≈ 350 Mbps
-aggregate in practice), 3 reps × {P=1, P=8} per cell:
-
-| LAN hop | P | s5 (2 MiB) | s4 (1 MiB) | s3 (512 KiB) |
-|---|---|---|---|---|
-| 0.5 ms/leg | 1 | 334.0 Mbps | 324.2 (−2.9 %) | 321.9 (−3.6 %) |
-| 0.5 ms/leg | 8 | 355.1 Mbps | 352.1 (−0.8 %) | 353.5 (−0.5 %) |
-| 4 ms/leg | 1 | 335.7 Mbps | 342.3 (+2.0 %) | 337.0 (+0.4 %) |
-| 4 ms/leg | 8 | 352.2 Mbps | 355.1 (+0.8 %) | 354.4 (+0.6 %) |
-
-Worst cell −3.6 % against a −5 % gate → scale 3 adopted. Two caveats worth stating
-plainly rather than burying:
-
-- **The window was never the binding constraint in this run.** The WAN capped throughput
-  at ≈ 350 Mbps, putting the LAN BDP at 43 KiB (1 ms RTT) and 342 KiB (8 ms RTT) against
-  a 512 KiB window. The run therefore shows *"512 KiB is not limiting for a realistic
-  router LAN"*, not *"512 KiB is the boundary"*. The boundary is arithmetic:
-  `window / RTT` caps a single inner flow at **4.2 Gbit/s over a 1 ms LAN** and
-  **0.52 Gbit/s over an 8 ms one**. Wired LAN RTT is well under 1 ms, so the first figure
-  is the one that applies to most deployments — but 8 ms is a realistic *Wi-Fi*-under-load
-  RTT, not a strawman, and there the cut does lower the single-flow ceiling from the old
-  2.1 Gbit/s to 0.52. It binds only where aggregate WAN capacity exceeds that AND the
-  transfer is single-stream (each flow gets its own window, so P>1 is unaffected). A
-  deployment that hits it can rebuild with `-DMQVPN_LWIP_RCV_SCALE=4` or `5`; the pool
-  sizing is independent of the window, so the flow ceiling is unaffected either way.
-- **The −3.6 % cell is not a window effect.** It appears at the *low*-RTT LAN, where the
-  BDP is 43 KiB — twelve times inside the window. A genuine window-BDP limit has to get
-  worse as RTT grows; this one reverses sign (+0.4 %) at 8× the RTT. Ordering or CC
-  variance is the likelier cause, and it stays inside the gate either way.
-
-Raw data: `bench_results/router_window/`.
-
-## 5. iOS profile (Network Extension, 50 MB)
+## 5. Window sizing evidence, and the iOS profile
 
 This section originally scoped the ~50 MB resident-memory ceiling on iOS Network
 Extensions as input for a future mobile port ("cut concurrency" vs. "shrink the window",
@@ -273,6 +234,13 @@ and sizes the pools (`MEMP_NUM_TCP_PCB` = 128) for a `tcp_max_flows` cut to 64, 
 lever from the original estimate below, exercised together with the first rather than in
 isolation. §5a revises the goodput caveat that estimate ended on against measured data;
 §5b covers the QUIC-side complement; §5c gives the shipped profile's budget table.
+
+The window-sizing subsections outgrew that framing: §5d and §5e measure the
+**desktop/router** window, not the iOS one, which is why this section is no longer titled
+for iOS alone. Read as a series they answer progressively wider versions of one question —
+"is the lwIP window ever the binding constraint?" — each in a regime the previous one
+could not reach: §5a on-device at 186 Mbps, §5d across a router LAN at ~350 Mbps, §5e with
+the lane itself as the bottleneck at ~1 Gbit/s. The answer has been "no" every time.
 
 ### 5a. Retiring the window-shrink goodput caveat — for this topology
 
@@ -343,7 +311,7 @@ Shipped constants for `MQVPN_LWIP_IOS_PROFILE` at the default scale (2) and
 
 | Constant | Source | Value (scale 2) | Note |
 |---|---|---|---|
-| `TCP_RCV_SCALE` (`MQVPN_LWIP_IOS_RCV_SCALE`) | lwipopts.h | 2 (default) | down from the non-iOS 3 (which was itself 5 through v0.13.0) |
+| `TCP_RCV_SCALE` (`MQVPN_LWIP_IOS_RCV_SCALE`) | lwipopts.h | 2 (default) | down from the non-iOS 3 (which was itself 5 through v0.13.4) |
 | `TCP_WND` | lwipopts.h | `65535 << 2` = 262,140 B (≈256 KiB) | shared derivation (§1) at iOS scale |
 | `TCP_SND_BUF` | lwipopts.h | `65536 << 2` = 262,144 B (256 KiB) | down from 2 MiB |
 | `MEMP_NUM_TCP_PCB` | mqvpn_lwip_profile.h | 128 (`tcp_max_flows`=64 + headroom) | down from 8192 desktop/router, 512 Android |
@@ -376,7 +344,94 @@ Add the QUIC-side receive-rate cap (§5b) on top: typically ≈ 7.15 MiB (`rate 
 + up to 16 MiB (QUIC cap, worst case) ≈ 37.4 MiB against the 50 MB Network Extension
 ceiling, leaving headroom for process/runtime overhead outside this doc's scope.
 
-### 5d. Original scoping estimate (kept for context)
+### 5d. Router-topology window measurement (desktop/router scale 5 → 3)
+
+§5a retired the window-shrink goodput caveat, but scoped the retirement to a topology
+where the inner TCP peer sits on the *same device* as lwIP. A router breaks that: the
+inner peer is a separate LAN machine, so the window has to cover a real LAN
+bandwidth-delay product. Every pre-existing sweep inherited the same-device shape
+(`bench_env_setup.sh` runs iperf3 inside `NS_CLIENT`), so the desktop/router window could
+not be sized from them without applying §5a outside its stated scope.
+
+`benchmarks/bench_router_window.sh` builds the missing shape — a `bench-lan` netns behind
+a forwarding, MASQUERADE-ing router — and sweeps `MQVPN_LWIP_RCV_SCALE`. Run
+2026-07-22, WAN legs at the harness default (300 Mbit/10 ms + 80 Mbit/30 ms, ≈ 350 Mbps
+aggregate in practice), 3 reps × {P=1, P=8} per cell:
+
+| LAN hop | P | s5 (2 MiB) | s4 (1 MiB) | s3 (512 KiB) |
+|---|---|---|---|---|
+| 0.5 ms/leg | 1 | 334.0 Mbps | 324.2 (−2.9 %) | 321.9 (−3.6 %) |
+| 0.5 ms/leg | 8 | 355.1 Mbps | 352.1 (−0.8 %) | 353.5 (−0.5 %) |
+| 4 ms/leg | 1 | 335.7 Mbps | 342.3 (+2.0 %) | 337.0 (+0.4 %) |
+| 4 ms/leg | 8 | 352.2 Mbps | 355.1 (+0.8 %) | 354.4 (+0.6 %) |
+
+Worst cell −3.6 % against a −5 % gate → scale 3 adopted. Two caveats worth stating
+plainly rather than burying:
+
+- **The window was never the binding constraint in this run.** The WAN capped throughput
+  at ≈ 350 Mbps, putting the LAN BDP at 43 KiB (1 ms RTT) and 342 KiB (8 ms RTT) against
+  a 512 KiB window. The run therefore shows *"512 KiB is not limiting for a realistic
+  router LAN"*, not *"512 KiB is the boundary"*. The boundary is arithmetic:
+  `window / RTT` caps a single inner flow at **4.2 Gbit/s over a 1 ms LAN** and
+  **0.52 Gbit/s over an 8 ms one**. Wired LAN RTT is well under 1 ms, so the first figure
+  is the one that applies to most deployments — but 8 ms is a realistic *Wi-Fi*-under-load
+  RTT, not a strawman, and there the cut does lower the single-flow ceiling from the old
+  2.1 Gbit/s to 0.52. It binds only where aggregate WAN capacity exceeds that AND the
+  transfer is single-stream (each flow gets its own window, so P>1 is unaffected). A
+  deployment that hits it can reconfigure with `cmake -DMQVPN_LWIP_RCV_SCALE=4` (or `5`)
+  — a real option since it is forwarded to the compiler in `CMakeLists.txt`; passing it
+  inside `-DCMAKE_C_FLAGS` still works too, which is what
+  `benchmarks/bench_router_window.sh` does when it sweeps the scale. The pool sizing is
+  independent of the window, so the flow ceiling is unaffected either way.
+- **The −3.6 % cell is not a window effect.** It appears at the *low*-RTT LAN, where the
+  BDP is 43 KiB — twelve times inside the window. A genuine window-BDP limit has to get
+  worse as RTT grows; this one reverses sign (+0.4 %) at 8× the RTT. Ordering or CC
+  variance is the likelier cause, and it stays inside the gate either way.
+
+Raw data: `bench_results/router_window/`.
+
+### 5e. Lane-limited window sweep (single path, ~1 Gbit/s, compiler-controlled)
+
+§5a retired the window-shrink goodput caveat for the terminated-lane architecture, and
+§5d sized the shipped window against a router LAN hop. Both measured in regimes where
+something other than the lane capped throughput: §5a's paths were 2x100 Mbit (186 Mbps
+aggregate) and §5d's WAN legs were 300+80 Mbit (~350 Mbps). Neither could see the lane's
+own ceiling, so neither could answer "does the window bind once the lane ITSELF is the
+bottleneck?".
+
+This section closes that. Topology: single unshaped veth path, RAW baseline ~1 Gbit/s,
+so the client's own classifier/lwIP/lane path is the limiting stage. Sweep:
+`MQVPN_LWIP_RCV_SCALE` 3 / 4 / 5 (512 KiB / 1 MiB / 2 MiB), 3 iperf3 runs of 6 s each per
+arm, measured as `tests/test_e2e_hybrid_h2.sh`'s Test 2 does (stream lane vs RAW through
+the same tunnel).
+
+| `TCP_WND` | RAW | stream lane | degradation |
+|---|---|---|---|
+| 512 KiB (shipped) | 1004.5 Mbps | 783.8 Mbps | 22.0 % |
+| 1 MiB | 1011.8 Mbps | 794.9 Mbps | 21.4 % |
+| 2 MiB | 1017.4 Mbps | 791.7 Mbps | 22.2 % |
+
+The spread (1.4 %) is inside this measurement's run-to-run noise — repeat runs of a single
+arm ranged 19.5-24.4 %. **The window does not bind even here.** That is a stronger
+statement than §5a could make, in the one regime §5a explicitly scoped itself out of, and
+it removes the last open objection to the 512 KiB default.
+
+**All three arms must be built with the same compiler**, and that is not a formality.
+On this same bench the compiler alone moves the number by **12 points** at -O0 (clang
+24.4 % vs gcc 12.4 %, identical sources and flags, identical prebuilt xquic) — twenty
+times the window's 0.5 points of noise. A sweep whose arms vary both therefore reads as a
+large window effect that is not there. The reason is structural: Test 2 gates the RATIO of
+two code paths, and RAW barely touches this project's own sources while the stream lane
+runs lwIP's TCP state machine per segment, so at -O0 that ratio tracks codegen. See the
+`HYBRID_H2_PHASES` block in `tests/test_e2e_hybrid_h2.sh` for the full Debug/Release ×
+clang/gcc matrix and why CI gates this on a Release build.
+
+Still unmeasured, and NOT claimed either way: the multipath ramp — whether the window
+changes how fast a single flow's spillover onto a second path builds up during the first
+few MB of a transfer. The withdrawn measurement targeted exactly that question; a
+compiler-controlled re-run would settle it.
+
+### 5f. Original scoping estimate (kept for context)
 
 The estimate below predates the shipped profile; §5a explains why its closing caveat no
 longer holds for this architecture, and §5c gives the actual shipped numbers in its place.

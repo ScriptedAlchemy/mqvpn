@@ -59,7 +59,7 @@
 /* Desktop / router (Linux, Windows, macOS): flow cap 4096. The OpenMPTCProuter
  * integration aggregates a whole LAN behind one tunnel, where 256 concurrent
  * inner TCP flows is a real ceiling. Cost of the headroom over the 512/2048
- * this profile used through v0.13.0 is ~2.5 MiB of .bss (pcb 312 B, seg 32 B
+ * this profile used through v0.13.4 is ~2.5 MiB of .bss (pcb 312 B, seg 32 B
  * on LP64), faulted in only when a lane is actually created — lwip_init()
  * runs lazily from the glue, so hybrid-disabled builds pay nothing resident.
  *
@@ -75,7 +75,7 @@
  * Android — the window split is two-way, unlike the three-way pool split).
  * Overridable so benchmarks/bench_router_window.sh can A/B it without
  * patching the source; 3 (= 512 KiB TCP_WND) is the shipped value, down from
- * the 5 (2 MiB) used through v0.13.0. Measured on the router topology, not
+ * the 5 (2 MiB) used through v0.13.4. Measured on the router topology, not
  * inferred from the iOS result: bench_router_window.sh showed no goodput loss
  * against the 2 MiB reference (worst cell -3.6%, gate -5%, and that cell is
  * the LOW-RTT one — a window-BDP limit would worsen with RTT, not improve).
