@@ -27,6 +27,28 @@ typedef SSIZE_T ssize_t;
                                 * internals leak (both headers are internal
                                 * to src/hybrid/). */
 
+/* Multipath scheduling contract for this lane — MinRTT, not WLB.
+ *
+ * Lane bytes travel as QUIC STREAM frames, and xquic sets po_flow_hash only
+ * on the datagram write path (xqc_packet_out.c), so every lane packet reaches
+ * the WLB scheduler with hash 0 and is routed by its MinRTT fallback:
+ * lowest-SRTT path that has cwnd headroom, spilling onto another path only
+ * while that one is cwnd-blocked. That is the intended arrangement, not a
+ * gap to be closed by giving lane packets a flow hash.
+ *
+ * WLB's flow pinning exists because a *datagram* lane has no layer to absorb
+ * cross-path reordering — split one inner TCP flow's datagrams across paths
+ * with different RTTs and the inner TCP sees dupACKs. This lane terminates
+ * inner TCP at lwIP and carries bytes in a STREAM, whose reassembly absorbs
+ * that reordering before any TCP stack can see it. Pinning would therefore
+ * add no aggregation and cap a single flow near one path's capacity; plain
+ * weight-based WRR would spread packets onto a slower path even when the
+ * fastest has room, buying reassembly delay at equal throughput.
+ *
+ * Consequence worth remembering before filing "the lane does not aggregate":
+ * spillover needs the best path to be cwnd-blocked, so aggregation appears
+ * only when a single path cannot absorb the offered load. All traffic on one
+ * path over an unloaded fast link is correct behaviour. */
 typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
 
 /* Flow-starting SYN test for TUN-ingress lane policy. Family-aware:
