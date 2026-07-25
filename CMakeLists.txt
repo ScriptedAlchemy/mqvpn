@@ -124,6 +124,26 @@ if(MQVPN_LWIP_IOS_PROFILE)
     add_compile_definitions(MQVPN_LWIP_IOS_PROFILE)
 endif()
 
+# Window-scale overrides. Both are #ifndef-guarded in mqvpn_lwip_profile.h, so
+# they were always reachable via -DCMAKE_C_FLAGS="-DMQVPN_LWIP_RCV_SCALE=5" —
+# but NOT as plain -DMQVPN_LWIP_RCV_SCALE=5, which lands in the CMake cache and
+# reaches no compiler. That asymmetry was a trap: the rename tripwire above
+# rejects -DMQVPN_LWIP_MOBILE_RCV_SCALE at configure time and points at
+# MQVPN_LWIP_IOS_RCV_SCALE, which was then silently ignored in exactly the
+# spelling the message invites — the build would quietly keep the default
+# window while the operator believed they had changed it. Forward them
+# explicitly (directory-global, same reason as the profile option above).
+foreach(_scale_var MQVPN_LWIP_RCV_SCALE MQVPN_LWIP_IOS_RCV_SCALE)
+    if(DEFINED ${_scale_var})
+        if(NOT "${${_scale_var}}" MATCHES "^[0-9]+$")
+            message(FATAL_ERROR
+                    "${_scale_var} must be an integer shift count, got "
+                    "'${${_scale_var}}'")
+        endif()
+        add_compile_definitions(${_scale_var}=${${_scale_var}})
+    endif()
+endforeach()
+
 # ---------- Hybrid mode server-side TCP egress (Linux-only) ----------
 # Server-side connect-tcp egress (src/hybrid/tcp_egress.c): POSIX sockets +
 # the platform egress-fd registry (platform_linux.c only). Depends on the
