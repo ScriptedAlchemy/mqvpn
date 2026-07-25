@@ -78,21 +78,34 @@
  * window; WAN in-flight lives in the QUIC layer. Derives from the scale. */
 #  define TCP_RCV_SCALE MQVPN_LWIP_IOS_RCV_SCALE
 #  define TCP_SND_BUF   (65536 << MQVPN_LWIP_IOS_RCV_SCALE)
-/* init.c check: TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - headers).
- * ceil(TCP_WND/8900)+1 rounded UP to a power of two (spec-pinned values:
- * scale=2 -> 32, scale=3 -> 64). */
-#  define MQVPN_LWIP_PBUF_NEED ((((65535 << MQVPN_LWIP_IOS_RCV_SCALE)) / 8900) + 1)
-#  if MQVPN_LWIP_PBUF_NEED <= 32
-#    define PBUF_POOL_SIZE 32
-#  elif MQVPN_LWIP_PBUF_NEED <= 64
-#    define PBUF_POOL_SIZE 64
-#  else
-#    define PBUF_POOL_SIZE 128
-#  endif
 #else
-#  define TCP_RCV_SCALE  MQVPN_LWIP_RCV_SCALE /* shift count, range [0..14] */
-#  define TCP_SND_BUF    (2 * 1024 * 1024)
+#  define TCP_RCV_SCALE MQVPN_LWIP_RCV_SCALE /* shift count, range [0..14] */
+#  define TCP_SND_BUF   (2 * 1024 * 1024)
+#endif
+/* init.c check: TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - headers).
+ * ceil(TCP_WND/8900)+1 rounded UP to a power of two. ONE ladder for every
+ * profile, keyed off whichever TCP_RCV_SCALE was selected above, rather than
+ * a per-profile ladder plus a hardcoded non-iOS constant: the constant was
+ * pinned to the shipped scale, so benchmarks/bench_router_window.sh — whose
+ * whole job is sweeping MQVPN_LWIP_RCV_SCALE, and whose DEFAULT sweep starts
+ * at the 2 MiB reference — could no longer build its own reference point once
+ * the shipped window dropped to 512 KiB (lwIP's sanity #error, init.c).
+ * Shipped values are unchanged: iOS scale 2 -> 32, non-iOS scale 3 -> 64.
+ * The sweep's other rungs now resolve too: scale 4 -> 128, scale 5 -> 256.
+ * A scale above 6 overflows the ladder and is caught by that same lwIP
+ * #error at compile time, which is the intended failure for a window nobody
+ * has sized the rest of the budget for. */
+#define MQVPN_LWIP_PBUF_NEED (((65535 << TCP_RCV_SCALE) / 8900) + 1)
+#if MQVPN_LWIP_PBUF_NEED <= 32
+#  define PBUF_POOL_SIZE 32
+#elif MQVPN_LWIP_PBUF_NEED <= 64
 #  define PBUF_POOL_SIZE 64
+#elif MQVPN_LWIP_PBUF_NEED <= 128
+#  define PBUF_POOL_SIZE 128
+#elif MQVPN_LWIP_PBUF_NEED <= 256
+#  define PBUF_POOL_SIZE 256
+#else
+#  define PBUF_POOL_SIZE 512
 #endif
 /* Pool sizing is a THREE-way split (iOS / Android / desktop-router) and lives
  * in the profile header — unlike the window sizing above it keys on the
@@ -141,12 +154,13 @@
  * code actually allocates PBUF_POOL pbufs (see the RESOLVED note below).
  * Desktop/router and Android profiles: with TCP_WND 524,280 and ~8946 usable
  * bytes per pool pbuf (9000 - 54 header bytes), the check needs
- * ceil(524280/8946) = 59 pbufs; 64 is the next power of two and gives
- * ~572 KB >= 524,280. It was 256 while TCP_WND was 2 MiB — the window cut
- * (mqvpn_lwip_profile.h) made three quarters of that reservation dead weight,
- * ~1.6 MiB of .bss that every non-iOS lane, Android included, was paying for a
- * pool the data path does not even draw from. The iOS profile derives its own
- * size from TCP_WND via the power-of-two ladder above.
+ * ceil(524280/8946) = 59 pbufs; the ladder above rounds that to 64, giving
+ * ~572 KB >= 524,280. It was a hardcoded 256 while TCP_WND was 2 MiB — the
+ * window cut (mqvpn_lwip_profile.h) made three quarters of that reservation
+ * dead weight, ~1.6 MiB of .bss that every non-iOS lane, Android included,
+ * was paying for a pool the data path does not even draw from. Every profile
+ * now derives its size from TCP_WND through the one ladder, so a window
+ * change carries the pool with it instead of stranding it.
  *
  * RESOLVED (I1, cross-flow PBUF_POOL exhaustion DoS): mqvpn_lwip_input
  * (lwip_glue.c) allocates every ingress packet as PBUF_RAM (exact-size,
