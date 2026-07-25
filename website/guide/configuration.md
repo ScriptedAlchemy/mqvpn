@@ -292,12 +292,41 @@ Terminates inner TCP locally and relays it over an HTTP/3 request stream so a si
 |-----|-------------|------------|---------|
 | `Enabled` | Master switch | client + server | `false` |
 | `Tcp` | Per-flow TCP lane policy: `stream` (always), `raw` (never — byte-identical to hybrid disabled), or `auto` (TCP lane once ≥2 paths are active at SYN time; latched for the flow's lifetime) | client | `auto` |
-| `TcpMaxFlows` | Concurrent TCP-lane flow cap. Client: local flow table (over-cap SYNs fall back to RAW). Server: per client session (over-cap SYNs get HTTP `503`). On the client the value is additionally clamped to half the lwIP TCP pcb pool — `256` on default builds, `64` with the [mobile lwIP profile](./hybrid-mode#mobile-builds-ios) — and the clamp is logged. The other pool half backs TIME_WAIT and half-open pcbs the flow table doesn't count; without that headroom, pcb exhaustion would silently hang new SYNs instead of the explicit reject (RST) firing | client + server | `256` |
+| `TcpMaxFlows` | Concurrent TCP-lane flow cap. **The client and the server enforce it on different machinery and fail differently** — see the **client vs server** breakdown right below this table | client + server | `256` |
 | `TcpIdleTimeoutSec` | Idle-eviction timeout for TCP-lane flows; `0` disables idle eviction | client + server | `300` |
 | `TcpConnectTimeoutSec` | Timeout for the server's egress `connect()`; on expiry the client gets HTTP `504` | server | `10` |
 | `TcpMaxGlobalFlows` | Whole-server cap on concurrent egress TCP flows across all sessions | server | `4096` |
 | `EgressAllow` | CIDR allowed through the default-deny egress ACL for private ranges (repeatable, up to 32) | server | — |
 | `EgressDeny` | Additional CIDR to block, evaluated after `EgressAllow` (repeatable, up to 32) | server | — |
+
+#### `TcpMaxFlows` — client vs server
+
+The two sides share the key name and nothing else: what is counted, and what happens when
+the cap is hit, both differ.
+
+| | client | server |
+|---|---|---|
+| Counted in | the lane's own flow table | per client session |
+| Checked | **before lwIP ever sees the SYN** | when the CONNECT-TCP request arrives |
+| Inner TCP terminated | yes, by lwIP inside the lane | no — relayed over ordinary kernel sockets |
+| **Over the cap** | **degraded to the RAW lane** — the connection still works | **HTTP `503`**, and the client then **resets** that inner connection; no RAW fallback at that point |
+| Memory per flow | **~0.75 MiB** (uplink-queue ceiling) | **~8 KiB** (two lazily-allocated 4 KiB relay chunks) plus one fd |
+| Binding resource | RAM — worst case `TcpMaxFlows` × 0.75 MiB (≈ 192 MiB at the default 256, ≈ 3.0 GiB at 4096) | the **fd budget** — `TcpMaxGlobalFlows` is checked first |
+| Clamped | to **half** the lwIP TCP pcb pool (below) | not clamped (no lwIP involved) |
+
+**About the client-side clamp.** The honored value is capped at half the lwIP TCP pcb
+pool — `4096` on desktop/router builds (Linux, Windows, macOS), `256` on Android, `64`
+with the [iOS lwIP profile](./hybrid-mode#ios-builds) — and the clamp is logged when it
+engages. The default of 256 is not clamped on desktop/router (256 < 4096).
+
+**It does not halve your quota.** You may run the full honored number of flows at once.
+The other pool half is headroom for pcbs the flow table has stopped counting — TIME_WAIT,
+LAST_ACK and CLOSING outlive the flow itself. With the cap at half the pool, the pool can
+never fill with live flows alone, so lwIP's `tcp_alloc()` escalation on exhaustion
+(TIME_WAIT → LAST_ACK → CLOSING → **an established pcb**) always finds a victim before
+the last step. That is what makes "the lane's own cap refuses first, cheaply" structural
+rather than a matter of luck.
+
 
 In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `egress_allow`, `egress_deny`).
 

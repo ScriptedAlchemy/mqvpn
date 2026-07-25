@@ -292,12 +292,39 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 |------|------|------|-----------|
 | `Enabled` | マスタースイッチ | client + server | `false` |
 | `Tcp` | フロー単位の TCP レーンポリシー: `stream`（常に使用）、`raw`（不使用 — hybrid 無効時とバイト同一）、`auto`（SYN 時点でアクティブパスが 2 本以上なら TCP レーン。判定はフローの生存期間中固定） | client | `auto` |
-| `TcpMaxFlows` | 同時 TCP レーンフロー数の上限。client: ローカルフローテーブル（超過 SYN は RAW にフォールバック）。server: クライアントセッション単位（超過 SYN は HTTP `503`）。client 側ではさらに lwIP TCP pcb プールの半分に clamp される — デフォルトビルドで `256`、[モバイル lwIP プロファイル](./hybrid-mode)で `64` — clamp 時はログに出力。プールの残り半分はフローテーブルが数えない TIME_WAIT / half-open の pcb 用で、この余裕がないと pcb 枯渇時に新規 SYN が明示的な reject（RST）ではなく無言でハングするため | client + server | `256` |
+| `TcpMaxFlows` | 同時 TCP レーンフロー数の上限。**client と server で実装も失敗時の挙動も異なる** — 詳細はこの表の直下の **client と server で挙動が違う** を参照 | client + server | `256` |
 | `TcpIdleTimeoutSec` | TCP レーンフローのアイドル破棄タイムアウト。`0` で無効化 | client + server | `300` |
 | `TcpConnectTimeoutSec` | サーバの egress `connect()` タイムアウト。超過時クライアントは HTTP `504` を受け取ります | server | `10` |
 | `TcpMaxGlobalFlows` | 全セッション合計の egress TCP フロー数のサーバ全体上限 | server | `4096` |
 | `EgressAllow` | プライベートレンジ向けデフォルト拒否 egress ACL を通す CIDR（繰り返し可、最大 32） | server | — |
 | `EgressDeny` | 追加で拒否する CIDR。`EgressAllow` の後に評価されます（繰り返し可、最大 32） | server | — |
+
+#### `TcpMaxFlows` — client と server で挙動が違う
+
+共通しているのはキー名だけで、数える対象も、上限に当たったときの結果も別物。
+
+| | client | server |
+|---|---|---|
+| 数える場所 | レーン自身のフローテーブル | クライアントセッション単位 |
+| 判定タイミング | **lwIP が SYN を見る前** | CONNECT-TCP 要求の到着時 |
+| 内側 TCP の終端 | lwIP (レーン内) | しない (通常のカーネルソケットで中継) |
+| **上限超過時** | **RAW レーンに降格** — 接続は成立する (失敗ではない) | **HTTP `503`** → client はその内側コネクションを **RST**。この時点で RAW 降格はない |
+| per-flow メモリ | **~0.75 MiB** (uplink キューの上限) | **~8 KiB** (遅延確保の 4 KiB 中継バッファ × 2) + fd 1 本 |
+| 先に尽きる資源 | RAM — worst case は `TcpMaxFlows` × 0.75 MiB (既定 256 で約 192 MiB、4096 で約 3.0 GiB) | **fd 予算** — 全体上限の `TcpMaxGlobalFlows` が先に判定される |
+| 実効値の clamp | lwIP TCP pcb プールの**半分**まで (下記) | なし (lwIP を使わないため) |
+
+**client の clamp について。** 実効値は lwIP TCP pcb プールの半分に制限される —
+desktop/router ビルド (Linux / Windows / macOS) で `4096`、Android で `256`、
+[iOS lwIP プロファイル](./hybrid-mode#ios-ビルド)で `64`。clamp が働いた場合はログに出る。
+既定値 256 は desktop/router では clamp されない (256 < 4096)。
+
+**これは設定値を半分にするものではない。** 実効値ぶんのフローは同時に張れる。プールの
+残り半分は、フローテーブルが数えなくなった pcb (TIME_WAIT / LAST_ACK / CLOSING はフローより
+長生きする) が居座るための余白。この余白があるおかげで、プールが「生きたフローだけ」で
+埋まることが構造的に起こり得ず、lwIP の `tcp_alloc()` が枯渇時に行う段階的な回収
+(TIME_WAIT → LAST_ACK → CLOSING → **確立済み pcb**) が最後の段に到達しない。
+つまり「レーン側の cap が先に安く断る」という設計が、運任せではなく構造で保証される。
+
 
 JSON では `"hybrid"` オブジェクトに snake_case キーで指定します（`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `egress_allow`, `egress_deny`）。
 
