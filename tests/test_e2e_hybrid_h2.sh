@@ -321,6 +321,38 @@ trap 'cleanup_bg_procs; cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROO
 
 fail=0
 
+# ─── Phase filter ─────────────────────────────────────────────────────────
+# "all" (default) runs everything; "perf" runs ONLY Test 2's throughput
+# comparison. CI uses both: a DEBUG build for the functional phases (asserts
+# must stay live — see the NDEBUG note in AGENTS.md) and a RELEASE build for
+# the throughput gate.
+#
+# The split is not cosmetic. Test 2 gates the RATIO of two code paths, and RAW
+# barely touches this project's own code (classifier + datagram, then the
+# already-optimised vendored xquic) while the stream lane runs lwIP's TCP state
+# machine per segment. At -O0 the ratio is therefore dominated by whatever the
+# compiler emits for OUR sources. Measured on one tree, one host, single path,
+# ~1 Gbit/s RAW:
+#
+#   Debug   clang  19.5 / 19.9 / 22.0 / 22.0 / 24.4 %   <- straddles the gate
+#   Debug   gcc    14.6 / 15.1 %
+#   Release clang   9.0 /  9.1 %
+#   Release gcc    -1.1 /  3.8 %
+#
+# A Debug-built gate thus measures the compiler more than the code, and sits
+# close enough to the 20 % threshold to flip on run-to-run noise. The number is
+# still printed in "all" mode (it is useful diagnostics), but only the perf
+# phase treats it as a hard failure.
+HYBRID_H2_PHASES="${HYBRID_H2_PHASES:-all}"
+case "$HYBRID_H2_PHASES" in
+    all | perf) ;;
+    *)
+        echo "error: HYBRID_H2_PHASES must be 'all' or 'perf' (got '$HYBRID_H2_PHASES')" >&2
+        exit 2
+        ;;
+esac
+echo "[hybrid-h2] phases=${HYBRID_H2_PHASES}"
+
 echo "[hybrid-h2] N=$N_PATHS binary=$MQVPN inner-tcp-port=$INNER_TCP_PORT http-target=${HTTP_TARGET_IP}:${HTTP_TARGET_PORT}"
 bench_check_test_deps nc curl python3 jq iperf3 ss
 
@@ -754,6 +786,13 @@ time.sleep(${hold})
     echo $!
 }
 
+# ─── Functional phases, part 1 of 2 (Tests 1-1c, 7A, 7B) ──────────────────
+# Skipped under HYBRID_H2_PHASES=perf. The guarded body is deliberately NOT
+# re-indented: it contains python/awk heredocs whose bodies are
+# indentation-sensitive, so re-indenting ~800 lines would risk changing what
+# those scripts do while burying the actual change. The closing `fi` is marked.
+if [ "$HYBRID_H2_PHASES" = all ]; then
+
 # ─── Test 1: curl body correctness, Enabled=true / Tcp=stream ─────────────
 echo ""
 echo "=== Test 1: curl through the tunnel's TCP lane (body byte-for-byte) ==="
@@ -986,7 +1025,11 @@ fi
 
 bench_stop_vpn
 
+fi # ← end of functional phases, part 1 (opened before Test 1)
+
 # ─── Test 2: single-path throughput, stream lane within 20% of RAW ───────
+# Runs in BOTH phase modes: as diagnostics under "all" (Debug), as the hard
+# gate under "perf" (Release). See the HYBRID_H2_PHASES block near the top.
 echo ""
 echo "=== Test 2: single-path throughput (stream lane vs RAW) ==="
 IPERF_DURATION_T2=6
@@ -1016,14 +1059,24 @@ if awk -v r="$RAW_MBPS" 'BEGIN{exit !(r>0)}'; then
     echo "  degradation: ${DEGRADATION_PCT}% (threshold <=20.0%)"
     if awk -v d="$DEGRADATION_PCT" 'BEGIN{exit !(d<=20.0)}'; then
         echo "PASS: stream lane within 20% of RAW (degradation=${DEGRADATION_PCT}%)"
-    else
+    elif [ "$HYBRID_H2_PHASES" = perf ]; then
         echo "FAIL: stream lane degraded ${DEGRADATION_PCT}% vs RAW (threshold 20.0%)"
         fail=1
+    else
+        # Advisory in the Debug phase — the ratio there tracks -O0 codegen, not
+        # shipped performance (see the HYBRID_H2_PHASES block). The perf phase
+        # is where this becomes a gate.
+        echo "ADVISORY: stream lane degraded ${DEGRADATION_PCT}% vs RAW on this"
+        echo "          DEBUG build — not gated here; the RELEASE perf phase gates it"
     fi
 else
     echo "FAIL: RAW_MBPS=0 — iperf3 RAW baseline measurement failed, cannot compute degradation"
     fail=1
 fi
+
+# ─── Functional phases, part 2 of 2 (Tests 3-6, 8) ────────────────────────
+# Same guard and same non-re-indentation rationale as part 1.
+if [ "$HYBRID_H2_PHASES" = all ]; then
 
 # ─── Test 3: multipath aggregation, stream lane >= 1.5x best single path ──
 echo ""
@@ -1788,6 +1841,8 @@ done
 V6_SOURCE_PID=""; V6_SINK_PID=""
 
 bench_stop_vpn
+
+fi # ← end of functional phases, part 2 (opened before Test 3)
 
 # ─── Verdict ───────────────────────────────────────────────────────────────
 echo ""
