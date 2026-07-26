@@ -146,9 +146,9 @@ fi
 
 # Best-effort version lookup for the banner -- never fatal: on network
 # failure the banner simply omits the version and Step 2 retries fatally.
-VERSION=$(fetch_latest_version 3 2>/dev/null) || VERSION=""
+MQVPN_VERSION=$(fetch_latest_version 3 2>/dev/null) || MQVPN_VERSION=""
 
-print_banner "$VERSION"
+print_banner "$MQVPN_VERSION"
 
 # --- Step 1: Environment checks ---
 info "[1/6] Detecting system..."
@@ -184,12 +184,12 @@ ok "Detected ${PRETTY_NAME:-$ID}, $ARCH"
 # --- Step 2: Download ---
 info "[2/6] Downloading mqvpn..."
 
-if [ -z "$VERSION" ]; then
-    VERSION=$(fetch_latest_version 30) || err "Failed to detect latest version"
+if [ -z "$MQVPN_VERSION" ]; then
+    MQVPN_VERSION=$(fetch_latest_version 30) || err "Failed to detect latest version"
 fi
-[ -n "$VERSION" ] || err "Failed to detect latest version"
+[ -n "$MQVPN_VERSION" ] || err "Failed to detect latest version"
 
-TARBALL="mqvpn_${VERSION}_${ARCH}.tar.gz"
+TARBALL="mqvpn_${MQVPN_VERSION}_${ARCH}.tar.gz"
 DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$TARBALL"
 CHECKSUMS_URL="https://github.com/$REPO/releases/latest/download/SHA256SUMS"
 
@@ -199,7 +199,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 curl -fsSL -o "$WORK_DIR/$TARBALL" "$DOWNLOAD_URL" || err "Failed to download $TARBALL"
 curl -fsSL -o "$WORK_DIR/SHA256SUMS" "$CHECKSUMS_URL" || err "Failed to download SHA256SUMS"
 
-ok "Downloaded mqvpn v$VERSION"
+ok "Downloaded mqvpn v$MQVPN_VERSION"
 
 # --- Step 3: Verify + Install ---
 info "[3/6] Installing to $INSTALL_PREFIX/..."
