@@ -480,6 +480,23 @@ main(int argc, char *argv[])
 #endif
     }
 
+    /* Parse reinjection mode. No CLI flag (config file/JSON only — YAGNI).
+     * Name lookup is the shared table (mqvpn_sched_names.h). Unlike the
+     * scheduler/cc CLI gates above, an unrecognized value here is a WARN +
+     * fallback to "off", not a fatal error: mqvpn_config.c's JSON surface is
+     * the hard-error surface for this key (see that file's parse_reinj_name
+     * call site). */
+    int reinj_lookup = mqvpn_reinj_from_name(file_cfg.reinjection);
+    int reinjection = MQVPN_REINJ_OFF;
+    if (reinj_lookup < 0) {
+        fprintf(stderr,
+                "warning: [Multipath] Reinjection '%s' not recognized "
+                "(expected 'off', 'deadline', 'idle', or 'dgram'); using 'off'\n",
+                file_cfg.reinjection);
+    } else {
+        reinjection = reinj_lookup;
+    }
+
     /* Paths: CLI paths override config paths entirely */
     if (n_paths == 0 && file_cfg.n_paths > 0) {
         n_paths = file_cfg.n_paths;
@@ -537,6 +554,10 @@ main(int argc, char *argv[])
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .cc = cc,
+            .reinjection = reinjection,
+            .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
+            .reinj_hard_deadline_ms = file_cfg.reinjection_hard_deadline_ms,
+            .reinj_deadline_lower_bound_ms = file_cfg.reinjection_deadline_lower_bound_ms,
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,
@@ -592,6 +613,10 @@ main(int argc, char *argv[])
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .cc = cc,
+            .reinjection = reinjection,
+            .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
+            .reinj_hard_deadline_ms = file_cfg.reinjection_hard_deadline_ms,
+            .reinj_deadline_lower_bound_ms = file_cfg.reinjection_deadline_lower_bound_ms,
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,

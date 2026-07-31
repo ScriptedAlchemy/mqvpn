@@ -71,6 +71,8 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
 static void
 mqvpn_apply_reinjection(const mqvpn_conn_settings_input_t *in, xqc_conn_settings_t *cs)
 {
+    /* Invalid/out-of-range values fall back to OFF (same treatment as
+     * mqvpn_apply_scheduler above). */
     mqvpn_reinjection_t mode = in->reinjection;
     if (!mqvpn_reinj_is_valid(mode)) mode = MQVPN_REINJ_OFF;
 

@@ -484,6 +484,17 @@ MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
+
+/* Reinjection (speculative multipath duplication of unacked data). OFF by
+ * default. The deadline-mode params are validated as a group: srtt_factor_pct
+ * in [100,1000] (percent, e.g. 110 = 1.10x srtt), hard_deadline_ms and
+ * deadline_lower_bound_ms in [1,60000]. Values are only consulted when mode
+ * is MQVPN_REINJ_DEADLINE — see mqvpn_conn_settings.c. */
+MQVPN_API int mqvpn_config_set_reinjection(mqvpn_config_t *cfg, mqvpn_reinjection_t mode);
+MQVPN_API int mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg,
+                                                           int srtt_factor_pct,
+                                                           int hard_deadline_ms,
+                                                           int deadline_lower_bound_ms);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
 MQVPN_API int mqvpn_config_set_multipath(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,

@@ -273,6 +273,13 @@ test_reinjection_mapping(void)
     ASSERT_EQ(cs.reinj_hard_deadline, 500000);
     ASSERT_EQ(cs.reinj_deadline_lower_bound, 20000);
 
+    /* negative input pins the `> 0` guard direction: a negative value must
+     * NOT be treated as "explicitly set" and must fall back to the engine
+     * default, same as 0. */
+    in.reinj_hard_deadline_ms = -1;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.reinj_hard_deadline, 500000);
+
     /* dgram: AFTER_SEND only; scheduler_callback must NOT be overridden */
     in.reinjection = MQVPN_REINJ_DGRAM;
     mqvpn_build_conn_settings(&in, &cs);
@@ -286,6 +293,7 @@ test_reinjection_mapping(void)
     in.reinjection = (mqvpn_reinjection_t)99;
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_EQ(cs.mp_enable_reinjection, 0);
+    ASSERT_PTR_EQ(cs.reinj_ctl_callback.xqc_reinj_ctl_can_reinject, NULL);
 
     return 0;
 }

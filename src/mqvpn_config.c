@@ -97,6 +97,16 @@ parse_cc_name(const char *s, mqvpn_cc_t *out)
 }
 
 static int
+parse_reinj_name(const char *s, mqvpn_reinjection_t *out)
+{
+    if (!s || !out) return MQVPN_ERR_INVALID_ARG;
+    int v = mqvpn_reinj_from_name(s);
+    if (v < 0) return MQVPN_ERR_INVALID_ARG;
+    *out = (mqvpn_reinjection_t)v;
+    return MQVPN_OK;
+}
+
+static int
 is_valid_scheduler(mqvpn_scheduler_t sched)
 {
     return mqvpn_sched_is_valid(sched);
@@ -322,6 +332,43 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->cc = cc;
     }
 
+    /* Reinjection — hard error on unrecognized mode / out-of-range numeric
+     * params (unlike the INI/main.c surface, which warns and falls back to
+     * "off"; the JSON surface follows the same hard-error precedent as
+     * "scheduler"/"cc" above). Absent keys keep the off/110/500/20 defaults. */
+    v = json_find_key(json_text, "reinjection");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        mqvpn_reinjection_t reinj = MQVPN_REINJ_OFF;
+        if (parse_reinj_name(tmp, &reinj) != MQVPN_OK) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->reinjection = reinj;
+    }
+
+    v = json_find_key(json_text, "reinjection_srtt_factor_pct");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != 0 || iv < 100 || iv > 1000) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->reinj_srtt_factor_pct = iv;
+    }
+
+    v = json_find_key(json_text, "reinjection_hard_deadline_ms");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != 0 || iv < 1 || iv > 60000) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->reinj_hard_deadline_ms = iv;
+    }
+
+    v = json_find_key(json_text, "reinjection_deadline_lower_bound_ms");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != 0 || iv < 1 || iv > 60000) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->reinj_deadline_lower_bound_ms = iv;
+    }
+
     v = json_find_key(json_text, "reconnect_enable");
     if (v && json_read_bool(v, &iv) == MQVPN_OK) {
         cfg->reconnect_enable = iv;
@@ -401,6 +448,31 @@ mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc)
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     if (!is_valid_cc(cc)) return MQVPN_ERR_INVALID_ARG;
     cfg->cc = cc;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reinjection(mqvpn_config_t *cfg, mqvpn_reinjection_t mode)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (!mqvpn_reinj_is_valid(mode)) return MQVPN_ERR_INVALID_ARG;
+    cfg->reinjection = mode;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg, int srtt_factor_pct,
+                                             int hard_deadline_ms,
+                                             int deadline_lower_bound_ms)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (srtt_factor_pct < 100 || srtt_factor_pct > 1000) return MQVPN_ERR_INVALID_ARG;
+    if (hard_deadline_ms < 1 || hard_deadline_ms > 60000) return MQVPN_ERR_INVALID_ARG;
+    if (deadline_lower_bound_ms < 1 || deadline_lower_bound_ms > 60000)
+        return MQVPN_ERR_INVALID_ARG;
+    cfg->reinj_srtt_factor_pct = srtt_factor_pct;
+    cfg->reinj_hard_deadline_ms = hard_deadline_ms;
+    cfg->reinj_deadline_lower_bound_ms = deadline_lower_bound_ms;
     return MQVPN_OK;
 }
 

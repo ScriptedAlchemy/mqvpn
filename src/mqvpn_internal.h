@@ -57,6 +57,16 @@ struct mqvpn_config_s {
 
     mqvpn_scheduler_t scheduler;
     mqvpn_cc_t cc;
+
+    /* Reinjection (speculative multipath duplication). 0 = OFF (default,
+     * matches calloc). The three numeric fields are only consulted in
+     * DEADLINE mode; 0 there means "engine default" (110/500/20) — see
+     * mqvpn_conn_settings.c. */
+    mqvpn_reinjection_t reinjection;
+    int reinj_srtt_factor_pct;
+    int reinj_hard_deadline_ms;
+    int reinj_deadline_lower_bound_ms;
+
     mqvpn_log_level_t log_level;
     int multipath;
     int reconnect_enable;

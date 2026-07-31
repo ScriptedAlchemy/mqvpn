@@ -1837,9 +1837,33 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .cc = cfg->cc,
         .init_max_path_id = cfg->init_max_path_id,
         /* recv_rate_bytes_per_sec: intentionally absent (=0) — client-only knob */
+        .reinjection = cfg->reinjection,
+        .reinj_srtt_factor_pct = cfg->reinj_srtt_factor_pct,
+        .reinj_hard_deadline_ms = cfg->reinj_hard_deadline_ms,
+        .reinj_deadline_lower_bound_ms = cfg->reinj_deadline_lower_bound_ms,
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
     xqc_server_set_conn_settings(s->engine, &conn_settings);
+
+    if (cfg->reinjection == MQVPN_REINJ_DEADLINE) {
+        LOG_I(s,
+              "reinjection enabled: mode=deadline factor_pct=%d hard_ms=%d lower_ms=%d",
+              cfg->reinj_srtt_factor_pct > 0 ? cfg->reinj_srtt_factor_pct : 110,
+              cfg->reinj_hard_deadline_ms > 0 ? cfg->reinj_hard_deadline_ms : 500,
+              cfg->reinj_deadline_lower_bound_ms > 0 ? cfg->reinj_deadline_lower_bound_ms
+                                                     : 20);
+        if (!s->config.hybrid.enabled) {
+            LOG_W(s, "reinjection mode=deadline protects only stream traffic; hybrid "
+                     "lane is disabled, effect limited to control streams");
+        }
+    } else if (cfg->reinjection == MQVPN_REINJ_IDLE ||
+               cfg->reinjection == MQVPN_REINJ_DGRAM) {
+        LOG_I(s, "reinjection enabled: mode=%s", mqvpn_reinj_to_name(cfg->reinjection));
+        if (cfg->reinjection == MQVPN_REINJ_DGRAM) {
+            LOG_I(s, "reinjection mode=dgram duplicates every datagram: datagram-lane "
+                     "goodput is capped at one path's capacity");
+        }
+    }
 
     /* H3 callbacks */
     xqc_h3_callbacks_t h3_cbs = {
