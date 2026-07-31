@@ -64,6 +64,47 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
     }
 }
 
+/* Wires the stock xquic reinjection ctls. Never touches scheduler_callback:
+ * Scheduler and Reinjection are orthogonal axes (see the design doc; the
+ * xquic datagram_redundancy switch is NOT used precisely because it would
+ * override the scheduler). */
+static void
+mqvpn_apply_reinjection(const mqvpn_conn_settings_input_t *in, xqc_conn_settings_t *cs)
+{
+    mqvpn_reinjection_t mode = in->reinjection;
+    if (!mqvpn_reinj_is_valid(mode)) mode = MQVPN_REINJ_OFF;
+
+    switch (mode) {
+    case MQVPN_REINJ_OFF: break;
+    case MQVPN_REINJ_IDLE:
+        cs->reinj_ctl_callback = xqc_default_reinj_ctl_cb;
+        cs->mp_enable_reinjection = XQC_REINJ_UNACK_AFTER_SCHED;
+        break;
+    case MQVPN_REINJ_DEADLINE:
+        cs->reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
+        /* AFTER_SEND set explicitly rather than relying on xquic's
+         * BEFORE_SCHED auto-add (xqc_conn.c) so the intent is visible here. */
+        cs->mp_enable_reinjection =
+            XQC_REINJ_UNACK_BEFORE_SCHED | XQC_REINJ_UNACK_AFTER_SEND;
+        cs->reinj_flexible_deadline_srtt_factor =
+            (in->reinj_srtt_factor_pct > 0 ? in->reinj_srtt_factor_pct : 110) / 100.0;
+        cs->reinj_hard_deadline =
+            (uint64_t)(in->reinj_hard_deadline_ms > 0 ? in->reinj_hard_deadline_ms
+                                                      : 500) *
+            1000;
+        cs->reinj_deadline_lower_bound =
+            (uint64_t)(in->reinj_deadline_lower_bound_ms > 0
+                           ? in->reinj_deadline_lower_bound_ms
+                           : 20) *
+            1000;
+        break;
+    case MQVPN_REINJ_DGRAM:
+        cs->reinj_ctl_callback = xqc_dgram_reinj_ctl_cb;
+        cs->mp_enable_reinjection = XQC_REINJ_UNACK_AFTER_SEND;
+        break;
+    }
+}
+
 void
 mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settings_t *out)
 {
@@ -135,6 +176,9 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
 
     /* --- scheduler / FEC params --- */
     mqvpn_apply_scheduler(out, in->scheduler);
+
+    /* --- reinjection --- */
+    mqvpn_apply_reinjection(in, out);
 
     /* --- init_max_path_id: 0 = keep xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID=8) ---
      */
