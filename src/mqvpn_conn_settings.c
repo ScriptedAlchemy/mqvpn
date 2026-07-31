@@ -99,6 +99,12 @@ mqvpn_apply_reinjection(const mqvpn_conn_settings_input_t *in, xqc_conn_settings
                            ? in->reinj_deadline_lower_bound_ms
                            : 20) *
             1000;
+        /* xquic computes max(min(factor*min_srtt, hard), lower) — an
+         * unclamped lower > hard would silently dominate the max() and
+         * defeat the documented "hard is the upper clamp" semantics. */
+        if (cs->reinj_deadline_lower_bound > cs->reinj_hard_deadline) {
+            cs->reinj_deadline_lower_bound = cs->reinj_hard_deadline;
+        }
         break;
     case MQVPN_REINJ_DGRAM:
         cs->reinj_ctl_callback = xqc_dgram_reinj_ctl_cb;

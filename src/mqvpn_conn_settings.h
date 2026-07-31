@@ -21,22 +21,24 @@ typedef struct {
     bool is_server;
     bool enable_multipath; /* server callers pass true */
     mqvpn_scheduler_t scheduler;
-    mqvpn_cc_t cc;                     /* congestion control algorithm */
-    uint64_t init_max_path_id;         /* 0 = leave xquic default */
-    uint64_t recv_rate_bytes_per_sec;  /* 0 = no cap. Client-only: the
-         builder hard-zeroes it for servers (a server-side conn-level cap
-         would throttle client uplink). */
-    mqvpn_reinjection_t reinjection;   /* MQVPN_REINJ_OFF = feature disabled */
-    int reinj_srtt_factor_pct;         /* deadline mode; 0 = engine default (110).
-         The config layer validates this to [100,1000] and never passes 0
-         through, so 0 can only arrive via a direct API caller bypassing
-         config parsing. */
-    int reinj_hard_deadline_ms;        /* deadline mode; 0 = engine default (500).
-         Same 0-only-via-direct-API-caller note as reinj_srtt_factor_pct
-         (config layer validates [1,60000] and never passes 0 through). */
-    int reinj_deadline_lower_bound_ms; /* deadline mode; 0 = engine default (20).
-         Same 0-only-via-direct-API-caller note as reinj_srtt_factor_pct
-         (config layer validates [1,60000] and never passes 0 through). */
+    mqvpn_cc_t cc;                    /* congestion control algorithm */
+    uint64_t init_max_path_id;        /* 0 = leave xquic default */
+    uint64_t recv_rate_bytes_per_sec; /* 0 = no cap. Client-only: the
+        builder hard-zeroes it for servers (a server-side conn-level cap
+        would throttle client uplink). */
+    mqvpn_reinjection_t reinjection;  /* MQVPN_REINJ_OFF = feature disabled */
+    /* reinj_srtt_factor_pct / reinj_hard_deadline_ms /
+     * reinj_deadline_lower_bound_ms: deadline mode only; 0 = engine default
+     * (110 / 500 / 20 respectively). The config layer validates these to
+     * [100,1000] / [1,60000] / [1,60000] and never passes 0 through, so 0
+     * can only arrive via a direct API caller bypassing config parsing —
+     * and any other out-of-range NONZERO value is likewise that caller's
+     * responsibility to have validated; the builder only handles the
+     * 0-means-default fallback and clamps reinj_deadline_lower_bound_ms
+     * down to reinj_hard_deadline_ms when it would otherwise exceed it. */
+    int reinj_srtt_factor_pct;
+    int reinj_hard_deadline_ms;
+    int reinj_deadline_lower_bound_ms;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins

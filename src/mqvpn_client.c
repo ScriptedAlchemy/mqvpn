@@ -2621,13 +2621,14 @@ cli_start_connection(mqvpn_client_t *c)
     mqvpn_build_conn_settings(&cs_input, &cs);
 
     if (c->config.reinjection == MQVPN_REINJ_DEADLINE) {
-        LOG_I(
-            c, "reinjection enabled: mode=deadline factor_pct=%d hard_ms=%d lower_ms=%d",
-            c->config.reinj_srtt_factor_pct > 0 ? c->config.reinj_srtt_factor_pct : 110,
-            c->config.reinj_hard_deadline_ms > 0 ? c->config.reinj_hard_deadline_ms : 500,
-            c->config.reinj_deadline_lower_bound_ms > 0
-                ? c->config.reinj_deadline_lower_bound_ms
-                : 20);
+        /* Read back from the just-built cs, not the raw config: this
+         * reflects the 0->default fallback AND the lower<=hard clamp
+         * applied in mqvpn_apply_reinjection(). */
+        LOG_I(c,
+              "reinjection enabled: mode=deadline factor_pct=%d hard_ms=%d lower_ms=%d",
+              (int)(cs.reinj_flexible_deadline_srtt_factor * 100 + 0.5),
+              (int)(cs.reinj_hard_deadline / 1000),
+              (int)(cs.reinj_deadline_lower_bound / 1000));
         if (!c->config.hybrid.enabled) {
             LOG_W(c, "reinjection mode=deadline protects only stream traffic; hybrid "
                      "lane is disabled, effect limited to control streams");

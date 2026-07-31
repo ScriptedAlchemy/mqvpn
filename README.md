@@ -346,7 +346,7 @@ or more active paths — silently inactive with only one.
 Reinjection = off                     # off (default) | deadline | idle | dgram
 ReinjectionSrttFactorPct = 110        # deadline mode: duplicate an unacked packet older than factor x min_srtt (100-1000; 110 = 1.1x)
 ReinjectionHardDeadlineMs = 500       # deadline mode: upper clamp (1-60000)
-ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000)
+ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; clamped down to the hard deadline if it would exceed it)
 ```
 
 - `deadline` — for aggregation tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane): cuts path-degradation stalls from PTO-scale (hundreds of ms) down to roughly one RTT, with near-zero overhead on healthy paths. Protects stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.

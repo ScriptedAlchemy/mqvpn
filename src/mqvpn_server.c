@@ -1846,12 +1846,14 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     xqc_server_set_conn_settings(s->engine, &conn_settings);
 
     if (cfg->reinjection == MQVPN_REINJ_DEADLINE) {
+        /* Read back from the just-built conn_settings, not the raw config:
+         * this reflects the 0->default fallback AND the lower<=hard clamp
+         * applied in mqvpn_apply_reinjection(). */
         LOG_I(s,
               "reinjection enabled: mode=deadline factor_pct=%d hard_ms=%d lower_ms=%d",
-              cfg->reinj_srtt_factor_pct > 0 ? cfg->reinj_srtt_factor_pct : 110,
-              cfg->reinj_hard_deadline_ms > 0 ? cfg->reinj_hard_deadline_ms : 500,
-              cfg->reinj_deadline_lower_bound_ms > 0 ? cfg->reinj_deadline_lower_bound_ms
-                                                     : 20);
+              (int)(conn_settings.reinj_flexible_deadline_srtt_factor * 100 + 0.5),
+              (int)(conn_settings.reinj_hard_deadline / 1000),
+              (int)(conn_settings.reinj_deadline_lower_bound / 1000));
         if (!s->config.hybrid.enabled) {
             LOG_W(s, "reinjection mode=deadline protects only stream traffic; hybrid "
                      "lane is disabled, effect limited to control streams");
