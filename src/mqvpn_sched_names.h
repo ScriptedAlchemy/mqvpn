@@ -43,6 +43,12 @@
     X(MQVPN_CC_CUBIC, "cubic") \
     X(MQVPN_CC_NONE, "none")
 
+#define MQVPN_REINJ_LIST(X)             \
+    X(MQVPN_REINJ_OFF, "off")           \
+    X(MQVPN_REINJ_DEADLINE, "deadline") \
+    X(MQVPN_REINJ_IDLE, "idle")         \
+    X(MQVPN_REINJ_DGRAM, "dgram")
+
 /* mqvpn_sched_from_name: returns the enum value, or -1 if unrecognized. */
 static inline int
 mqvpn_sched_from_name(const char *s)
@@ -114,6 +120,32 @@ case enum_val: return 1;
         MQVPN_CC_LIST(MQVPN_CC_VALID_CASE)
 #undef MQVPN_CC_VALID_CASE
     default: return 0;
+    }
+}
+
+/* mqvpn_reinj_from_name: returns the enum value, or -1 if unrecognized. */
+static inline int
+mqvpn_reinj_from_name(const char *s)
+{
+    if (!s) return -1;
+#define MQVPN_REINJ_FROM_NAME_CASE(enum_val, str) \
+    if (strcmp(s, str) == 0) return (int)(enum_val);
+    MQVPN_REINJ_LIST(MQVPN_REINJ_FROM_NAME_CASE)
+#undef MQVPN_REINJ_FROM_NAME_CASE
+    return -1;
+}
+
+/* mqvpn_reinj_to_name: canonical name for status/log use. Returns "unknown"
+ * for any value outside the table. */
+static inline const char *
+mqvpn_reinj_to_name(mqvpn_reinjection_t reinj)
+{
+    switch (reinj) {
+#define MQVPN_REINJ_TO_NAME_CASE(enum_val, str) \
+case enum_val: return str;
+        MQVPN_REINJ_LIST(MQVPN_REINJ_TO_NAME_CASE)
+#undef MQVPN_REINJ_TO_NAME_CASE
+    default: return "unknown";
     }
 }
 

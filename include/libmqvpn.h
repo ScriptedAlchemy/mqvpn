@@ -103,6 +103,13 @@ typedef enum {
     MQVPN_SCHED_WLB_UDP_PIN = 3, /* WLB + 5-tuple pin for UDP flows. */
 } mqvpn_scheduler_t;
 
+typedef enum {
+    MQVPN_REINJ_OFF = 0,
+    MQVPN_REINJ_DEADLINE = 1, /* stream lane: lateness + LOW-class duplication */
+    MQVPN_REINJ_IDLE = 2,     /* stream lane: duplicate unacked when send queue idle */
+    MQVPN_REINJ_DGRAM = 3,    /* datagram lane: duplicate every DATAGRAM once */
+} mqvpn_reinjection_t;
+
 /* Flow-aware reorder-only datagram delivery (see reorder design spec).
  * AUTO is deferred to a later phase and will be appended as = 2. */
 typedef enum {
