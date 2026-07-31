@@ -226,12 +226,26 @@ start_server_with_flags() {
     kill "$_BENCH_SERVER_PID" 2>/dev/null || true
     wait "$_BENCH_SERVER_PID" 2>/dev/null || true
 
+    # --auth-key is intentionally NOT taken from the caller's argv here: it
+    # must expand AFTER bench_start_vpn_server's re-roll above (it calls
+    # --genkey internally on every invocation, benchmarks/bench_env_setup.sh:284,
+    # starting from "" at line 56). A caller-supplied "--auth-key $_BENCH_PSK"
+    # expands at the CALLER's call time — before this function re-rolls it —
+    # so it either passes the empty initial value (scenario "off": server
+    # dies with "auth is required") or the PREVIOUS scenario's stale PSK
+    # while the client (evaluated later) picks up the NEW one, producing an
+    # auth mismatch. The copied reference (run_control_api_test.sh) avoids
+    # this by seeding the PSK once per phase and using relaunch_server_in_ns
+    # (no bench_start_vpn_server re-roll) for every subsequent relaunch in
+    # that phase; our per-scenario full netns rebuild doesn't fit that
+    # shape, so instead we always take the freshly-rolled $_BENCH_PSK here.
     ip netns exec "$NS_SERVER" "$MQVPN" --mode server \
         --listen "0.0.0.0:${VPN_LISTEN_PORT}" \
         --subnet 10.0.0.0/24 \
         --cert "$_BENCH_WORK_DIR/server.crt" \
         --key "$_BENCH_WORK_DIR/server.key" \
         --log-level "$BENCH_LOG_LEVEL" \
+        --auth-key "$_BENCH_PSK" \
         "$@" \
         >"$server_log" 2>&1 &
     _BENCH_SERVER_PID=$!
@@ -358,7 +372,6 @@ _off_body() {
     bench_setup_netns
 
     start_server_with_flags "$server_log" \
-        --auth-key "$_BENCH_PSK" \
         --control-port "$CTRL_PORT" \
         || return 1
 
@@ -485,7 +498,6 @@ EOF
     apply_path_netem 1 "$baseline_b"
 
     start_server_with_flags "$server_log" \
-        --auth-key "$_BENCH_PSK" \
         --control-port "$CTRL_PORT" \
         --config "$ini" \
         || return 1
@@ -607,7 +619,6 @@ Reinjection = dgram
 EOF
 
     start_server_with_flags "$server_log" \
-        --auth-key "$_BENCH_PSK" \
         --control-port "$CTRL_PORT" \
         --config "$ini" \
         || return 1
