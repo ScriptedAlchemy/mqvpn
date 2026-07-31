@@ -280,9 +280,7 @@ test_reinjection_mapping(void)
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_EQ(cs.reinj_hard_deadline, 500000);
 
-    /* lower bound configured above the hard deadline is clamped down to it
-     * (xquic computes max(min(factor*min_srtt, hard), lower); an unclamped
-     * lower > hard would silently dominate). */
+    /* lower > hard clamps down to hard; rationale on mqvpn_apply_reinjection */
     in.reinj_hard_deadline_ms = 100;
     in.reinj_deadline_lower_bound_ms = 200;
     mqvpn_build_conn_settings(&in, &cs);

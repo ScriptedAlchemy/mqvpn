@@ -511,7 +511,7 @@ EOF
     # sample point); a single-shot version is the likeliest flake in this
     # file, so a failed arming attempt restores the baseline netem on path
     # 0 and retries once before failing the scenario.
-    local max_bytes=-1
+    local max_bytes=0
     local armed=0
     local attempt
     for attempt in 1 2; do
@@ -523,11 +523,19 @@ EOF
 
         # Per-attempt baseline: the counter is cumulative across the
         # connection, so without a baseline, attempt 2 could false-pass on
-        # attempt 1's bytes. max_reinject_tx_bytes's -1 (no paths) reads as 0.
+        # attempt 1's bytes. A failed/unparseable capture fails the ATTEMPT
+        # (substituting 0 would resurrect the same false-pass).
         local baseline_resp baseline_bytes
-        baseline_resp=$(ctrl_local '{"cmd":"get_status"}') || baseline_resp=""
+        if ! baseline_resp=$(ctrl_local '{"cmd":"get_status"}'); then
+            echo "  deadline attempt ${attempt}: baseline capture failed; failing attempt" >&2
+            continue
+        fi
         baseline_bytes=$(max_reinject_tx_bytes "$baseline_resp")
-        if (( baseline_bytes < 0 )); then baseline_bytes=0; fi
+        if ! [[ "$baseline_bytes" =~ ^-?[0-9]+$ ]]; then
+            echo "  deadline attempt ${attempt}: baseline unparseable; failing attempt" >&2
+            continue
+        fi
+        if (( baseline_bytes < 0 )); then baseline_bytes=0; fi  # -1 = no paths yet
 
         # Download in the background (server -> client bytes, by
         # construction of an HTTP GET response body), then degrade the

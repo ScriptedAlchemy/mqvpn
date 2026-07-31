@@ -106,6 +106,20 @@ parse_reinj_name(const char *s, mqvpn_reinjection_t *out)
     return MQVPN_OK;
 }
 
+/* Shared by the JSON loader and the public setter (ranges must not drift
+ * between the two; the INI layer keeps its own cfgk_* validators). */
+static int
+reinj_factor_pct_ok(int v)
+{
+    return v >= 100 && v <= 1000;
+}
+
+static int
+reinj_deadline_ms_ok(int v)
+{
+    return v >= 1 && v <= 60000;
+}
+
 static int
 is_valid_scheduler(mqvpn_scheduler_t sched)
 {
@@ -347,7 +361,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "reinjection_srtt_factor_pct");
     if (v) {
-        if (json_read_int_strict(v, &iv) != 0 || iv < 100 || iv > 1000) {
+        if (json_read_int_strict(v, &iv) != 0 || !reinj_factor_pct_ok(iv)) {
             return MQVPN_ERR_INVALID_ARG;
         }
         cfg->reinj_srtt_factor_pct = iv;
@@ -355,7 +369,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "reinjection_hard_deadline_ms");
     if (v) {
-        if (json_read_int_strict(v, &iv) != 0 || iv < 1 || iv > 60000) {
+        if (json_read_int_strict(v, &iv) != 0 || !reinj_deadline_ms_ok(iv)) {
             return MQVPN_ERR_INVALID_ARG;
         }
         cfg->reinj_hard_deadline_ms = iv;
@@ -363,7 +377,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "reinjection_deadline_lower_bound_ms");
     if (v) {
-        if (json_read_int_strict(v, &iv) != 0 || iv < 1 || iv > 60000) {
+        if (json_read_int_strict(v, &iv) != 0 || !reinj_deadline_ms_ok(iv)) {
             return MQVPN_ERR_INVALID_ARG;
         }
         cfg->reinj_deadline_lower_bound_ms = iv;
@@ -466,10 +480,9 @@ mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg, int srtt_facto
                                              int deadline_lower_bound_ms)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
-    if (srtt_factor_pct < 100 || srtt_factor_pct > 1000) return MQVPN_ERR_INVALID_ARG;
-    if (hard_deadline_ms < 1 || hard_deadline_ms > 60000) return MQVPN_ERR_INVALID_ARG;
-    if (deadline_lower_bound_ms < 1 || deadline_lower_bound_ms > 60000)
-        return MQVPN_ERR_INVALID_ARG;
+    if (!reinj_factor_pct_ok(srtt_factor_pct)) return MQVPN_ERR_INVALID_ARG;
+    if (!reinj_deadline_ms_ok(hard_deadline_ms)) return MQVPN_ERR_INVALID_ARG;
+    if (!reinj_deadline_ms_ok(deadline_lower_bound_ms)) return MQVPN_ERR_INVALID_ARG;
     cfg->reinj_srtt_factor_pct = srtt_factor_pct;
     cfg->reinj_hard_deadline_ms = hard_deadline_ms;
     cfg->reinj_deadline_lower_bound_ms = deadline_lower_bound_ms;
