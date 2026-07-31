@@ -336,14 +336,15 @@ LTE); for symmetric, loss-dominated paths leave it off. See
 
 Speculatively duplicates packets onto a second active path via xquic's stock
 reinjection controllers, trading some redundant bytes for lower tail latency
-or loss masking. Off by default; sender-side only, so to protect
-downstream traffic set it on the **server**. Requires multipath with two or
-more active paths — silently inactive with only one.
+or loss masking. Off by default. Sender-side only — each side's setting
+protects the traffic it *sends*, so set it on the **server** to protect
+download traffic (and on the client for upload). Requires multipath with two
+or more active paths — silently inactive with only one.
 
 ```ini
 [Multipath]
 Reinjection = off                     # off (default) | deadline | idle | dgram
-ReinjectionSrttFactorPct = 110        # deadline mode: duplicate an unacked packet once older than factor x min_srtt (100-1000, default: 110 = 1.1x)
+ReinjectionSrttFactorPct = 110        # deadline mode: duplicate an unacked packet older than factor x min_srtt (100-1000; 110 = 1.1x)
 ReinjectionHardDeadlineMs = 500       # deadline mode: upper clamp (1-60000)
 ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000)
 ```
@@ -352,8 +353,8 @@ ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000)
 - `idle` — opportunistic tail-latency trim for interactive traffic: duplicates unacked stream data only when the send queue is idle. No tunables.
 - `dgram` — full datagram duplication for dedicated real-time tunnels (VoIP, gaming): per-packet loss masking and hitless path failover. **Not recommended for mixed tunnels** — it duplicates all inner-UDP traffic, including HTTP/3 video, which caps datagram-lane goodput at a single path's capacity. Duplicates are delivered twice at the receiver's TUN unless the [reorder buffer](#reorder-buffer-datagram-lane) is enabled (it dedups them); plain inner UDP apps may otherwise observe duplicate packets.
 
-Effective per-path duplicated bytes are observable as `reinject_tx_bytes` in
-the control API `get_status` response.
+Per-path duplicated bytes are reported as `reinject_tx_bytes` in the control
+API `get_status` response.
 
 ## Hybrid mode (TCP lane)
 
