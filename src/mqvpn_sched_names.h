@@ -149,6 +149,18 @@ case enum_val: return str;
     }
 }
 
+static inline int
+mqvpn_reinj_is_valid(mqvpn_reinjection_t reinj)
+{
+    switch (reinj) {
+#define MQVPN_REINJ_VALID_CASE(enum_val, str) \
+case enum_val: return 1;
+        MQVPN_REINJ_LIST(MQVPN_REINJ_VALID_CASE)
+#undef MQVPN_REINJ_VALID_CASE
+    default: return 0;
+    }
+}
+
 /* Compile-time coverage check: this switch has no `default`, so -Wswitch
  * (built with -Werror in the project's CI sanitizer job, see AGENTS.md G11)
  * turns "a new mqvpn_scheduler_t enumerator was added to libmqvpn.h but not
@@ -177,6 +189,17 @@ mqvpn_cc_list_covers_enum_(mqvpn_cc_t cc)
 case enum_val: break;
         MQVPN_CC_LIST(MQVPN_CC_COVERAGE_CASE)
 #undef MQVPN_CC_COVERAGE_CASE
+    }
+}
+
+static inline void
+mqvpn_reinj_list_covers_enum_(mqvpn_reinjection_t reinj)
+{
+    switch (reinj) {
+#define MQVPN_REINJ_COVERAGE_CASE(enum_val, str) \
+case enum_val: break;
+        MQVPN_REINJ_LIST(MQVPN_REINJ_COVERAGE_CASE)
+#undef MQVPN_REINJ_COVERAGE_CASE
     }
 }
 
