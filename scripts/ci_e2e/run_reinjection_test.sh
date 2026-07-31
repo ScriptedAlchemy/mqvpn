@@ -5,7 +5,7 @@
 #
 # Reinjection (speculative multipath duplication of unacked data,
 # MQVPN_REINJ_* in include/libmqvpn.h) has no CLI flag — config file/JSON
-# only (see src/main.c:483-497) — so every non-"off" scenario here drives
+# only (see the reinjection block in main.c) — so every non-"off" scenario here drives
 # both endpoints via --config.
 #
 # Traffic direction is server -> client in every scenario, so the SERVER
@@ -20,7 +20,7 @@
 #                  never appears on either end.
 #   2. deadline  — [Multipath] Reinjection = deadline on BOTH sides, with
 #                  [Hybrid] Enabled=true / Tcp=stream so the stream lane is
-#                  live (mqvpn_client.c:2631 / mqvpn_server.c:1855 both warn
+#                  live (the post-build_conn_settings log blocks in mqvpn_client.c / mqvpn_server.c both warn
 #                  that deadline mode "protects only stream traffic" without
 #                  the hybrid lane enabled). A file is downloaded from the
 #                  server's egress target over the hybrid TCP lane (the HTTP
@@ -43,12 +43,12 @@
 #   3. dgram     — [Multipath] Reinjection = dgram on BOTH sides, [Hybrid]
 #                  left disabled (default) so the connect-ip datagram lane
 #                  carries inner traffic, and [Reorder] left at its default
-#                  OFF (MQVPN_REORDER_OFF, src/reorder.h:570) — the reorder
+#                  OFF (MQVPN_REORDER_OFF default in reorder.h) — the reorder
 #                  shim would dedup the duplicate datagrams dgram-mode
 #                  produces at the tun, and this scenario is meant to
 #                  exercise the documented un-deduped tun semantics.
 #                  MQVPN_REINJ_DGRAM duplicates every DATAGRAM
-#                  unconditionally (include/libmqvpn.h:110), so no netem
+#                  unconditionally (MQVPN_REINJ_DGRAM in libmqvpn.h), so no netem
 #                  degradation is needed to arm it — a sustained inner UDP
 #                  flow (iperf3 -u), server -> client, is enough. Asserts
 #                  the workload completes, inner reachability survives it,
@@ -303,7 +303,7 @@ apply_path_netem() {
 }
 
 # Parse the first client's assigned tunnel IP out of the server log's
-# "ADDRESS_ASSIGN: client=<ip>/32" marker (mqvpn_server.c:810 — same
+# "ADDRESS_ASSIGN: client=<ip>/32" marker (the ADDRESS_ASSIGN log in mqvpn_server.c — same
 # convention scripts/ci_e2e/run_ipv6_dataplane_test.sh greps for). Falls
 # back to the well-known first-client address (10.0.0.2) if the marker
 # hasn't landed yet.
@@ -499,7 +499,7 @@ EOF
     echo "  deadline: tunnel up"
 
     # Both ends log the deadline marker at connection-setup time
-    # (mqvpn_server.c:1849 / mqvpn_client.c:2624) — must be present by now.
+    # (the post-build_conn_settings log blocks in mqvpn_server.c / mqvpn_client.c) — must be present by now.
     if ! grep -q "reinjection enabled: mode=deadline" "$server_log"; then
         echo "  FAIL: server log missing 'reinjection enabled: mode=deadline'"
         return 1
@@ -597,8 +597,8 @@ _dgram_body() {
 
     # [Hybrid] and [Reorder] intentionally omitted: default Hybrid is
     # disabled (so inner traffic rides the connect-ip DATAGRAM lane —
-    # dgram-mode reinjection's target, per include/libmqvpn.h:110), and
-    # default Reorder is OFF (src/reorder.h:570) — the shim would dedup
+    # dgram-mode reinjection's target, per MQVPN_REINJ_DGRAM in libmqvpn.h), and
+    # default Reorder is OFF (MQVPN_REORDER_OFF default in reorder.h) — the shim would dedup
     # dgram-mode's duplicate datagrams at the tun, and this scenario
     # exercises the documented un-deduped semantics with it off.
     cat >"$ini" <<EOF
