@@ -34,20 +34,11 @@
 #                  transfer still completes byte-identical and that at
 #                  least one server-side path shows reinject_tx_bytes > 0,
 #                  sampled while the client is still connected (closed
-#                  paths drop out of the get_status snapshot). The
-#                  download/degrade/sample cycle is wrapped in a 2-attempt
-#                  retry (restoring the baseline netem between attempts) —
-#                  arming a lateness-triggered path is inherently timing
-#                  sensitive, so a single-shot version is the likeliest CI
-#                  flake in this file.
+#                  paths drop out of the get_status snapshot). Retry
+#                  rationale: see _deadline_body.
 #   3. dgram     — [Multipath] Reinjection = dgram on BOTH sides, [Hybrid]
-#                  left disabled (default) so the connect-ip datagram lane
-#                  carries inner traffic, and [Reorder] left at its default
-#                  OFF (MQVPN_REORDER_OFF default in reorder.h) — the reorder
-#                  shim would dedup the duplicate datagrams dgram-mode
-#                  produces at the tun, and this scenario is meant to
-#                  exercise the documented un-deduped tun semantics.
-#                  MQVPN_REINJ_DGRAM duplicates every DATAGRAM
+#                  left disabled (default). Reorder-off rationale: see
+#                  _dgram_body. MQVPN_REINJ_DGRAM duplicates every DATAGRAM
 #                  unconditionally (MQVPN_REINJ_DGRAM in libmqvpn.h), so no netem
 #                  degradation is needed to arm it — a sustained inner UDP
 #                  flow (iperf3 -u), server -> client, is enough. Asserts
@@ -226,19 +217,11 @@ start_server_with_flags() {
     kill "$_BENCH_SERVER_PID" 2>/dev/null || true
     wait "$_BENCH_SERVER_PID" 2>/dev/null || true
 
-    # --auth-key is intentionally NOT taken from the caller's argv here: it
-    # must expand AFTER bench_start_vpn_server's re-roll above (it calls
-    # --genkey internally on every invocation, benchmarks/bench_env_setup.sh:284,
-    # starting from "" at line 56). A caller-supplied "--auth-key $_BENCH_PSK"
-    # expands at the CALLER's call time — before this function re-rolls it —
-    # so it either passes the empty initial value (scenario "off": server
-    # dies with "auth is required") or the PREVIOUS scenario's stale PSK
-    # while the client (evaluated later) picks up the NEW one, producing an
-    # auth mismatch. The copied reference (run_control_api_test.sh) avoids
-    # this by seeding the PSK once per phase and using relaunch_server_in_ns
-    # (no bench_start_vpn_server re-roll) for every subsequent relaunch in
-    # that phase; our per-scenario full netns rebuild doesn't fit that
-    # shape, so instead we always take the freshly-rolled $_BENCH_PSK here.
+    # --auth-key is NOT taken from the caller's argv: bench_start_vpn_server
+    # re-rolls $_BENCH_PSK on every call (--genkey internally), so a
+    # caller-supplied value would expand before the re-roll and pass either
+    # the empty initial value or a stale PSK. Always use the freshly-rolled
+    # $_BENCH_PSK here, after the re-roll above.
     ip netns exec "$NS_SERVER" "$MQVPN" --mode server \
         --listen "0.0.0.0:${VPN_LISTEN_PORT}" \
         --subnet 10.0.0.0/24 \
@@ -409,18 +392,17 @@ _off_body() {
         echo "  get_status failed: $resp"; return 1
     fi
 
-    local occ zero
-    occ=$(grep -o '"reinject_tx_bytes"' <<<"$resp" | wc -l)
-    zero=$(grep -o '"reinject_tx_bytes":0' <<<"$resp" | wc -l)
-    if (( occ == 0 )); then
+    local max_bytes
+    max_bytes=$(max_reinject_tx_bytes "$resp")
+    if (( max_bytes < 0 )); then
         echo "  FAIL: no reinject_tx_bytes fields in get_status (no paths?): $resp"
         return 1
     fi
-    if (( occ != zero )); then
-        echo "  FAIL: reinject_tx_bytes nonzero while Reinjection=off ($zero/$occ zero): $resp"
+    if (( max_bytes != 0 )); then
+        echo "  FAIL: reinject_tx_bytes nonzero while Reinjection=off (max=$max_bytes): $resp"
         return 1
     fi
-    echo "  off: reinject_tx_bytes all zero across $occ path(s): OK"
+    echo "  off: reinject_tx_bytes all zero: OK"
 
     return 0
 }
@@ -530,6 +512,7 @@ EOF
     # file, so a failed arming attempt restores the baseline netem on path
     # 0 and retries once before failing the scenario.
     local max_bytes=-1
+    local armed=0
     local attempt
     for attempt in 1 2; do
         if (( attempt > 1 )); then
@@ -537,6 +520,14 @@ EOF
             apply_path_netem 0 "$baseline_a"
             sleep 1
         fi
+
+        # Per-attempt baseline: the counter is cumulative across the
+        # connection, so without a baseline, attempt 2 could false-pass on
+        # attempt 1's bytes. max_reinject_tx_bytes's -1 (no paths) reads as 0.
+        local baseline_resp baseline_bytes
+        baseline_resp=$(ctrl_local '{"cmd":"get_status"}') || baseline_resp=""
+        baseline_bytes=$(max_reinject_tx_bytes "$baseline_resp")
+        if (( baseline_bytes < 0 )); then baseline_bytes=0; fi
 
         # Download in the background (server -> client bytes, by
         # construction of an HTTP GET response body), then degrade the
@@ -565,19 +556,21 @@ EOF
 
         # Sample reinject_tx_bytes WHILE paths are still live — the client
         # is still connected at this point, so no path has dropped out of
-        # the get_status snapshot yet.
+        # the get_status snapshot yet. Armed only if this SAME attempt's
+        # post-download counter exceeds its own pre-download baseline.
         local resp
         resp=$(ctrl_local '{"cmd":"get_status"}') || continue
         max_bytes=$(max_reinject_tx_bytes "$resp")
-        if (( max_bytes > 0 )); then
-            echo "  deadline: attempt $attempt armed reinjection (reinject_tx_bytes=$max_bytes)"
+        if (( max_bytes > baseline_bytes )); then
+            armed=1
+            echo "  deadline: attempt $attempt armed reinjection (reinject_tx_bytes=$max_bytes, baseline=$baseline_bytes)"
             break
         fi
-        echo "  deadline attempt $attempt: transfer OK but reinjection not armed (max reinject_tx_bytes=$max_bytes)"
+        echo "  deadline attempt $attempt: transfer OK but reinjection not armed (reinject_tx_bytes=$max_bytes, baseline=$baseline_bytes)"
     done
 
-    if (( max_bytes <= 0 )); then
-        echo "  FAIL: no path shows reinject_tx_bytes > 0 after 2 attempts"
+    if (( armed != 1 )); then
+        echo "  FAIL: no path shows reinject_tx_bytes increase over its per-attempt baseline after 2 attempts"
         echo "  --- server_log reinjection lines (last 5) ---"
         grep 'reinjection' "$server_log" | tail -5
         return 1

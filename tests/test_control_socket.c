@@ -399,9 +399,10 @@ test_get_status_reinject_matched_path_id(void)
     CHECK_HAS("\"reinject_tx_bytes\":99999");
 }
 
-/* Alignment semantics (b): a mismatched/absent path_id in the reinject
- * snapshot emits "reinject_tx_bytes":0 — the field is always present so the
- * JSON shape stays constant regardless of match. */
+/* Alignment semantics (b): a mismatched or wholly absent path_id in the
+ * reinject snapshot both emit "reinject_tx_bytes":0 — the field is always
+ * present so the JSON shape stays constant regardless of match. Two phases
+ * pin the same constant-shape outcome from two different snapshot states. */
 static void
 test_get_status_reinject_mismatched_path_id(void)
 {
@@ -413,6 +414,7 @@ test_get_status_reinject_mismatched_path_id(void)
     g_client_info_tmpl.paths[0].state = 2;
     g_client_info_n = 1;
 
+    /* Phase 1: reinject snapshot has an entry, but its path_id mismatches. */
     memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
     g_reinject_tmpl.n_paths = 1;
     g_reinject_tmpl.paths[0].path_id = 42; /* mismatch vs client path_id 7 */
@@ -421,21 +423,8 @@ test_get_status_reinject_mismatched_path_id(void)
     call("{\"cmd\":\"get_status\"}");
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"reinject_tx_bytes\":0");
-}
 
-/* Alignment semantics (b), absent case: no reinject entry filled at all
- * (n_paths == 0) still yields the constant "reinject_tx_bytes":0 shape. */
-static void
-test_get_status_reinject_absent(void)
-{
-    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
-    strcpy(g_client_info_tmpl.username, "alice");
-    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
-    g_client_info_tmpl.n_paths = 1;
-    g_client_info_tmpl.paths[0].path_id = 7;
-    g_client_info_tmpl.paths[0].state = 2;
-    g_client_info_n = 1;
-
+    /* Phase 2: reinject snapshot has no entry at all (n_paths == 0). */
     memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl)); /* n_paths = 0 */
 
     call("{\"cmd\":\"get_status\"}");
@@ -573,7 +562,6 @@ main(void)
     test_get_status_one_client_with_path();
     test_get_status_reinject_matched_path_id();
     test_get_status_reinject_mismatched_path_id();
-    test_get_status_reinject_absent();
 
     test_get_build_info();
 

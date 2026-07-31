@@ -243,11 +243,8 @@ MQVPN_INTERNAL int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c,
  * (xqc_path_metrics_t.path_send_reinject_bytes). INTERNAL — not in public
  * libmqvpn.h. mqvpn_path_stats_t (the public per-path struct embedded in
  * mqvpn_client_info_t) cannot grow a field without breaking ABI (fixed
- * array stride), so this snapshot is control_socket.c's own side channel:
- * it is filled in the SAME session-iteration order and with the SAME
- * tunnel_established guard as mqvpn_server_get_client_info(), so out[i]
- * corresponds to the i-th entry of that call's client array within one
- * control-command handler. */
+ * array stride), so this snapshot is control_socket.c's own side channel.
+ * Index-alignment contract: see mqvpn_server_get_client_reinject() below. */
 typedef struct {
     int n_paths;
     struct {
@@ -261,7 +258,8 @@ typedef struct {
  * the SAME tunnel_established guard as mqvpn_server_get_client_info(), so
  * the two result arrays are index-aligned within one control-command
  * handler (the session set cannot change between the two calls — both run
- * inside a single-threaded control-command handler).
+ * inside a single-threaded control-command handler). out[i] corresponds to
+ * the i-th entry of that call's client array.
  *
  * Returns the number of entries filled (clamped to max). Callers should
  * still match by path_id when emitting, not rely on array-order alone. */

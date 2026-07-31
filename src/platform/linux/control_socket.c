@@ -188,11 +188,9 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, mqvpn_server_t
     int n_clients = 0;
     mqvpn_server_get_client_info(server, clients, MQVPN_MAX_USERS, &n_clients);
 
-    /* Index-aligned with clients[] above: same session-iteration order and
-     * tunnel_established guard, both calls inside this single-threaded
-     * handler, so the session set cannot change between them. Matched by
-     * path_id below (not by array position alone) as a defensive
-     * double-check. */
+    /* Index-aligned with clients[] above — contract is on
+     * mqvpn_server_get_client_reinject() in mqvpn_internal.h. Matched by
+     * path_id below anyway, not by array position alone. */
     mqvpn_internal_client_reinject_t reinj[MQVPN_MAX_USERS];
     int n_reinj = mqvpn_server_get_client_reinject(server, reinj, MQVPN_MAX_USERS);
     if (n_reinj < 0) n_reinj = 0;
