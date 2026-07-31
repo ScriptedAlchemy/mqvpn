@@ -2569,6 +2569,9 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
     return MQVPN_OK;
 }
 
+/* Iteration order and the tunnel_established guard here are load-bearing:
+ * mqvpn_server_get_client_reinject() below mirrors this walk and must stay
+ * index-aligned — change both together. */
 int
 mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *out,
                              int max_clients, int *n_clients)
