@@ -40,6 +40,8 @@ static uint64_t g_uptime = 0;
 static int g_client_info_n = 0;
 static mqvpn_client_info_t g_client_info_tmpl;
 
+static mqvpn_internal_client_reinject_t g_reinject_tmpl; /* configured per test */
+
 static int g_fec_rc = 1;
 static mqvpn_internal_fec_stats_t g_fec_tmpl;
 
@@ -133,6 +135,15 @@ const char *
 mqvpn_version_string(void)
 {
     return "9.9.9-test";
+}
+
+int
+mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
+                                 mqvpn_internal_client_reinject_t *out, int max)
+{
+    (void)s;
+    if (max > 0) out[0] = g_reinject_tmpl;
+    return max > 0 ? 1 : 0;
 }
 
 int
@@ -355,6 +366,7 @@ test_get_status_one_client_with_path(void)
     g_client_info_tmpl.paths[0].path_id = 7;
     g_client_info_tmpl.paths[0].state = 2; /* -> "active" */
     g_client_info_n = 1;
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
 
     call("{\"cmd\":\"get_status\"}");
     CHECK_HAS("\"n_clients\":1");
@@ -362,6 +374,73 @@ test_get_status_one_client_with_path(void)
     CHECK_HAS("\"endpoint\":\"1.2.3.4:443\"");
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"state_label\":\"active\"");
+}
+
+/* Alignment semantics (a): a reinject snapshot entry whose path_id matches
+ * the client-info path emits its nonzero value. */
+static void
+test_get_status_reinject_matched_path_id(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
+    g_client_info_tmpl.n_paths = 1;
+    g_client_info_tmpl.paths[0].path_id = 7;
+    g_client_info_tmpl.paths[0].state = 2;
+    g_client_info_n = 1;
+
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    g_reinject_tmpl.n_paths = 1;
+    g_reinject_tmpl.paths[0].path_id = 7;
+    g_reinject_tmpl.paths[0].reinject_tx_bytes = 99999;
+
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"path_id\":7");
+    CHECK_HAS("\"reinject_tx_bytes\":99999");
+}
+
+/* Alignment semantics (b): a mismatched/absent path_id in the reinject
+ * snapshot emits "reinject_tx_bytes":0 — the field is always present so the
+ * JSON shape stays constant regardless of match. */
+static void
+test_get_status_reinject_mismatched_path_id(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
+    g_client_info_tmpl.n_paths = 1;
+    g_client_info_tmpl.paths[0].path_id = 7;
+    g_client_info_tmpl.paths[0].state = 2;
+    g_client_info_n = 1;
+
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    g_reinject_tmpl.n_paths = 1;
+    g_reinject_tmpl.paths[0].path_id = 42; /* mismatch vs client path_id 7 */
+    g_reinject_tmpl.paths[0].reinject_tx_bytes = 99999;
+
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"path_id\":7");
+    CHECK_HAS("\"reinject_tx_bytes\":0");
+}
+
+/* Alignment semantics (b), absent case: no reinject entry filled at all
+ * (n_paths == 0) still yields the constant "reinject_tx_bytes":0 shape. */
+static void
+test_get_status_reinject_absent(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
+    g_client_info_tmpl.n_paths = 1;
+    g_client_info_tmpl.paths[0].path_id = 7;
+    g_client_info_tmpl.paths[0].state = 2;
+    g_client_info_n = 1;
+
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl)); /* n_paths = 0 */
+
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"path_id\":7");
+    CHECK_HAS("\"reinject_tx_bytes\":0");
 }
 
 /* ── get_build_info ───────────────────────────────────────────────────────── */
@@ -492,6 +571,9 @@ main(void)
 
     test_get_status_empty();
     test_get_status_one_client_with_path();
+    test_get_status_reinject_matched_path_id();
+    test_get_status_reinject_mismatched_path_id();
+    test_get_status_reinject_absent();
 
     test_get_build_info();
 

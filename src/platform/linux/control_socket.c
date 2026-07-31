@@ -50,7 +50,9 @@
                                mqvpn_server_get_client_fec_stats,
                                mqvpn_server_get_all_fec_stats,
                                mqvpn_server_get_reorder_stats,
-                               mqvpn_reorder_stats_t (via reorder.h) */
+                               mqvpn_reorder_stats_t (via reorder.h),
+                               mqvpn_internal_client_reinject_t,
+                               mqvpn_server_get_client_reinject */
 
 #include <stdlib.h>
 #include <string.h>
@@ -186,6 +188,15 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, mqvpn_server_t
     int n_clients = 0;
     mqvpn_server_get_client_info(server, clients, MQVPN_MAX_USERS, &n_clients);
 
+    /* Index-aligned with clients[] above: same session-iteration order and
+     * tunnel_established guard, both calls inside this single-threaded
+     * handler, so the session set cannot change between them. Matched by
+     * path_id below (not by array position alone) as a defensive
+     * double-check. */
+    mqvpn_internal_client_reinject_t reinj[MQVPN_MAX_USERS];
+    int n_reinj = mqvpn_server_get_client_reinject(server, reinj, MQVPN_MAX_USERS);
+    if (n_reinj < 0) n_reinj = 0;
+
     uint64_t now = 0;
     struct timeval tv;
     if (gettimeofday(&tv, NULL) == 0)
@@ -230,14 +241,32 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, mqvpn_server_t
         for (int p = 0; p < ci->n_paths; p++) {
             mqvpn_path_stats_t *ps = &ci->paths[p];
             if (p > 0) APPEND(",");
+
+            /* Emit 0 on mismatch/absence (index out of range, or no path_id
+             * match within reinj[i]) rather than skipping the field — the
+             * JSON shape must stay constant so test_control_response_bound's
+             * worst-case model holds. */
+            uint64_t reinject_tx_bytes = 0;
+            if (i < n_reinj) {
+                mqvpn_internal_client_reinject_t *re = &reinj[i];
+                for (int rp = 0; rp < re->n_paths; rp++) {
+                    if (re->paths[rp].path_id == ps->path_id) {
+                        reinject_tx_bytes = re->paths[rp].reinject_tx_bytes;
+                        break;
+                    }
+                }
+            }
+
             APPEND(
                 "{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64 ",\"min_rtt_ms\":%" PRIu64
                 ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
                 ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
-                ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\"}",
+                ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
+                "\"reinject_tx_bytes\":%" PRIu64 "}",
                 ps->path_id, ps->srtt_us / 1000, ps->min_rtt_us / 1000, ps->cwnd,
                 ps->bytes_in_flight, ps->bytes_tx, ps->bytes_rx, ps->pkt_sent,
-                ps->pkt_recv, ps->pkt_lost, ps->state, mqvpn_path_state_label(ps->state));
+                ps->pkt_recv, ps->pkt_lost, ps->state, mqvpn_path_state_label(ps->state),
+                reinject_tx_bytes);
         }
 
         APPEND("]}");

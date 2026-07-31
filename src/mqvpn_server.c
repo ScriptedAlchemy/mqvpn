@@ -2653,6 +2653,41 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
 }
 
 int
+mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
+                                 mqvpn_internal_client_reinject_t *out, int max)
+{
+    if (!s || !out || max <= 0) return -1;
+
+    mqvpn_server_t *srv = (mqvpn_server_t *)s;
+    int count = 0;
+
+    /* Same iteration order + tunnel_established guard as
+     * mqvpn_server_get_client_info() so out[] stays index-aligned with that
+     * call's client array within one control-command handler. */
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX && count < max; i++) {
+        svr_conn_t *conn = srv->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+
+        mqvpn_internal_client_reinject_t *e = &out[count];
+        e->n_paths = 0;
+
+        xqc_conn_stats_t st = xqc_conn_get_stats(srv->engine, &conn->cid);
+        for (uint32_t p = 0;
+             st.paths_info && p < st.paths_info_count && e->n_paths < MQVPN_MAX_PATHS;
+             p++) {
+            xqc_path_metrics_t *pm = &st.paths_info[p];
+            e->paths[e->n_paths].path_id = pm->path_id;
+            e->paths[e->n_paths].reinject_tx_bytes = pm->path_send_reinject_bytes;
+            e->n_paths++;
+        }
+        free(st.paths_info);
+        count++;
+    }
+
+    return count;
+}
+
+int
 mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
 {
     if (!s || !out) return MQVPN_ERR_INVALID_ARG;

@@ -24,15 +24,19 @@ per_path_entry_bytes(void)
 {
     /* Mirrors control_socket.c:226-233 with leading "," (separator between
      * paths). The trailing %s is the longest path state label currently
-     * returned by mqvpn_path_state_label() — "validating" (10 chars). */
+     * returned by mqvpn_path_state_label() — "validating" (10 chars).
+     * "reinject_tx_bytes" mirrors the reinject-snapshot lookup appended to
+     * the same path object. */
     return snprintf(
         NULL, 0,
         ",{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64 ",\"min_rtt_ms\":%" PRIu64
         ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
         ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
-        ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\"}",
+        ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
+        "\"reinject_tx_bytes\":%" PRIu64 "}",
         UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
-        UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT32_MAX, "validating");
+        UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT32_MAX, "validating",
+        UINT64_MAX);
 }
 
 static int
