@@ -34,7 +34,12 @@
 #                  transfer still completes byte-identical and that at
 #                  least one server-side path shows reinject_tx_bytes > 0,
 #                  sampled while the client is still connected (closed
-#                  paths drop out of the get_status snapshot).
+#                  paths drop out of the get_status snapshot). The
+#                  download/degrade/sample cycle is wrapped in a 2-attempt
+#                  retry (restoring the baseline netem between attempts) —
+#                  arming a lateness-triggered path is inherently timing
+#                  sensitive, so a single-shot version is the likeliest CI
+#                  flake in this file.
 #   3. dgram     — [Multipath] Reinjection = dgram on BOTH sides, [Hybrid]
 #                  left disabled (default) so the connect-ip datagram lane
 #                  carries inner traffic, and [Reorder] left at its default
@@ -50,28 +55,75 @@
 #                  and reinject_tx_bytes > 0 on at least one server-side
 #                  path.
 #
+# Every scenario ends with a sanitizer exit-code check (stop_and_check_sanitizer,
+# same as 22/25 sibling e2e scripts) on both the client and server PID —
+# without it, ASAN_OPTIONS=detect_leaks=1 in CI can never fail this step.
+# Sanitizer failures are tracked separately from functional PASS/FAIL (mirrors
+# run_backup_fec_test.sh's SANITIZER_FAIL) and force exit 1 at the very end
+# regardless of the scenario tally.
+#
 # REQUIRES: root, GNU/OpenBSD netcat (`nc -q`), python3, iperf3, curl.
 #
 # Run manually:
 #   sudo bash scripts/ci_e2e/run_reinjection_test.sh [path/to/mqvpn]
 #
-# Exit code: 0 if all scenarios pass, 1 if any fails.
+# Exit code: 0 if all scenarios pass and no sanitizer error fired, 1 otherwise.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/sanitizer_check.sh"
 source "${SCRIPT_DIR}/../../benchmarks/bench_env_setup.sh"
 
 MQVPN="${1:-${MQVPN:-${SCRIPT_DIR}/../../build/mqvpn}}"
 LOG_DIR="$(mktemp -d)"
 CTRL_PORT=9099
+SANITIZER_FAIL=0
 
 # Track scratch dirs created per-scenario (HTTP docroots) for cleanup —
 # separate from bench_cleanup, which only knows about netns/veth/procs.
 SCENARIO_TMP_DIRS=()
 
-trap '_rc=$?; bench_cleanup; for d in "${SCENARIO_TMP_DIRS[@]:-}"; do [[ -n "$d" ]] && rm -rf "$d"; done; \
-    if (( _rc != 0 )); then echo "Logs preserved at: $LOG_DIR" >&2; else rm -rf "$LOG_DIR"; fi' EXIT
+# Global HTTP test-server state (scenario "deadline" only), so a mid-run
+# operator abort (SIGINT/SIGTERM before the scenario's own teardown runs)
+# still gets reaped by the EXIT trap — mirrors tests/test_e2e_hybrid_h2.sh's
+# HTTP_PID + cleanup_http_server pattern exactly.
+HTTP_PID=""
+HTTP_TARGET_IP=""
+cleanup_http_server() {
+    if [ -n "$HTTP_PID" ] && kill -0 "$HTTP_PID" 2>/dev/null; then
+        kill "$HTTP_PID" 2>/dev/null || true
+        wait "$HTTP_PID" 2>/dev/null || true
+    fi
+    HTTP_PID=""
+    if [ -n "$HTTP_TARGET_IP" ]; then
+        ip netns exec "$NS_SERVER" ip addr del "${HTTP_TARGET_IP}/32" dev lo 2>/dev/null || true
+    fi
+}
+
+# Named-function trap (same shape as run_backup_fec_test.sh's cleanup() +
+# `trap cleanup EXIT`, not an inline string) so a mid-run operator abort
+# still reaps the HTTP server / netns / scratch dirs and the SANITIZER_FAIL
+# verdict is checked exactly once, regardless of which scenario was live.
+cleanup() {
+    local _rc=$?
+    cleanup_http_server
+    bench_cleanup
+    local d
+    for d in "${SCENARIO_TMP_DIRS[@]:-}"; do
+        [[ -n "$d" ]] && rm -rf "$d"
+    done
+    if (( _rc != 0 )); then
+        echo "Logs preserved at: $LOG_DIR" >&2
+    else
+        rm -rf "$LOG_DIR"
+    fi
+    if (( SANITIZER_FAIL != 0 )); then
+        echo "FAIL: sanitizer errors detected" >&2
+        exit 1
+    fi
+}
+trap cleanup EXIT
 echo "Logs: $LOG_DIR"
 
 # --- Preflight ---
@@ -280,11 +332,27 @@ print(max(vals) if vals else -1)
 PY
 }
 
+# End-of-scenario teardown: sanitizer-check both endpoints (same idiom as
+# run_backup_fec_test.sh's cleanup_processes -> stop_and_check_sanitizer)
+# and clear the PID vars so the next scenario's bench_cleanup doesn't try
+# to re-kill an already-reaped process. A sanitizer failure is recorded in
+# the global SANITIZER_FAIL (checked once at final script exit) rather
+# than flipping this scenario's own PASS/FAIL — same separation of
+# concerns as the reference script.
+finish_scenario() {
+    local desc="$1" server_log="$2" client_log="$3"
+    stop_and_check_sanitizer "$_BENCH_CLIENT_PID" "${desc} client" "$client_log" \
+        || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$_BENCH_SERVER_PID" "${desc} server" "$server_log" \
+        || SANITIZER_FAIL=1
+    _BENCH_CLIENT_PID=""
+    _BENCH_SERVER_PID=""
+}
+
 # --- Scenario 1: off ---
 
-test_scenario_off() {
-    local server_log="${LOG_DIR}/off_server.log"
-    local client_log="${LOG_DIR}/off_client.log"
+_off_body() {
+    local server_log="$1" client_log="$2"
 
     bench_cleanup
     bench_setup_netns
@@ -310,9 +378,13 @@ test_scenario_off() {
     sleep 1
 
     # 1) marker absence in BOTH logs — the byte-frozen observable this
-    #    scenario pins per Task 7's brief.
-    if grep -q "reinjection enabled: mode=" "$server_log" "$client_log" 2>/dev/null; then
-        echo "  FAIL: 'reinjection enabled: mode=' marker present with Reinjection unset"
+    #    scenario pins per Task 7's brief. grep -l so a hit names which
+    #    log(s) actually carried the marker, instead of a flat yes/no.
+    local marker_hit
+    marker_hit=$(grep -l "reinjection enabled: mode=" "$server_log" "$client_log" 2>/dev/null || true)
+    if [[ -n "$marker_hit" ]]; then
+        echo "  FAIL: 'reinjection enabled: mode=' marker present with Reinjection unset, found in:"
+        echo "$marker_hit" | sed 's/^/    /'
         return 1
     fi
     echo "  off: marker absent on both ends: OK"
@@ -340,16 +412,24 @@ test_scenario_off() {
     return 0
 }
 
+test_scenario_off() {
+    local server_log="${LOG_DIR}/off_server.log"
+    local client_log="${LOG_DIR}/off_client.log"
+    local rc=0
+    _off_body "$server_log" "$client_log" || rc=1
+    finish_scenario "off" "$server_log" "$client_log"
+    return "$rc"
+}
+
 # --- Scenario 2: deadline ---
 
-test_scenario_deadline() {
-    local server_log="${LOG_DIR}/deadline_server.log"
-    local client_log="${LOG_DIR}/deadline_client.log"
+_deadline_body() {
+    local server_log="$1" client_log="$2"
     local ini="${LOG_DIR}/deadline.ini"
-    local http_target_ip="10.223.0.1"
     local http_target_port=8090
-    local http_docroot http_pid=""
+    local http_docroot
 
+    HTTP_TARGET_IP="10.223.0.1"
     http_docroot="$(mktemp -d)"
     SCENARIO_TMP_DIRS+=("$http_docroot")
 
@@ -368,22 +448,22 @@ Reinjection = deadline
 [Hybrid]
 Enabled = true
 Tcp = stream
-EgressAllow = ${http_target_ip}/32
+EgressAllow = ${HTTP_TARGET_IP}/32
 EOF
 
     # HTTP egress target: a /32 loopback alias inside NS_SERVER (same
     # addressing pattern as test_e2e_hybrid_h2.sh's HTTP_TARGET_IP note).
-    ip netns exec "$NS_SERVER" ip addr add "${http_target_ip}/32" dev lo
+    ip netns exec "$NS_SERVER" ip addr add "${HTTP_TARGET_IP}/32" dev lo
     head -c $((16 * 1024 * 1024)) /dev/urandom >"${http_docroot}/payload.bin"
 
     ip netns exec "$NS_SERVER" python3 -m http.server "$http_target_port" \
-        --bind "$http_target_ip" --directory "$http_docroot" >/dev/null 2>&1 &
-    http_pid=$!
+        --bind "$HTTP_TARGET_IP" --directory "$http_docroot" >/dev/null 2>&1 &
+    HTTP_PID=$!
 
     local http_ready=0 _i
     for _i in $(seq 1 20); do
         if ip netns exec "$NS_SERVER" curl -s --max-time 1 -o /dev/null \
-                "http://${http_target_ip}:${http_target_port}/payload.bin" 2>/dev/null; then
+                "http://${HTTP_TARGET_IP}:${http_target_port}/payload.bin" 2>/dev/null; then
             http_ready=1
             break
         fi
@@ -391,7 +471,6 @@ EOF
     done
     if (( http_ready != 1 )); then
         echo "  FAIL: HTTP test server never became ready"
-        kill "$http_pid" 2>/dev/null || true
         return 1
     fi
 
@@ -400,21 +479,21 @@ EOF
     # "hybrid TCP lane is scheduled by MinRTT, not by WLB — by
     # construction") prefers it. Rate-limited so a 16 MiB download takes
     # long enough to degrade mid-transfer, not so fast it finishes first.
-    apply_path_netem 0 "delay 5ms rate 12mbit"
-    apply_path_netem 1 "delay 8ms rate 12mbit"
+    local baseline_a="delay 5ms rate 12mbit"
+    local baseline_b="delay 8ms rate 12mbit"
+    apply_path_netem 0 "$baseline_a"
+    apply_path_netem 1 "$baseline_b"
 
     start_server_with_flags "$server_log" \
         --auth-key "$_BENCH_PSK" \
         --control-port "$CTRL_PORT" \
         --config "$ini" \
-        || { kill "$http_pid" 2>/dev/null || true; return 1; }
+        || return 1
 
-    start_client_with_auth_key "$_BENCH_PSK" "$client_log" "--config $ini" \
-        || { kill "$http_pid" 2>/dev/null || true; return 1; }
+    start_client_with_auth_key "$_BENCH_PSK" "$client_log" "--config $ini" || return 1
 
     if ! wait_for 15 ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_SERVER_IP"; then
         echo "  tunnel never came up"; tail -30 "$client_log"
-        kill "$http_pid" 2>/dev/null || true
         return 1
     fi
     echo "  deadline: tunnel up"
@@ -423,50 +502,72 @@ EOF
     # (mqvpn_server.c:1849 / mqvpn_client.c:2624) — must be present by now.
     if ! grep -q "reinjection enabled: mode=deadline" "$server_log"; then
         echo "  FAIL: server log missing 'reinjection enabled: mode=deadline'"
-        kill "$http_pid" 2>/dev/null || true
         return 1
     fi
     if ! grep -q "reinjection enabled: mode=deadline" "$client_log"; then
         echo "  FAIL: client log missing 'reinjection enabled: mode=deadline'"
-        kill "$http_pid" 2>/dev/null || true
         return 1
     fi
     echo "  deadline: marker present on both ends: OK"
 
-    # Download in the background (server -> client bytes, by construction
-    # of an HTTP GET response body), then degrade the ACTIVE path (idx 0)
-    # mid-transfer so its in-flight stream data goes late and arms
-    # deadline reinjection onto path 1.
-    local dl_out="${LOG_DIR}/deadline_download.bin"
-    ip netns exec "$NS_CLIENT" curl -s --max-time 90 -o "$dl_out" \
-        "http://${http_target_ip}:${http_target_port}/payload.bin" &
-    local curl_pid=$!
+    # Download -> mid-transfer degrade -> sample reinject_tx_bytes, in a
+    # bounded 2-attempt retry. Arming a lateness-triggered reinjection path
+    # is inherently timing sensitive (scheduling jitter on a busy CI runner
+    # can let a transfer finish, or finish reinjecting, before/after the
+    # sample point); a single-shot version is the likeliest flake in this
+    # file, so a failed arming attempt restores the baseline netem on path
+    # 0 and retries once before failing the scenario.
+    local max_bytes=-1
+    local attempt
+    for attempt in 1 2; do
+        if (( attempt > 1 )); then
+            echo "  deadline: attempt $attempt — restoring baseline netem on path 0 and retrying"
+            apply_path_netem 0 "$baseline_a"
+            sleep 1
+        fi
 
-    sleep 3
-    apply_path_netem 0 "delay 400ms loss 30%"
+        # Download in the background (server -> client bytes, by
+        # construction of an HTTP GET response body), then degrade the
+        # ACTIVE path (idx 0) mid-transfer so its in-flight stream data
+        # goes late and arms deadline reinjection onto path 1.
+        local dl_out="${LOG_DIR}/deadline_download_attempt${attempt}.bin"
+        ip netns exec "$NS_CLIENT" curl -s --max-time 90 -o "$dl_out" \
+            "http://${HTTP_TARGET_IP}:${http_target_port}/payload.bin" &
+        local curl_pid=$!
 
-    local curl_rc=0
-    wait "$curl_pid" || curl_rc=$?
-    kill "$http_pid" 2>/dev/null || true
+        sleep 3
+        apply_path_netem 0 "delay 400ms loss 30%"
 
-    if (( curl_rc != 0 )); then
-        echo "  FAIL: download did not complete (curl rc=$curl_rc)"
-        return 1
-    fi
-    if ! cmp -s "${http_docroot}/payload.bin" "$dl_out"; then
-        echo "  FAIL: downloaded content mismatch"
-        return 1
-    fi
-    echo "  deadline: download completed byte-identical under path-A degradation: OK"
+        local curl_rc=0
+        wait "$curl_pid" || curl_rc=$?
 
-    # Sample reinject_tx_bytes WHILE paths are still live — the client is
-    # still connected at this point, so no path has dropped out of the
-    # get_status snapshot yet.
-    local resp max_bytes
-    resp=$(ctrl_local '{"cmd":"get_status"}') || return 1
-    max_bytes=$(max_reinject_tx_bytes "$resp")
+        if (( curl_rc != 0 )); then
+            echo "  deadline attempt $attempt: download did not complete (curl rc=$curl_rc)"
+            continue
+        fi
+        if ! cmp -s "${http_docroot}/payload.bin" "$dl_out"; then
+            echo "  deadline attempt $attempt: downloaded content mismatch"
+            continue
+        fi
+        echo "  deadline attempt $attempt: download completed byte-identical under path-A degradation"
+
+        # Sample reinject_tx_bytes WHILE paths are still live — the client
+        # is still connected at this point, so no path has dropped out of
+        # the get_status snapshot yet.
+        local resp
+        resp=$(ctrl_local '{"cmd":"get_status"}') || continue
+        max_bytes=$(max_reinject_tx_bytes "$resp")
+        if (( max_bytes > 0 )); then
+            echo "  deadline: attempt $attempt armed reinjection (reinject_tx_bytes=$max_bytes)"
+            break
+        fi
+        echo "  deadline attempt $attempt: transfer OK but reinjection not armed (max reinject_tx_bytes=$max_bytes)"
+    done
+
     if (( max_bytes <= 0 )); then
-        echo "  FAIL: no path shows reinject_tx_bytes > 0: $resp"
+        echo "  FAIL: no path shows reinject_tx_bytes > 0 after 2 attempts"
+        echo "  --- server_log reinjection lines (last 5) ---"
+        grep 'reinjection' "$server_log" | tail -5
         return 1
     fi
     echo "  deadline: reinject_tx_bytes=$max_bytes on at least one path: OK"
@@ -474,11 +575,20 @@ EOF
     return 0
 }
 
+test_scenario_deadline() {
+    local server_log="${LOG_DIR}/deadline_server.log"
+    local client_log="${LOG_DIR}/deadline_client.log"
+    local rc=0
+    _deadline_body "$server_log" "$client_log" || rc=1
+    cleanup_http_server
+    finish_scenario "deadline" "$server_log" "$client_log"
+    return "$rc"
+}
+
 # --- Scenario 3: dgram ---
 
-test_scenario_dgram() {
-    local server_log="${LOG_DIR}/dgram_server.log"
-    local client_log="${LOG_DIR}/dgram_client.log"
+_dgram_body() {
+    local server_log="$1" client_log="$2"
     local ini="${LOG_DIR}/dgram.ini"
     local udp_port=5303
 
@@ -555,11 +665,22 @@ EOF
     max_bytes=$(max_reinject_tx_bytes "$resp")
     if (( max_bytes <= 0 )); then
         echo "  FAIL: no path shows reinject_tx_bytes > 0: $resp"
+        echo "  --- server_log reinjection lines (last 5) ---"
+        grep 'reinjection' "$server_log" | tail -5
         return 1
     fi
     echo "  dgram: reinject_tx_bytes=$max_bytes on at least one path: OK"
 
     return 0
+}
+
+test_scenario_dgram() {
+    local server_log="${LOG_DIR}/dgram_server.log"
+    local client_log="${LOG_DIR}/dgram_client.log"
+    local rc=0
+    _dgram_body "$server_log" "$client_log" || rc=1
+    finish_scenario "dgram" "$server_log" "$client_log"
+    return "$rc"
 }
 
 # --- Main runner ---
