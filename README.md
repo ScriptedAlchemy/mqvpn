@@ -334,9 +334,9 @@ LTE); for symmetric, loss-dominated paths leave it off. See
 
 ## Reinjection (speculative duplication)
 
-Speculatively duplicates packets onto a second active path via xquic's stock
-reinjection controllers, trading some redundant bytes for lower tail latency
-or loss masking. Off by default. Sender-side only — each side's setting
+Sends copies of selected packets over a second link. This costs some extra
+bandwidth, and in return the tunnel rides out packet loss and sudden link
+trouble much more smoothly. Off by default. Sender-side only — each side's setting
 protects the traffic it *sends*, so set it on the **server** to protect
 download traffic (and on the client for upload). Requires multipath with two
 or more active paths — silently inactive with only one.
@@ -349,9 +349,9 @@ ReinjectionHardDeadlineMs = 500       # deadline mode: upper clamp (1-60000)
 ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; clamped down to the hard deadline if it would exceed it)
 ```
 
-- `deadline` — for aggregation tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane): cuts path-degradation stalls from PTO-scale (hundreds of ms) down to roughly one RTT, with near-zero overhead on healthy paths. Protects stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.
-- `idle` — opportunistic tail-latency trim for interactive traffic: duplicates unacked stream data only when the send queue is idle. No tunables.
-- `dgram` — full datagram duplication for dedicated real-time tunnels (VoIP, gaming): per-packet loss masking and hitless path failover. **Not recommended for mixed tunnels** — it duplicates all inner-UDP traffic, including HTTP/3 video, which caps datagram-lane goodput at a single path's capacity. Duplicates are delivered twice at the receiver's TUN unless the [reorder buffer](#reorder-buffer-datagram-lane) is enabled (it dedups them); plain inner UDP apps may otherwise observe duplicate packets.
+- `deadline` — insurance for bonded tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane). Most of the time it does nothing and costs nothing. When a link suddenly goes bad, data already sent on it must be recovered before in-order delivery lets anything behind it through — even data that already arrived via the healthy link — which in bad cases stalls transfers for up to a second; `deadline` resends the late data on the healthy link right away, shrinking that stall to a barely noticeable blip. Protects stream (TCP-lane) traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged. Protects TCP/stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.
+- `idle` — low-cost smoothing for interactive use (SSH, browsing): whenever the tunnel has nothing else to send, it uses that spare moment to send a copy of recent still-unconfirmed data over another link, shaving off occasional hiccups. No tuning needed.
+- `dgram` — for tunnels dedicated to real-time traffic (VoIP, gaming): every datagram-lane packet (UDP and other non-TCP traffic; hybrid-mode TCP is not duplicated) is sent over two links at once, so a lost packet or a dying link no longer causes dropouts or lag spikes. **Uses double the bandwidth for that traffic; not recommended for mixed tunnels** — it duplicates all inner UDP, including HTTP/3 video streams, so the usable speed of the datagram lane drops to a single link's capacity. Duplicates are delivered twice at the receiver's TUN unless the [reorder buffer](#reorder-buffer-datagram-lane) is enabled (it removes them); plain UDP apps may otherwise see duplicate packets.
 
 Per-path duplicated bytes are reported as `reinject_tx_bytes` in the control
 API `get_status` response.
