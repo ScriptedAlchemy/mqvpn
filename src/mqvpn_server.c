@@ -1837,9 +1837,35 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .cc = cfg->cc,
         .init_max_path_id = cfg->init_max_path_id,
         /* recv_rate_bytes_per_sec: intentionally absent (=0) — client-only knob */
+        .reinjection = cfg->reinjection,
+        .reinj_srtt_factor_pct = cfg->reinj_srtt_factor_pct,
+        .reinj_hard_deadline_ms = cfg->reinj_hard_deadline_ms,
+        .reinj_deadline_lower_bound_ms = cfg->reinj_deadline_lower_bound_ms,
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
     xqc_server_set_conn_settings(s->engine, &conn_settings);
+
+    if (cfg->reinjection == MQVPN_REINJ_DEADLINE) {
+        /* Read back from the just-built conn_settings, not the raw config:
+         * this reflects the 0->default fallback AND the lower<=hard clamp
+         * applied in mqvpn_apply_reinjection(). */
+        LOG_I(s,
+              "reinjection enabled: mode=deadline factor_pct=%d hard_ms=%d lower_ms=%d",
+              (int)(conn_settings.reinj_flexible_deadline_srtt_factor * 100 + 0.5),
+              (int)(conn_settings.reinj_hard_deadline / 1000),
+              (int)(conn_settings.reinj_deadline_lower_bound / 1000));
+        if (!s->config.hybrid.enabled) {
+            LOG_W(s, "reinjection mode=deadline protects only stream traffic; hybrid "
+                     "lane is disabled, effect limited to control streams");
+        }
+    } else if (cfg->reinjection == MQVPN_REINJ_IDLE ||
+               cfg->reinjection == MQVPN_REINJ_DGRAM) {
+        LOG_I(s, "reinjection enabled: mode=%s", mqvpn_reinj_to_name(cfg->reinjection));
+        if (cfg->reinjection == MQVPN_REINJ_DGRAM) {
+            LOG_I(s, "reinjection mode=dgram duplicates every datagram: datagram-lane "
+                     "goodput is capped at one path's capacity");
+        }
+    }
 
     /* H3 callbacks */
     xqc_h3_callbacks_t h3_cbs = {
@@ -2545,6 +2571,9 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
     return MQVPN_OK;
 }
 
+/* Iteration order and the tunnel_established guard here are load-bearing:
+ * mqvpn_server_get_client_reinject() below mirrors this walk and must stay
+ * index-aligned — change both together. */
 int
 mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *out,
                              int max_clients, int *n_clients)
@@ -2626,6 +2655,41 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
 
     *n_clients = count;
     return MQVPN_OK;
+}
+
+int
+mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
+                                 mqvpn_internal_client_reinject_t *out, int max)
+{
+    if (!s || !out || max <= 0) return -1;
+
+    mqvpn_server_t *srv = (mqvpn_server_t *)s;
+    int count = 0;
+
+    /* Same iteration order + tunnel_established guard as
+     * mqvpn_server_get_client_info() so out[] stays index-aligned with that
+     * call's client array within one control-command handler. */
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX && count < max; i++) {
+        svr_conn_t *conn = srv->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+
+        mqvpn_internal_client_reinject_t *e = &out[count];
+        e->n_paths = 0;
+
+        xqc_conn_stats_t st = xqc_conn_get_stats(srv->engine, &conn->cid);
+        for (uint32_t p = 0;
+             st.paths_info && p < st.paths_info_count && e->n_paths < MQVPN_MAX_PATHS;
+             p++) {
+            xqc_path_metrics_t *pm = &st.paths_info[p];
+            e->paths[e->n_paths].path_id = pm->path_id;
+            e->paths[e->n_paths].reinject_tx_bytes = pm->path_send_reinject_bytes;
+            e->n_paths++;
+        }
+        free(st.paths_info);
+        count++;
+    }
+
+    return count;
 }
 
 int

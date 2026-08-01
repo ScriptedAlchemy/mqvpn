@@ -57,6 +57,16 @@ struct mqvpn_config_s {
 
     mqvpn_scheduler_t scheduler;
     mqvpn_cc_t cc;
+
+    /* Reinjection (speculative multipath duplication). 0 = OFF (default,
+     * matches calloc). The three numeric fields are only consulted in
+     * DEADLINE mode; 0 there means "engine default" (110/500/20) — see
+     * mqvpn_conn_settings.c. */
+    mqvpn_reinjection_t reinjection;
+    int reinj_srtt_factor_pct;
+    int reinj_hard_deadline_ms;
+    int reinj_deadline_lower_bound_ms;
+
     mqvpn_log_level_t log_level;
     int multipath;
     int reconnect_enable;
@@ -228,5 +238,33 @@ MQVPN_INTERNAL int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s,
                                                   mqvpn_reorder_stats_t *out);
 MQVPN_INTERNAL int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c,
                                                   mqvpn_reorder_stats_t *out);
+
+/* Per-client snapshot of per-path reinjection TX byte counters
+ * (xqc_path_metrics_t.path_send_reinject_bytes). INTERNAL — not in public
+ * libmqvpn.h. mqvpn_path_stats_t (the public per-path struct embedded in
+ * mqvpn_client_info_t) cannot grow a field without breaking ABI (fixed
+ * array stride), so this snapshot is control_socket.c's own side channel.
+ * Index-alignment contract: see mqvpn_server_get_client_reinject() below. */
+typedef struct {
+    int n_paths;
+    struct {
+        uint64_t path_id;
+        uint64_t reinject_tx_bytes;
+    } paths[MQVPN_MAX_PATHS];
+} mqvpn_internal_client_reinject_t;
+
+/* Fills out[0..max) with each active (tunnel-established) session's
+ * per-path reinject_tx_bytes, in the SAME session-iteration order and with
+ * the SAME tunnel_established guard as mqvpn_server_get_client_info(), so
+ * the two result arrays are index-aligned within one control-command
+ * handler (the session set cannot change between the two calls — both run
+ * inside a single-threaded control-command handler). out[i] corresponds to
+ * the i-th entry of that call's client array.
+ *
+ * Returns the number of entries filled (clamped to max). Callers should
+ * still match by path_id when emitting, not rely on array-order alone. */
+MQVPN_INTERNAL int mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
+                                                    mqvpn_internal_client_reinject_t *out,
+                                                    int max);
 
 #endif /* MQVPN_INTERNAL_H */

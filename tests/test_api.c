@@ -332,6 +332,102 @@ TEST(config_set_cc)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_load_json_reinjection)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+
+    /* absent keys keep the off/0 defaults (0 for the numeric fields means
+     * "engine default" 110/500/20 at conn-settings build time — see
+     * mqvpn_conn_settings.c; the opaque config itself stores 0). */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{}"), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection, MQVPN_REINJ_OFF);
+    ASSERT_EQ(cfg->reinj_srtt_factor_pct, 0);
+    ASSERT_EQ(cfg->reinj_hard_deadline_ms, 0);
+    ASSERT_EQ(cfg->reinj_deadline_lower_bound_ms, 0);
+
+    /* valid values land in the config */
+    const char *json = "{"
+                       "\"reinjection\":\"deadline\","
+                       "\"reinjection_srtt_factor_pct\":150,"
+                       "\"reinjection_hard_deadline_ms\":300,"
+                       "\"reinjection_deadline_lower_bound_ms\":15"
+                       "}";
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection, MQVPN_REINJ_DEADLINE);
+    ASSERT_EQ(cfg->reinj_srtt_factor_pct, 150);
+    ASSERT_EQ(cfg->reinj_hard_deadline_ms, 300);
+    ASSERT_EQ(cfg->reinj_deadline_lower_bound_ms, 15);
+
+    /* invalid mode string -> hard error (unlike the INI/main.c surface,
+     * which warns and falls back to "off") */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection\":\"bogus\"}"),
+              MQVPN_ERR_INVALID_ARG);
+
+    /* out-of-range numeric params -> hard error, both directions each */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_srtt_factor_pct\":99}"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_srtt_factor_pct\":1001}"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_hard_deadline_ms\":0}"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_hard_deadline_ms\":60001}"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_deadline_lower_bound_ms\":0}"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(
+        mqvpn_config_load_json(cfg, "{\"reinjection_deadline_lower_bound_ms\":60001}"),
+        MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_reinjection)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, MQVPN_REINJ_DEADLINE), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection, MQVPN_REINJ_DEADLINE);
+    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, MQVPN_REINJ_DGRAM), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection, MQVPN_REINJ_DGRAM);
+    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, MQVPN_REINJ_OFF), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection, MQVPN_REINJ_OFF);
+    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, (mqvpn_reinjection_t)99),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_reinjection(NULL, MQVPN_REINJ_DEADLINE),
+              MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_reinjection_deadline_params)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(cfg, 150, 300, 15), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_srtt_factor_pct, 150);
+    ASSERT_EQ(cfg->reinj_hard_deadline_ms, 300);
+    ASSERT_EQ(cfg->reinj_deadline_lower_bound_ms, 15);
+
+    /* range boundaries, both directions, each parameter independently */
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(cfg, 99, 300, 15),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(cfg, 1001, 300, 15),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(cfg, 150, 0, 15),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(cfg, 150, 60001, 15),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(cfg, 150, 300, 0),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(cfg, 150, 300, 60001),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(NULL, 150, 300, 15),
+              MQVPN_ERR_INVALID_ARG);
+
+    /* boundary values themselves are valid (inclusive range) */
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(cfg, 100, 1, 1), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_reinjection_deadline_params(cfg, 1000, 60000, 60000),
+              MQVPN_OK);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_set_init_max_path_id)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -2668,6 +2764,9 @@ main(void)
     run_config_set_tun_mtu();
     run_config_set_scheduler();
     run_config_set_cc();
+    run_config_load_json_reinjection();
+    run_config_set_reinjection();
+    run_config_set_reinjection_deadline_params();
     run_config_set_init_max_path_id();
     run_config_set_log_level();
     run_config_set_reconnect();

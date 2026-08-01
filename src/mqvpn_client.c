@@ -10,6 +10,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
+#include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
 
 #include <stdlib.h>
 #include <string.h>
@@ -2612,8 +2613,35 @@ cli_start_connection(mqvpn_client_t *c)
         .cc = c->config.cc,
         .init_max_path_id = c->config.init_max_path_id,
         .recv_rate_bytes_per_sec = c->config.recv_rate_limit,
+        .reinjection = c->config.reinjection,
+        .reinj_srtt_factor_pct = c->config.reinj_srtt_factor_pct,
+        .reinj_hard_deadline_ms = c->config.reinj_hard_deadline_ms,
+        .reinj_deadline_lower_bound_ms = c->config.reinj_deadline_lower_bound_ms,
     };
     mqvpn_build_conn_settings(&cs_input, &cs);
+
+    if (c->config.reinjection == MQVPN_REINJ_DEADLINE) {
+        /* Read back from the just-built cs, not the raw config: this
+         * reflects the 0->default fallback AND the lower<=hard clamp
+         * applied in mqvpn_apply_reinjection(). */
+        LOG_I(c,
+              "reinjection enabled: mode=deadline factor_pct=%d hard_ms=%d lower_ms=%d",
+              (int)(cs.reinj_flexible_deadline_srtt_factor * 100 + 0.5),
+              (int)(cs.reinj_hard_deadline / 1000),
+              (int)(cs.reinj_deadline_lower_bound / 1000));
+        if (!c->config.hybrid.enabled) {
+            LOG_W(c, "reinjection mode=deadline protects only stream traffic; hybrid "
+                     "lane is disabled, effect limited to control streams");
+        }
+    } else if (c->config.reinjection == MQVPN_REINJ_IDLE ||
+               c->config.reinjection == MQVPN_REINJ_DGRAM) {
+        LOG_I(c, "reinjection enabled: mode=%s",
+              mqvpn_reinj_to_name(c->config.reinjection));
+        if (c->config.reinjection == MQVPN_REINJ_DGRAM) {
+            LOG_I(c, "reinjection mode=dgram duplicates every datagram: datagram-lane "
+                     "goodput is capped at one path's capacity");
+        }
+    }
 
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));

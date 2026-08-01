@@ -581,6 +581,10 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     }
     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
     mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
+    mqvpn_config_set_reinjection(lib_cfg, (mqvpn_reinjection_t)cfg->reinjection);
+    mqvpn_config_set_reinjection_deadline_params(lib_cfg, cfg->reinj_srtt_factor_pct,
+                                                 cfg->reinj_hard_deadline_ms,
+                                                 cfg->reinj_deadline_lower_bound_ms);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
