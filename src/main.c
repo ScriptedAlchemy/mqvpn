@@ -566,6 +566,8 @@ main(int argc, char *argv[])
             .hybrid = file_cfg.hybrid,
             /* [Advanced]; 0 = off. Client-only (server path never reads it). */
             .recv_rate_limit = file_cfg.recv_rate_limit,
+            /* [Advanced] UdpGso; default 1. Applies to client and server. */
+            .udp_gso = file_cfg.udp_gso,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -623,6 +625,8 @@ main(int argc, char *argv[])
             /* INI [Hybrid]; always valid (mqvpn_config_defaults seeds the
              * disabled defaults even with no [Hybrid] section). */
             .hybrid = file_cfg.hybrid,
+            /* [Advanced] UdpGso; default 1. Applies to client and server. */
+            .udp_gso = file_cfg.udp_gso,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

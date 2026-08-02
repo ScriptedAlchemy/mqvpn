@@ -42,6 +42,7 @@ typedef struct mqvpn_server_cfg_s {
     mqvpn_reorder_config_t
         reorder;                  /* INI [Reorder]/[ReorderRule] (mode OFF by default) */
     mqvpn_hybrid_config_t hybrid; /* INI [Hybrid] (disabled by default) */
+    int udp_gso;                  /* [Advanced] UdpGso; default 1 */
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

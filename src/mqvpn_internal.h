@@ -42,7 +42,7 @@
 /* Server "auto" TUN MTU.  The true MASQUE datagram MSS is per-connection
  * (peer TPs, CID length, FEC headroom, PMTUD) and unknowable at server
  * startup, so "auto" uses the typical negotiated value on a 1500-MTU path
- * with default engine settings (max_pkt_out_size 1400 − QUIC short header
+ * with default engine settings (MQVPN_MAX_PKT_OUT_SIZE − QUIC short header
  * − DATAGRAM/MASQUE headers = 1382).  Clients that negotiated less are
  * handled per-client via ICMP PTB in mqvpn_server_on_tun_packet(), so a
  * high default is safe. */

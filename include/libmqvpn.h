@@ -604,7 +604,9 @@ MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
 
 /* Linux TX UDP GSO / batched send. 1 (default) = engage when the kernel
  * supports it (silent sendmmsg fallback otherwise); 0 = per-packet send
- * path, byte-identical to pre-GSO behavior. No effect off Linux. */
+ * path, byte-identical to pre-GSO behavior. Engages on Linux-kernel
+ * platforms including Android; no effect on Windows/macOS/iOS. Any nonzero
+ * value is stored as 1. */
 MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
 
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
