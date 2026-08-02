@@ -589,8 +589,10 @@ mqvpn_client_first_active_fd(const mqvpn_client_t *c)
     return idx >= 0 ? c->paths[idx].fd : -1;
 }
 
-/* Get fd for xquic path_id, falling back to the (rotated) primary slot if
- * still active, else to the first active slot.
+/* Resolve the path slot used for sending on an xquic path_id, falling back
+ * to the (rotated) primary slot if still active, else to the first active
+ * slot. get_fd_for_path() is a thin wrapper over this function so the two
+ * views cannot drift.
  *
  * Two requirements compose here:
  *   - The handshake fallback must use `primary_path_idx` (rotation owner)
@@ -599,16 +601,14 @@ mqvpn_client_first_active_fd(const mqvpn_client_t *c)
  *     must NOT hand back its stale fd — fall through to any active sibling
  *     (post-OMR-backport semantics protecting against EBADF / sendto-on-
  *     dead-iface).
- */
-/* Entry-returning variant of get_fd_for_path() — a LITERAL mirror of its
- * branch structure. The first branch is deliberately unconditional: a
- * path_id bound to a dropped slot returns that slot (fd == -1) so the
- * caller downgrades via path_send_dead_retcode during the drop window —
- * it must NOT fall through to a sibling fd (that would put this path's
- * CIDs on another path's 4-tuple and change the documented drop-window
- * semantics). The sticky GSO flag lives on the slot owning the fd
- * actually used, which under the primary/first-active fallback is not
- * the requested path_id's slot. */
+ *
+ * The first branch is deliberately unconditional: a path_id bound to a
+ * dropped slot returns that slot (fd == -1) so the caller downgrades via
+ * path_send_dead_retcode during the drop window — it must NOT fall through
+ * to a sibling fd (that would put this path's CIDs on another path's
+ * 4-tuple and change the documented drop-window semantics). The sticky GSO
+ * flag lives on the slot owning the fd actually used, which under the
+ * primary/first-active fallback is not the requested path_id's slot. */
 static path_entry_t *
 get_path_entry_for_send(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
@@ -620,6 +620,7 @@ get_path_entry_for_send(mqvpn_client_t *c, uint64_t xqc_path_id)
     return (idx >= 0) ? &c->paths[idx] : NULL;
 }
 
+/* fd view of get_path_entry_for_send(); doc above. */
 static int
 get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
@@ -1144,6 +1145,9 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     ssize_t r = mqvpn_udp_send_batch(p->fd, msg_iov, vlen, peer, peerlen,
                                      c->gso_available, &p->gso_disabled, &bytes);
     c->bytes_tx += bytes;
+    /* bytes attributed to the slot owning the fd actually used — deliberately
+     * differs from cb_write_socket_ex's requested-path attribution in the
+     * fallback window */
     p->bytes_tx += bytes;
     if (r >= 0) return r;
     if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
@@ -2822,11 +2826,8 @@ init_xquic_engine(mqvpn_client_t *c)
      * MQVPN_MAX_PKT_OUT_SIZE <= 1500 guards mqvpn_udp_send_batch()'s
      * single-run/no-splitting contract (udp_offload.h) — a future raise
      * of the constant above ~2KB must revisit run-splitting before this
-     * registration can stay unconditional. Comparing a macro literal
-     * against 1500 compiles warning-clean under -Wall -Wextra -Werror
-     * (verified with gcc and clang: no -Wtautological-compare /
-     * -Wtype-limits fires for two integer-constant operands), so no
-     * extra silencing is needed here. */
+     * registration can stay unconditional. constant-vs-constant compare
+     * is warning-clean under -Werror. */
     if (cfg->udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500) {
         c->gso_available = mqvpn_udp_gso_probe();
         tcbs.write_mmsg_ex = cb_write_mmsg_ex;
