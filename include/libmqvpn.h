@@ -602,6 +602,11 @@ MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char
 MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
                                                uint64_t bytes_per_sec);
 
+/* Linux TX UDP GSO / batched send. 1 (default) = engage when the kernel
+ * supports it (silent sendmmsg fallback otherwise); 0 = per-packet send
+ * path, byte-identical to pre-GSO behavior. No effect off Linux. */
+MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
+
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,

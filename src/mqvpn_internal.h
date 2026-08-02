@@ -34,6 +34,11 @@
 #define MQVPN_XQC_PATH_STATE_CLOSING    3
 #define MQVPN_XQC_PATH_STATE_CLOSED     4
 
+/* Outer QUIC/UDP payload bound handed to xquic (single source of truth —
+ * also the TX-batch registration guard; the fork's batch enc buffer is
+ * 1500B, xqc_defs.h XQC_CONN_MAX_UDP_PAYLOAD_SIZE). */
+#define MQVPN_MAX_PKT_OUT_SIZE 1400
+
 /* Server "auto" TUN MTU.  The true MASQUE datagram MSS is per-connection
  * (peer TPs, CID length, FEC headroom, PMTUD) and unknowable at server
  * startup, so "auto" uses the typical negotiated value on a 1500-MTU path
@@ -104,6 +109,8 @@ struct mqvpn_config_s {
     mqvpn_hybrid_config_t hybrid;
 
     uint64_t recv_rate_limit; /* 0 = off; client-only, see libmqvpn.h */
+
+    int udp_gso; /* TX GSO/batch enable; default 1 */
 };
 
 /* ─── State transition validation (M0-5) ─── */

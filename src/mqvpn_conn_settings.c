@@ -9,6 +9,7 @@
 #include "mqvpn_conn_settings.h"
 
 #include "libmqvpn.h"
+#include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h"
 
@@ -122,7 +123,7 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->max_datagram_frame_size = 65535;
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
-    out->max_pkt_out_size = 1400;
+    out->max_pkt_out_size = MQVPN_MAX_PKT_OUT_SIZE;
     out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     out->so_sndbuf = 8 * 1024 * 1024;
     out->idle_time_out = 120000;

@@ -150,6 +150,7 @@ mqvpn_config_new(void)
     cfg->max_clients = 64;
     cfg->listen_port = 443;
     cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
+    cfg->udp_gso = 1;          /* TX GSO/batch enabled by default */
 
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
     mqvpn_reorder_config_default(&cfg->reorder);
@@ -746,6 +747,14 @@ mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg, uint64_t bytes_per_sec)
      * window product — see MQVPN_RECV_RATE_LIMIT_MAX (libmqvpn.h). */
     if (bytes_per_sec > MQVPN_RECV_RATE_LIMIT_MAX) return MQVPN_ERR_INVALID_ARG;
     cfg->recv_rate_limit = bytes_per_sec;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->udp_gso = enabled ? 1 : 0;
     return MQVPN_OK;
 }
 
