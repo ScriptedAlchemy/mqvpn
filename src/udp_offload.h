@@ -27,7 +27,8 @@ int mqvpn_udp_gso_probe(void);
 /* Length of the maximal GSO run starting at iov[0]: the longest prefix of
  * equal-size datagrams, optionally closed by ONE shorter datagram (kernel
  * rule: all segments equal, only the last may be short). A larger datagram
- * always ends the run before itself. cnt >= 1. Pure function. */
+ * always ends the run before itself. cnt >= 1; every iov_len >= 1 (QUIC
+ * packets are never empty). Pure function. */
 size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
 
 /* Send cnt datagrams to peer on fd, honoring the contiguous-prefix
@@ -42,7 +43,8 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  *   - 0 sent: MQVPN_SEND_EAGAIN on EAGAIN/EWOULDBLOCK, MQVPN_SEND_ERR else.
  *   - EINTR: retry the current syscall.  All syscalls use MSG_DONTWAIT.
  *   - *bytes_sent accumulates actual bytes from syscall results.
- * Precondition: cnt >= 1 (the engine's burst path never sends empty). */
+ * Precondition: cnt >= 1 (the engine's burst path never sends empty); every
+ * iov_len >= 1 (QUIC packets are never empty). */
 ssize_t mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
                              const struct sockaddr *peer, socklen_t peerlen, int use_gso,
                              int *gso_disabled, uint64_t *bytes_sent);

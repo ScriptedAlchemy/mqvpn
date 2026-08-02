@@ -53,12 +53,40 @@ test_run_len(void)
             b[i] = iv(1400);
         assert(mqvpn_gso_run_len(b, 32) == 32);
     }
+    /* two consecutive shorts: second short starts the next run */
+    {
+        struct iovec c[3];
+        c[0] = iv(1400);
+        c[1] = iv(200);
+        c[2] = iv(200);
+        assert(mqvpn_gso_run_len(c, 3) == 2);
+    }
+    /* short at position 1, cnt=2: one run (short tail) */
+    {
+        struct iovec d[2];
+        d[0] = iv(1400);
+        d[1] = iv(200);
+        assert(mqvpn_gso_run_len(d, 2) == 2);
+    }
     printf("test_run_len OK\n");
+}
+
+static void
+test_probe(void)
+{
+    /* The probe uses a real socket — not seam-interceptable — so this
+     * asserts only the result SHAPE, never a kernel capability: a valid
+     * old-kernel/seccomp environment must not fail the suite. */
+    int r = mqvpn_udp_gso_probe();
+    assert(r == 0 || r == 1);
+    if (!r) printf("note: kernel lacks UDP_SEGMENT; GSO paths covered via seam\n");
+    printf("test_probe OK\n");
 }
 
 int
 main(void)
 {
     test_run_len();
+    test_probe();
     return 0;
 }

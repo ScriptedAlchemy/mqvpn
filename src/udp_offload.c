@@ -11,6 +11,27 @@
  * inside this __linux__ block (netinet/udp.h etc. do not exist on
  * Windows/macOS, and the Windows compile is those files' only CI gate). */
 
+#  include <errno.h>
+#  include <netinet/in.h>
+#  include <netinet/udp.h>
+#  include <string.h>
+#  include <unistd.h>
+
+#  ifndef UDP_SEGMENT
+#    define UDP_SEGMENT 103 /* old glibc headers; value from linux/udp.h UAPI */
+#  endif
+
+#  ifdef MQVPN_OFFLOAD_TEST_SEAM
+/* Fault-injection seam for unit tests: tests provide these symbols. */
+ssize_t mqvpn_seam_sendmsg(int fd, const struct msghdr *msg, int flags);
+int mqvpn_seam_sendmmsg(int fd, struct mmsghdr *msgvec, unsigned int vlen, int flags);
+#    define OFFLOAD_SENDMSG  mqvpn_seam_sendmsg
+#    define OFFLOAD_SENDMMSG mqvpn_seam_sendmmsg
+#  else
+#    define OFFLOAD_SENDMSG  sendmsg
+#    define OFFLOAD_SENDMMSG sendmmsg
+#  endif
+
 size_t
 mqvpn_gso_run_len(const struct iovec *iov, size_t cnt)
 {
@@ -21,6 +42,20 @@ mqvpn_gso_run_len(const struct iovec *iov, size_t cnt)
         return i;                               /* larger starts a new run */
     }
     return cnt;
+}
+
+/* Stateless capability probe: does the kernel accept UDP_SEGMENT? Uses a
+ * real socket — not seam-interceptable — since it tests an actual kernel
+ * property, not a fault-injection scenario. */
+int
+mqvpn_udp_gso_probe(void)
+{
+    int fd = (int)socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return 0;
+    int zero = 0;
+    int ok = setsockopt(fd, SOL_UDP, UDP_SEGMENT, &zero, sizeof(zero)) == 0;
+    close(fd);
+    return ok;
 }
 
 #endif
