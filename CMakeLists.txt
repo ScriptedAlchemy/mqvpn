@@ -213,6 +213,7 @@ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 set(MQVPN_LIB_SOURCES
     src/mqvpn_config.c
     src/mqvpn_client.c
+    src/udp_offload.c
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
     src/mqvpn_util.c
