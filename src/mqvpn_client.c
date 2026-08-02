@@ -1151,6 +1151,11 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     p->bytes_tx += bytes;
     if (r >= 0) return r;
     if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
+    /* xquic's own |error send mmsg| log carries no errno, and the retcode
+     * from this callback can escalate to connection close; GSO-class errors
+     * are absorbed by the sticky fallback in mqvpn_udp_send_batch, so this
+     * branch is rare — no spam risk. */
+    LOG_E(c, "batch send: %s", strerror(errno));
     return path_send_dead_retcode(c); /* same downgrade policy as cb_write_socket_ex */
 }
 #endif

@@ -516,10 +516,16 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     ssize_t r = mqvpn_udp_send_batch(s->udp_fd, msg_iov, vlen, peer, peerlen,
                                      s->gso_available, &s->gso_disabled, &bytes);
     /* single aggregate counter — the server has no per-path bytes_tx (that's
-     * a client-only concept) — matching svr_do_send's s->bytes_tx accounting. */
+     * a client-only concept) — matching svr_do_send's s->bytes_tx accounting.
+     * (bytes==0 when r<0 per udp_offload.h) */
     s->bytes_tx += bytes;
     if (r >= 0) return r;
     if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
+    /* xquic's own |error send mmsg| log carries no errno, and XQC_SOCKET_ERROR
+     * from this callback can escalate to connection close; GSO-class errors
+     * are absorbed by the sticky fallback in mqvpn_udp_send_batch, so this
+     * branch is rare — no spam risk. */
+    LOG_E(s, "batch send: %s", strerror(errno));
     return XQC_SOCKET_ERROR; /* same convention as svr_do_send's hard-error path */
 }
 #endif
