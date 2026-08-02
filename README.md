@@ -97,7 +97,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
 **Stream bonding** — live feeds (SRT, RTMP) where a single connection does not provide sufficient bandwidth. The video at the top of this page shows an 8 Mbps SRT stream carried over two 6 Mbit uplinks; details in [Benchmarks](#benchmarks).
 
-**General-purpose transfer, including a TCP connection** — with [hybrid mode](#hybrid-mode-tcp-lane), TCP traffic is also aggregated across multiple paths. Details in [Benchmarks](#benchmarks).
+**Boosting general-purpose transfer** — not just video: bonding speeds up everyday traffic too. UDP and any other traffic is aggregated across paths over the datagram lane, and with [hybrid mode](#hybrid-mode-tcp-lane) TCP is aggregated as well — even a single TCP connection can use multiple paths at once. Details in [Benchmarks](#benchmarks).
 
 **Staying connected on unreliable links** — when one connection drops or degrades (moving vehicles, congested Wi-Fi, cellular dead spots), traffic continues over the remaining paths without interrupting sessions.
 
@@ -558,8 +558,8 @@ SRT contribution feeds over mqvpn, netns-emulated impaired links, mqvpn defaults
 | Scenario | Direct (single link) | mqvpn (2-path) |
 |---|---|---|
 | Starved uplinks (8 Mbps FHD over 2 × 6 Mbit) | VMAF 8.6, 1.2 s frozen | VMAF **87.7**, 0 s frozen |
-| Overload (120 Mbps over 2 × 100 Mbit) | 31.5 % stream loss | **0.06 %** stream loss |
-| Dual cellular (20–40 % link loss) | 20–40 % stream loss | **0.9 %** stream loss |
+| Exceeds any single link (120 Mbps over 2 × 100 Mbit) | 31.5 % stream loss | **0.06 %** stream loss |
+| Dual cellular (42 Mbps over 40 + 30 Mbit lossy links) | 20–40 % stream loss | **0.9 %** stream loss |
 
 Full report: [`bench_results/srt/REPORT.md`](bench_results/srt/REPORT.md) — data & comparison videos: [`bench_results/srt/`](bench_results/srt/) — bench: [`scripts/benchmark_srt.sh`](scripts/benchmark_srt.sh)
 
