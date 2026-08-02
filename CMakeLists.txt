@@ -799,6 +799,14 @@ if(BUILD_TESTING)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
 
+    # UDP GSO TX offload (issue #167): pure syscall/mechanics layer, no xquic
+    # dependency. MQVPN_OFFLOAD_TEST_SEAM is a no-op seam macro today (Task 3
+    # wires it to force error/short-write paths under test).
+    add_executable(test_udp_offload tests/test_udp_offload.c src/udp_offload.c)
+    target_compile_definitions(test_udp_offload PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
+    target_include_directories(test_udp_offload PRIVATE src include)
+    add_test(NAME test_udp_offload COMMAND test_udp_offload)
+
     # Darwin platform-twin PATH-stub state machine tests (Task 10), also
     # registered here on Linux: the twins (darwin/dns.c, darwin/routing.c,
     # darwin/killswitch.c) are portable POSIX C except for two Darwin-only
