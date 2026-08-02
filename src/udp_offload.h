@@ -3,7 +3,7 @@
 
 /* UDP TX offload (Linux): GSO-batched send used by the write_mmsg_ex
  * callbacks. Pure syscall/mechanics layer — no xquic types, no client or
- * server state. See docs spec 2026-08-02 (rev5) for the contracts. */
+ * server state. (issue #167) */
 #ifndef MQVPN_UDP_OFFLOAD_H
 #define MQVPN_UDP_OFFLOAD_H
 
@@ -21,7 +21,7 @@
 
 /* Stateless capability probe: does the kernel accept UDP_SEGMENT?
  * (Kernel property; callers store the result per client/server instance —
- * no global cache, per the spec's plan-review decision.) */
+ * no global cache: probing is idempotent and engine creation is rare.) */
 int mqvpn_udp_gso_probe(void);
 
 /* Length of the maximal GSO run starting at iov[0]: the longest prefix of
@@ -41,7 +41,8 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  *     (never send later runs after a failed one).
  *   - 0 sent: MQVPN_SEND_EAGAIN on EAGAIN/EWOULDBLOCK, MQVPN_SEND_ERR else.
  *   - EINTR: retry the current syscall.  All syscalls use MSG_DONTWAIT.
- *   - *bytes_sent accumulates actual bytes from syscall results. */
+ *   - *bytes_sent accumulates actual bytes from syscall results.
+ * Precondition: cnt >= 1 (the engine's burst path never sends empty). */
 ssize_t mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
                              const struct sockaddr *peer, socklen_t peerlen, int use_gso,
                              int *gso_disabled, uint64_t *bytes_sent);
