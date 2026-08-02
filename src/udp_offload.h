@@ -14,6 +14,18 @@
 #  include <sys/socket.h>
 #  include <sys/uio.h>
 
+#  ifdef MQVPN_OFFLOAD_TEST_SEAM
+/* Fault-injection seam for unit tests: tests/test_udp_offload.c DEFINES these
+ * symbols; declaring them here (rather than as .c-local prototypes) makes
+ * those definitions compiler-checked against the exact signatures
+ * src/udp_offload.c maps OFFLOAD_SENDMSG/OFFLOAD_SENDMMSG to. Never defined
+ * outside the test_udp_offload target. struct mmsghdr requires _GNU_SOURCE,
+ * which every TU that reaches this header (src/udp_offload.c,
+ * tests/test_udp_offload.c) already #defines before its first #include. */
+ssize_t mqvpn_seam_sendmsg(int fd, const struct msghdr *msg, int flags);
+int mqvpn_seam_sendmmsg(int fd, struct mmsghdr *msgvec, unsigned int vlen, int flags);
+#  endif
+
 /* Result classes for mqvpn_udp_send_batch() when 0 datagrams were sent.
  * (>= 0 return = contiguous-prefix count of datagrams handed to the kernel.) */
 #  define MQVPN_SEND_EAGAIN (-1) /* would block; caller maps to XQC_SOCKET_EAGAIN */
@@ -44,7 +56,14 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  *   - EINTR: retry the current syscall.  All syscalls use MSG_DONTWAIT.
  *   - *bytes_sent accumulates actual bytes from syscall results.
  * Precondition: cnt >= 1 (the engine's burst path never sends empty); every
- * iov_len >= 1 (QUIC packets are never empty). */
+ * iov_len >= 1 (QUIC packets are never empty).
+ *
+ * Forward-compat invariant: today's safety envelope is 32 packets x 1400B =
+ * 44,800B, comfortably under both the ~64KB kernel GSO/UDP ceiling and
+ * UDP_MAX_SEGMENTS (64) — cnt is capped at 32 (XQC_MAX_SEND_MSG_ONCE). If
+ * MQVPN_MAX_PKT_OUT_SIZE ever becomes configurable above ~2KB, a full run
+ * could exceed 64KB and fail EMSGSIZE (not a GSO-class errno here); run
+ * splitting would need to be added at that point. */
 ssize_t mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
                              const struct sockaddr *peer, socklen_t peerlen, int use_gso,
                              int *gso_disabled, uint64_t *bytes_sent);

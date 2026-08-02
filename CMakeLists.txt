@@ -800,8 +800,10 @@ if(BUILD_TESTING)
     endforeach()
 
     # UDP GSO TX offload (issue #167): pure syscall/mechanics layer, no xquic
-    # dependency. MQVPN_OFFLOAD_TEST_SEAM is a no-op seam macro today (Task 3
-    # wires it to force error/short-write paths under test).
+    # dependency. MQVPN_OFFLOAD_TEST_SEAM is wired: it swaps sendmsg/sendmmsg
+    # for mqvpn_seam_sendmsg/mqvpn_seam_sendmmsg (defined in
+    # tests/test_udp_offload.c), which the fault-injection tests use to force
+    # error/short-write/EAGAIN paths deterministically.
     add_executable(test_udp_offload tests/test_udp_offload.c src/udp_offload.c)
     target_compile_definitions(test_udp_offload PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
     target_include_directories(test_udp_offload PRIVATE src include)
