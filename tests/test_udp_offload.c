@@ -240,7 +240,30 @@ test_gso_error_zero_sent_resends(void)
     assert(r == 4);
     assert(sticky == 1);
     assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
+    assert(seam_calls == 2);
+    assert(bytes == 4 * 1400u);
     printf("test_gso_error_zero_sent_resends OK\n");
+}
+
+static void
+test_gso_error_einval_resends(void)
+{
+    /* Mirror of test_gso_error_zero_sent_resends with EINVAL instead of EIO:
+     * pins gso_class_error()'s set membership beyond just EIO. */
+    seam_reset();
+    struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    int sticky = 0;
+    uint64_t bytes = 0;
+    seam_fail_call = 1;
+    seam_fail_errno = EINVAL;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
+                                     &sticky, &bytes);
+    assert(r == 4);
+    assert(sticky == 1);
+    assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
+    printf("test_gso_error_einval_resends OK\n");
 }
 
 static void
@@ -295,6 +318,7 @@ test_eagain_mid(void)
                                      &sticky, &bytes);
     assert(r == 2);
     assert(sticky == 0);
+    assert(seam_calls == 2);
     printf("test_eagain_mid OK\n");
 }
 
@@ -354,6 +378,28 @@ test_run1_gso_errno_no_sticky(void)
 }
 
 static void
+test_sticky_short_circuit(void)
+{
+    /* *gso_disabled already set from a prior call: the `|| *gso_disabled`
+     * term in mqvpn_udp_send_batch must take the sendmmsg fallback even
+     * though use_gso == 1 and this run would otherwise qualify for GSO
+     * (deleting that term passes every other case in this suite). */
+    seam_reset();
+    struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    int sticky = 1;
+    uint64_t bytes = 0;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
+                                     &sticky, &bytes);
+    assert(r == 4);
+    assert(seam_calls == 1);
+    assert(seam_ops[0] == 'M');
+    assert(sticky == 1);
+    printf("test_sticky_short_circuit OK\n");
+}
+
+static void
 test_full_32_burst(void)
 {
     seam_reset();
@@ -384,12 +430,14 @@ main(void)
     test_mixed_runs();
     test_fallback_sendmmsg();
     test_gso_error_zero_sent_resends();
+    test_gso_error_einval_resends();
     test_gso_error_after_progress_stops();
     test_eagain_first();
     test_eagain_mid();
     test_mmsg_partial_stops();
     test_hard_error_zero();
     test_run1_gso_errno_no_sticky();
+    test_sticky_short_circuit();
     test_full_32_burst();
     return 0;
 }

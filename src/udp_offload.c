@@ -136,6 +136,8 @@ mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
                      const struct sockaddr *peer, socklen_t peerlen, int use_gso,
                      int *gso_disabled, uint64_t *bytes_sent)
 {
+    if (cnt == 0) return 0; /* nothing to do; avoids classifying stale errno */
+
     if (!use_gso || *gso_disabled) {
         ssize_t r = send_batch_mmsg(fd, iov, cnt, peer, peerlen, bytes_sent);
         if (r > 0) return r;
