@@ -58,6 +58,7 @@
 #include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
+#include "udp_offload.h"
 
 /* ─── Constants ─── */
 
@@ -236,6 +237,7 @@ struct mqvpn_client_s {
     uint64_t tcp_flows_rejected;
     uint64_t pkts_lane_tcp_dropped;
     int srtt_ms;
+    int gso_available; /* engine-create probe result */
 
     /* Multipath (Level 1) */
     path_entry_t paths[MQVPN_MAX_PATHS];
@@ -598,14 +600,31 @@ mqvpn_client_first_active_fd(const mqvpn_client_t *c)
  *     (post-OMR-backport semantics protecting against EBADF / sendto-on-
  *     dead-iface).
  */
+/* Entry-returning variant of get_fd_for_path() — a LITERAL mirror of its
+ * branch structure. The first branch is deliberately unconditional: a
+ * path_id bound to a dropped slot returns that slot (fd == -1) so the
+ * caller downgrades via path_send_dead_retcode during the drop window —
+ * it must NOT fall through to a sibling fd (that would put this path's
+ * CIDs on another path's 4-tuple and change the documented drop-window
+ * semantics). The sticky GSO flag lives on the slot owning the fd
+ * actually used, which under the primary/first-active fallback is not
+ * the requested path_id's slot. */
+static path_entry_t *
+get_path_entry_for_send(mqvpn_client_t *c, uint64_t xqc_path_id)
+{
+    path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
+    if (p) return p; /* even if dropped: caller handles fd < 0 */
+    int pidx = c->primary_path_idx;
+    if (pidx < c->n_paths && c->paths[pidx].platform_attached) return &c->paths[pidx];
+    int idx = first_active_idx(c);
+    return (idx >= 0) ? &c->paths[idx] : NULL;
+}
+
 static int
 get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
-    path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
-    if (p) return p->fd;
-    int pidx = c->primary_path_idx;
-    if (pidx < c->n_paths && c->paths[pidx].platform_attached) return c->paths[pidx].fd;
-    return mqvpn_client_first_active_fd(c);
+    path_entry_t *p = get_path_entry_for_send(c, xqc_path_id);
+    return p ? p->fd : -1;
 }
 
 /* Pick the next active path index for the next handshake attempt.
@@ -1110,6 +1129,27 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     }
     return res;
 }
+
+#if defined(__linux__)
+static ssize_t
+cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vlen,
+                 const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
+{
+    cli_conn_t *conn = (cli_conn_t *)conn_user_data;
+    mqvpn_client_t *c = conn->client;
+    path_entry_t *p = get_path_entry_for_send(c, path_id);
+    if (!p || p->fd < 0) return path_send_dead_retcode(c);
+
+    uint64_t bytes = 0;
+    ssize_t r = mqvpn_udp_send_batch(p->fd, msg_iov, vlen, peer, peerlen,
+                                     c->gso_available, &p->gso_disabled, &bytes);
+    c->bytes_tx += bytes;
+    p->bytes_tx += bytes;
+    if (r >= 0) return r;
+    if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
+    return path_send_dead_retcode(c); /* same downgrade policy as cb_write_socket_ex */
+}
+#endif
 
 /* ─── TLS callbacks ─── */
 
@@ -2777,6 +2817,25 @@ init_xquic_engine(mqvpn_client_t *c)
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_CLIENT) < 0) goto fail;
     xconfig.cfg_log_level = (xqc_log_level_t)map_log_level_to_xquic(cfg->log_level);
 
+#if defined(__linux__)
+    /* `cfg` is init_xquic_engine's existing local (= &c->config).
+     * MQVPN_MAX_PKT_OUT_SIZE <= 1500 guards mqvpn_udp_send_batch()'s
+     * single-run/no-splitting contract (udp_offload.h) — a future raise
+     * of the constant above ~2KB must revisit run-splitting before this
+     * registration can stay unconditional. Comparing a macro literal
+     * against 1500 compiles warning-clean under -Wall -Wextra -Werror
+     * (verified with gcc and clang: no -Wtautological-compare /
+     * -Wtype-limits fires for two integer-constant operands), so no
+     * extra silencing is needed here. */
+    if (cfg->udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500) {
+        c->gso_available = mqvpn_udp_gso_probe();
+        tcbs.write_mmsg_ex = cb_write_mmsg_ex;
+        xconfig.sendmmsg_on = 1;
+        LOG_I(c, "udp-gso: %s",
+              c->gso_available ? "GSO enabled" : "GSO unavailable, using sendmmsg");
+    }
+#endif
+
     c->engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xconfig, &engine_ssl, &engine_cbs,
                                   &tcbs, c);
     if (!c->engine) goto fail;
@@ -3018,6 +3077,8 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
     path_entry_init(p);
     p->handle = c->next_path_handle++;
     p->fd = fd;
+    /* fd numbers are kernel-recycled; reset on every assignment */
+    p->gso_disabled = 0;
 
     /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
     int bufsize = SOCKET_BUF_SIZE;
