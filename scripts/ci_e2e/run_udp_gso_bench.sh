@@ -68,11 +68,33 @@
 # plausible-looking table once already — see MARKER_FAIL below), or every
 # run failed and there is nothing to report.
 #
+# --- Optional shaped mode (UDP_GSO_BENCH_NETEM=1) ---
+# An unshaped netns never blocks a send: cwnd/pacing never bites, so
+# write_mmsg_ex is only ever called with vlen==1 and GSO measures as
+# neutral (or worse, due to per-call cmsg overhead with nothing to
+# amortize it over). Real links block: with RTT + a rate cap, cwnd/pacing
+# queues datagrams and ACK-clocked bursts hand write_mmsg_ex real vlen>1
+# batches, which is the only regime GSO can show a win in. Setting
+# UDP_GSO_BENCH_NETEM=1 applies tc netem (delay NETEM_DELAY, rate
+# NETEM_RATE — same profile on both paths, both directions) via
+# bench_env_setup.sh's bench_apply_netem, following the same shape/ordering
+# precedent as run_throughput_floor_test.sh:187-191 and
+# bench_env_setup.sh:254-274's bench_apply_netem itself. A single
+# invocation is either fully shaped or fully unshaped — never mixed, so
+# the printed table stays a single-condition comparison (the unshaped
+# numbers already exist from prior runs). With the link saturated by
+# iperf3, CPU is no longer pinned near 100%; the meaningful comparison
+# becomes CPU% at equal throughput between arms, not raw throughput.
+#
 # Usage:
 #   sudo bash scripts/ci_e2e/run_udp_gso_bench.sh [path/to/mqvpn] [duration_s] [runs]
 # Defaults: path/to/mqvpn = build/mqvpn (repo-relative), duration_s = 10,
 #           runs = 3 (per arm; 2*runs total launches, alternating).
 # Env override: IPERF_STREAMS (default 4) — iperf3 -P parallel stream count.
+# Env override: UDP_GSO_BENCH_NETEM (default 0) — set to 1 to shape both
+#           paths with tc netem instead of running on the bare netns.
+# Env override: NETEM_DELAY (default 20ms), NETEM_RATE (default 300mbit) —
+#           only consulted when UDP_GSO_BENCH_NETEM=1.
 
 set -e
 
@@ -84,6 +106,9 @@ MQVPN="${1:-${MQVPN:-${SCRIPT_DIR}/../../build/mqvpn}}"
 DURATION="${2:-10}"
 RUNS="${3:-3}"
 IPERF_STREAMS="${IPERF_STREAMS:-4}"
+UDP_GSO_BENCH_NETEM="${UDP_GSO_BENCH_NETEM:-0}"
+NETEM_DELAY="${NETEM_DELAY:-20ms}"
+NETEM_RATE="${NETEM_RATE:-300mbit}"
 
 if [[ "$EUID" -ne 0 ]]; then
     echo "ERROR: must run as root (sudo)" >&2
@@ -98,6 +123,17 @@ if ! [[ "$RUNS" =~ ^[0-9]+$ ]] || [ "$RUNS" -lt 1 ]; then
     echo "ERROR: runs must be a positive integer, got '$RUNS'" >&2
     exit 2
 fi
+if [[ "$UDP_GSO_BENCH_NETEM" != "0" && "$UDP_GSO_BENCH_NETEM" != "1" ]]; then
+    echo "ERROR: UDP_GSO_BENCH_NETEM must be 0 or 1, got '$UDP_GSO_BENCH_NETEM'" >&2
+    exit 2
+fi
+
+# Same profile on both paths, both directions (see the shaped-mode header
+# comment above) — bench_apply_netem takes one "netem args" string per path
+# and this script deliberately does not offer per-path asymmetry, unlike
+# BENCH_ENV_NETEM's profile table (benchmarks/bench_env_setup.sh) which sweep
+# scripts use for asymmetric Path A/B scenarios; that is out of scope here.
+NETEM_PROFILE="delay ${NETEM_DELAY} rate ${NETEM_RATE}"
 
 # bench_check_test_deps (benchmarks/bench_env_setup.sh:101-118): verifies
 # $MQVPN exists and resolves it to a realpath (mutates the global $MQVPN —
@@ -192,6 +228,12 @@ log_line " Kernel:   $KERNEL"
 log_line " Date:     $RUN_DATE"
 log_line " Duration: ${DURATION}s per run, iperf3 TCP -P ${IPERF_STREAMS}, ${RUNS} runs/arm"
 log_line " CPU tool: $([ "$HAVE_PIDSTAT" -eq 1 ] && echo "pidstat" || echo "/proc/[pid]/stat fallback (pidstat not found)")"
+if [ "$UDP_GSO_BENCH_NETEM" -eq 1 ]; then
+    log_line " Netem:    ON  (both paths, both directions: ${NETEM_PROFILE})"
+    log_line " NOTE:     shaped mode: compare CPU% at equal tput; expect GSO arm lower"
+else
+    log_line " Netem:    OFF (unshaped netns — set UDP_GSO_BENCH_NETEM=1 to shape)"
+fi
 log_line " Arm order (alternating): ${ARM_SEQUENCE[*]}"
 log_line "================================================================"
 
@@ -412,6 +454,23 @@ run_one() {
     bench_cleanup
     bench_setup_netns
 
+    # Shaped mode: apply tc netem to BOTH path veths, both directions (same
+    # precedent as bench_apply_netem itself — benchmarks/bench_env_setup.sh:
+    # 254-274 — and run_throughput_floor_test.sh:187-191), after
+    # bench_setup_netns and before the server starts, so the shaping is in
+    # place before any packet (including the handshake) crosses the netns.
+    # bench_cleanup (called at the top of every run_one, and by the EXIT
+    # trap) already runs `tc qdisc del ... root` for every path slot — see
+    # bench_env_setup.sh:404-405 — so no separate per-arm teardown is needed
+    # here; the qdisc this call adds is torn down by the very next
+    # bench_cleanup, same as bench_setup_netns's veths are.
+    if [ "$UDP_GSO_BENCH_NETEM" -eq 1 ]; then
+        if ! bench_apply_netem "$NETEM_PROFILE" "$NETEM_PROFILE"; then
+            echo "  FAIL: tc netem apply failed" >&2
+            return 1
+        fi
+    fi
+
     # shellcheck disable=SC2086  # extra_flags is intentionally word-split
     if ! bench_start_vpn_server "$extra_flags" "$server_log"; then
         echo "  FAIL: server did not start; tail of $server_log:" >&2
@@ -545,13 +604,15 @@ fi
 
 # --- Compact table + medians, echoed AND appended to $RESULT_FILE ---
 python3 - "$RAW_RESULTS" "$RESULT_FILE" "$MQVPN" "$BIN_SHA256" "$KERNEL" "$RUN_DATE" \
-    "$IPERF_STREAMS" "$DURATION" "${ARM_SEQUENCE[@]}" <<'PYEOF'
+    "$IPERF_STREAMS" "$DURATION" "$UDP_GSO_BENCH_NETEM" "$NETEM_DELAY" "$NETEM_RATE" \
+    "${ARM_SEQUENCE[@]}" <<'PYEOF'
 import sys
 import statistics
 
 argv = sys.argv[1:]
-raw_file, result_file, mqvpn, sha, kernel, run_date, streams, duration = argv[:8]
-arm_seq = argv[8:]
+(raw_file, result_file, mqvpn, sha, kernel, run_date, streams, duration,
+ netem_on, netem_delay, netem_rate) = argv[:11]
+arm_seq = argv[11:]
 
 rows = []
 with open(raw_file) as f:
@@ -577,6 +638,11 @@ lines.append(f"SHA256:   {sha}")
 lines.append(f"Kernel:   {kernel}")
 lines.append(f"Date:     {run_date}")
 lines.append(f"Duration: {duration}s per run, iperf3 TCP -P {streams}")
+if netem_on == "1":
+    lines.append(f"Netem:    ON  (both paths, both directions: delay {netem_delay} rate {netem_rate})")
+    lines.append("NOTE:     shaped mode: compare CPU% at equal tput; expect GSO arm lower")
+else:
+    lines.append("Netem:    OFF (unshaped netns)")
 lines.append(f"Arm order (alternating): {' '.join(arm_seq)}")
 lines.append("=" * 72)
 lines.append("")
