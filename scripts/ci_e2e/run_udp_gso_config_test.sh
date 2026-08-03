@@ -133,8 +133,10 @@ run_test() {
 # bench_start_vpn_client (benchmarks/bench_env_setup.sh:312-340) only takes
 # a --path list, not arbitrary extra flags, so -C can't go through it. This
 # mirrors run_reinjection_test.sh's start_client_with_auth_key /
-# run_control_api_test.sh's client launcher: same fixed flag set as
-# bench_start_vpn_client's body, plus an extra_flags passthrough.
+# run_control_api_test.sh's client launcher: SAME flag set as
+# bench_start_vpn_client's body (including --scheduler "$BENCH_SCHEDULER",
+# previously missing here — a real flag-set gap, not just parity in name),
+# plus an extra_flags passthrough.
 start_client() {
     local extra_flags="$1"
     local client_log="$2"
@@ -151,6 +153,7 @@ start_client() {
         --server "${IP_A_SERVER_ADDR}:${VPN_LISTEN_PORT}" \
         --path "$VETH_A0" --path "$VETH_B0" \
         --auth-key "$_BENCH_PSK" \
+        --scheduler "$BENCH_SCHEDULER" \
         --insecure \
         --log-level "$BENCH_LOG_LEVEL" \
         $extra_flags \

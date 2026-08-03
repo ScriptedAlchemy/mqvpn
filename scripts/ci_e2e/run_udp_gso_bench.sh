@@ -60,9 +60,13 @@
 # OPTIONAL — auto-detected, falls back to /proc if absent.
 #
 # This is a local maintainer tool, NOT wired into CI (no ci.yml/stress.yml
-# reference) and not a pass/fail gate — it always exits 0 on a completed
-# comparison (nonzero only if sanitizer errors fired, or if every run
-# failed and there is nothing to report).
+# reference). It is not a throughput/CPU pass/fail gate — a completed
+# comparison always prints its table regardless of the numbers — but it
+# DOES exit nonzero (after printing the table) if: a sanitizer error fired
+# in any run, the "udp-gso: " marker didn't match the expected present/
+# absent state for its arm in any run (a silently-void A/B produced a
+# plausible-looking table once already — see MARKER_FAIL below), or every
+# run failed and there is nothing to report.
 #
 # Usage:
 #   sudo bash scripts/ci_e2e/run_udp_gso_bench.sh [path/to/mqvpn] [duration_s] [runs]
@@ -110,6 +114,13 @@ CLK_TCK="$(getconf CLK_TCK)"
 LOG_DIR="$(mktemp -d)"
 RAW_RESULTS="$(mktemp)"
 SANITIZER_FAIL=0
+# Set to 1 by run_one() when the "udp-gso: " marker doesn't match the arm's
+# expected present/absent state. A mismatch means the A/B comparison ran
+# with the wrong code path in at least one run — the printed table would
+# otherwise look like a normal, trustworthy A/B while silently comparing
+# apples to apples (or worse). Checked once at exit, same shape as
+# SANITIZER_FAIL below.
+MARKER_FAIL=0
 
 OUT_DIR="${SCRIPT_DIR}/../../ci_sweep_results"
 mkdir -p "$OUT_DIR"
@@ -137,6 +148,10 @@ cleanup() {
         rm -rf "$LOG_DIR"
     fi
     rm -f "$RAW_RESULTS"
+    if (( MARKER_FAIL != 0 )); then
+        echo "FAIL: udp-gso marker mismatch detected in one or more runs (see FAIL lines above)" >&2
+        exit 1
+    fi
     if (( SANITIZER_FAIL != 0 )); then
         echo "FAIL: sanitizer errors detected" >&2
         exit 1
@@ -185,8 +200,10 @@ log_line "================================================================"
 # bench_start_vpn_client (benchmarks/bench_env_setup.sh:312-340) only takes
 # a --path list, not arbitrary extra flags, so -C can't go through it. Same
 # shape as run_udp_gso_config_test.sh's start_client (scripts/ci_e2e/
-# run_udp_gso_config_test.sh:138-167): fixed flag set matching
-# bench_start_vpn_client's body, plus an extra_flags passthrough.
+# run_udp_gso_config_test.sh:138-167): SAME flag set as
+# bench_start_vpn_client's body (including --scheduler "$BENCH_SCHEDULER",
+# previously missing here — a real flag-set gap, not just parity in name),
+# plus an extra_flags passthrough.
 start_client() {
     local extra_flags="$1"
     local client_log="$2"
@@ -203,6 +220,7 @@ start_client() {
         --server "${IP_A_SERVER_ADDR}:${VPN_LISTEN_PORT}" \
         --path "$VETH_A0" --path "$VETH_B0" \
         --auth-key "$_BENCH_PSK" \
+        --scheduler "$BENCH_SCHEDULER" \
         --insecure \
         --log-level "$BENCH_LOG_LEVEL" \
         $extra_flags \
@@ -427,11 +445,27 @@ run_one() {
     else
         marker_state="MIXED(s=${server_hits},c=${client_hits})"
     fi
+    # A mismatch here means this run's throughput/CPU numbers were measured
+    # against the WRONG code path (e.g. "disabled" arm actually ran with GSO
+    # registered) — a silently-void A/B produced a plausible-looking table
+    # once already. This is a hard failure (MARKER_FAIL, checked at script
+    # exit), not a WARN: keep the run's row in the table (marker_state below
+    # still reports what was actually observed) but fail the script loudly.
     if [ "$expect_present" -eq 1 ] && [ "$marker_state" != "present" ]; then
-        echo "  WARN: expected udp-gso marker present, got ${marker_state}" >&2
+        echo "  FAIL: expected udp-gso marker present, got ${marker_state}" >&2
+        echo "  --- server log tail ($server_log) ---" >&2
+        tail -30 "$server_log" >&2 2>/dev/null
+        echo "  --- client log tail ($client_log) ---" >&2
+        tail -30 "$client_log" >&2 2>/dev/null
+        MARKER_FAIL=1
     fi
     if [ "$expect_present" -eq 0 ] && [ "$marker_state" != "absent" ]; then
-        echo "  WARN: expected udp-gso marker absent, got ${marker_state}" >&2
+        echo "  FAIL: expected udp-gso marker absent, got ${marker_state}" >&2
+        echo "  --- server log tail ($server_log) ---" >&2
+        tail -30 "$server_log" >&2 2>/dev/null
+        echo "  --- client log tail ($client_log) ---" >&2
+        tail -30 "$client_log" >&2 2>/dev/null
+        MARKER_FAIL=1
     fi
 
     # iperf3 TCP upload (client -> server, no -R): same idiom as
