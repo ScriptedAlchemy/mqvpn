@@ -500,8 +500,11 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
  * svr_conn_t*, see the comment in cb_accept), and the burst always targets
  * s->udp_fd with the peer sockaddr xquic hands in. path_id is unused for the
  * same reason cb_write_socket_ex ignores it above. gso_available/gso_disabled
- * are server-wide (one fd => one sticky flag), reset on every
- * mqvpn_server_set_socket_fd() call. */
+ * are server-wide (one fd => one sticky flag): gso_available is probed once
+ * in mqvpn_server_new() at engine-create time and never re-probed, while
+ * only gso_disabled resets, on every mqvpn_server_set_socket_fd() call (fd
+ * numbers are kernel-recycled, so a fresh fd deserves a fresh GSO attempt).
+ */
 static ssize_t
 cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vlen,
                  const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
@@ -1861,6 +1864,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
 
 #if defined(__linux__)
+    _Static_assert(XQC_MAX_SEND_MSG_ONCE <= MQVPN_OFFLOAD_MAX_BATCH,
+                   "fallback mmsghdr array must cover xquic's burst size");
     /* `cfg` is mqvpn_server_new's own parameter, holding the same udp_gso
      * value as s->config.udp_gso (memcpy'd above; never touched by the
      * [Hybrid]-only sanitize pass). MQVPN_MAX_PKT_OUT_SIZE <= 1500 guards

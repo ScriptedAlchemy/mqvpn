@@ -2827,6 +2827,8 @@ init_xquic_engine(mqvpn_client_t *c)
     xconfig.cfg_log_level = (xqc_log_level_t)map_log_level_to_xquic(cfg->log_level);
 
 #if defined(__linux__)
+    _Static_assert(XQC_MAX_SEND_MSG_ONCE <= MQVPN_OFFLOAD_MAX_BATCH,
+                   "fallback mmsghdr array must cover xquic's burst size");
     /* `cfg` is init_xquic_engine's existing local (= &c->config).
      * MQVPN_MAX_PKT_OUT_SIZE <= 1500 guards mqvpn_udp_send_batch()'s
      * single-run/no-splitting contract (udp_offload.h) — a future raise

@@ -95,15 +95,15 @@ send_one_run(int fd, const struct iovec *iov, size_t run, uint16_t seg,
 }
 
 /* Sends the whole batch via one sendmmsg() call (non-GSO fallback / GSO
- * disabled path). cnt is capped at 32 (XQC_MAX_SEND_MSG_ONCE) — see the
- * forward-compat invariant on mqvpn_udp_send_batch() in udp_offload.h. */
+ * disabled path). cnt is capped at MQVPN_OFFLOAD_MAX_BATCH (== 32 ==
+ * XQC_MAX_SEND_MSG_ONCE) — see the forward-compat invariant on
+ * mqvpn_udp_send_batch() in udp_offload.h. */
 static ssize_t
 send_batch_mmsg(int fd, const struct iovec *iov, unsigned int cnt,
                 const struct sockaddr *peer, socklen_t peerlen, uint64_t *bytes_sent)
 {
-    /* XQC_MAX_SEND_MSG_ONCE is 32; keep a static cap with margin. */
-    struct mmsghdr mv[64];
-    if (cnt > 64) cnt = 64;
+    struct mmsghdr mv[MQVPN_OFFLOAD_MAX_BATCH];
+    if (cnt > MQVPN_OFFLOAD_MAX_BATCH) cnt = MQVPN_OFFLOAD_MAX_BATCH;
     memset(mv, 0, sizeof(mv[0]) * cnt);
     for (unsigned int i = 0; i < cnt; i++) {
         mv[i].msg_hdr.msg_name = (void *)peer;
