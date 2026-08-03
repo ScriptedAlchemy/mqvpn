@@ -40,8 +40,14 @@ static size_t seam_bytes;
 ssize_t
 mqvpn_seam_sendmsg(int fd, const struct msghdr *msg, int flags)
 {
-    (void)fd;
+    /* Every case in this suite drives mqvpn_udp_send_batch() with the same
+     * fake fd (3) and an AF_INET peer — pin both, since a mismatch would
+     * mean the peer/fd arguments were not propagated from the batch call
+     * through to the underlying syscall. */
+    assert(fd == 3);
     assert(flags & MSG_DONTWAIT);
+    assert(msg->msg_name != NULL);
+    assert(((const struct sockaddr *)msg->msg_name)->sa_family == AF_INET);
     seam_ops[seam_calls++] = 'm';
     seam_last_was_gso = 0;
     if (msg->msg_controllen != 0) {
@@ -68,12 +74,19 @@ mqvpn_seam_sendmsg(int fd, const struct msghdr *msg, int flags)
 int
 mqvpn_seam_sendmmsg(int fd, struct mmsghdr *mv, unsigned int vlen, int flags)
 {
-    (void)fd;
+    assert(fd == 3);
     assert(flags & MSG_DONTWAIT);
     seam_ops[seam_calls++] = 'M';
     if (seam_fail_call == seam_calls) {
         errno = seam_fail_errno;
         return -1;
+    }
+    /* Peer propagation check (mmsg equivalent of mqvpn_seam_sendmsg's): the
+     * fallback path fans one peer out to every mmsghdr entry — check all of
+     * them, not just the first. */
+    for (unsigned int i = 0; i < vlen; i++) {
+        assert(mv[i].msg_hdr.msg_name != NULL);
+        assert(((const struct sockaddr *)mv[i].msg_hdr.msg_name)->sa_family == AF_INET);
     }
     unsigned int n = seam_mmsg_partial ? (unsigned)seam_mmsg_partial : vlen;
     for (unsigned int i = 0; i < n; i++) {
@@ -159,6 +172,7 @@ test_gso_full_burst(void)
                            iv(1400), iv(1400), iv(1400), iv(300)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     ssize_t r = mqvpn_udp_send_batch(3, iov, 9, (struct sockaddr *)&peer, sizeof peer, 1,
@@ -179,6 +193,7 @@ test_gso_single_skips_cmsg(void)
     struct iovec iov[1] = {iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     ssize_t r = mqvpn_udp_send_batch(3, iov, 1, (struct sockaddr *)&peer, sizeof peer, 1,
@@ -197,6 +212,7 @@ test_mixed_runs(void)
     struct iovec iov[4] = {iv(1400), iv(1400), iv(200), iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
@@ -214,6 +230,7 @@ test_fallback_sendmmsg(void)
     struct iovec iov[3] = {iv(1400), iv(1400), iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     ssize_t r = mqvpn_udp_send_batch(3, iov, 3, (struct sockaddr *)&peer, sizeof peer, 0,
@@ -231,6 +248,7 @@ test_gso_error_zero_sent_resends(void)
     struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     seam_fail_call = 1;
@@ -254,6 +272,7 @@ test_gso_error_einval_resends(void)
     struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     seam_fail_call = 1;
@@ -267,12 +286,36 @@ test_gso_error_einval_resends(void)
 }
 
 static void
+test_gso_error_enotsup_resends(void)
+{
+    /* Mirror of test_gso_error_einval_resends with ENOTSUP instead of
+     * EINVAL: pins gso_class_error()'s set membership for all three
+     * documented GSO-class errnos (EIO/EINVAL/ENOTSUP). */
+    seam_reset();
+    struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
+    int sticky = 0;
+    uint64_t bytes = 0;
+    seam_fail_call = 1;
+    seam_fail_errno = ENOTSUP;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
+                                     &sticky, &bytes);
+    assert(r == 4);
+    assert(sticky == 1);
+    assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
+    printf("test_gso_error_enotsup_resends OK\n");
+}
+
+static void
 test_gso_error_after_progress_stops(void)
 {
     seam_reset();
     struct iovec iov[4] = {iv(1400), iv(1400), iv(1500), iv(1500)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     seam_fail_call = 2;
@@ -282,7 +325,35 @@ test_gso_error_after_progress_stops(void)
     assert(r == 2);
     assert(sticky == 1);
     assert(seam_calls == 2);
+    assert(bytes == 2 * 1400u);
     printf("test_gso_error_after_progress_stops OK\n");
+}
+
+static void
+test_eintr_retries(void)
+{
+    /* The generic seam_fail_call/seam_fail_errno mechanism already models
+     * EINTR correctly with no extra seam state: seam_calls increments on
+     * every physical invocation (success or failure), so failing exactly
+     * call 1 with EINTR is inherently one-shot — the retried call (call 2,
+     * driven by src/udp_offload.c's own `while (r < 0 && errno == EINTR)`
+     * loop) does not match seam_fail_call again and proceeds normally. */
+    seam_reset();
+    struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
+    int sticky = 0;
+    uint64_t bytes = 0;
+    seam_fail_call = 1;
+    seam_fail_errno = EINTR;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
+                                     &sticky, &bytes);
+    assert(r == 4);
+    assert(seam_calls == 2); /* retry happened */
+    assert(sticky == 0);
+    assert(bytes == 4 * 1400u);
+    printf("test_eintr_retries OK\n");
 }
 
 static void
@@ -292,6 +363,7 @@ test_eagain_first(void)
     struct iovec iov[2] = {iv(1400), iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     seam_fail_call = 1;
@@ -310,6 +382,7 @@ test_eagain_mid(void)
     struct iovec iov[4] = {iv(1400), iv(1400), iv(1500), iv(1500)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     seam_fail_call = 2;
@@ -329,6 +402,7 @@ test_mmsg_partial_stops(void)
     struct iovec iov[5] = {iv(100), iv(200), iv(300), iv(400), iv(500)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     seam_mmsg_partial = 3;
@@ -348,6 +422,7 @@ test_hard_error_zero(void)
     struct iovec iov[2] = {iv(1400), iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     seam_fail_call = 1;
@@ -365,6 +440,7 @@ test_run1_gso_errno_no_sticky(void)
     struct iovec iov[1] = {iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     seam_fail_call = 1;
@@ -388,6 +464,7 @@ test_sticky_short_circuit(void)
     struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 1;
     uint64_t bytes = 0;
     ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
@@ -408,6 +485,7 @@ test_full_32_burst(void)
         iov[i] = iv(1400);
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
     int sticky = 0;
     uint64_t bytes = 0;
     ssize_t r = mqvpn_udp_send_batch(3, iov, 32, (struct sockaddr *)&peer, sizeof peer, 1,
@@ -418,6 +496,31 @@ test_full_32_burst(void)
     assert(seam_last_seg == 1400);
     assert(bytes == 32 * 1400u);
     printf("test_full_32_burst OK\n");
+}
+
+static void
+test_fallback_32_burst(void)
+{
+    /* Fallback (use_gso=0) counterpart of test_full_32_burst: pins the
+     * sendmmsg path's cap headroom now that MQVPN_OFFLOAD_MAX_BATCH (32)
+     * replaced the old mv[64] margin — a full 32-datagram burst must still
+     * fit in one sendmmsg() call with no truncation. */
+    seam_reset();
+    struct iovec iov[32];
+    for (int i = 0; i < 32; i++)
+        iov[i] = iv(1400);
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
+    int sticky = 0;
+    uint64_t bytes = 0;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 32, (struct sockaddr *)&peer, sizeof peer, 0,
+                                     &sticky, &bytes);
+    assert(r == 32);
+    assert(seam_calls == 1);
+    assert(seam_ops[0] == 'M');
+    assert(bytes == 32 * 1400u);
+    printf("test_fallback_32_burst OK\n");
 }
 
 int
@@ -431,7 +534,9 @@ main(void)
     test_fallback_sendmmsg();
     test_gso_error_zero_sent_resends();
     test_gso_error_einval_resends();
+    test_gso_error_enotsup_resends();
     test_gso_error_after_progress_stops();
+    test_eintr_retries();
     test_eagain_first();
     test_eagain_mid();
     test_mmsg_partial_stops();
@@ -439,5 +544,6 @@ main(void)
     test_run1_gso_errno_no_sticky();
     test_sticky_short_circuit();
     test_full_32_burst();
+    test_fallback_32_burst();
     return 0;
 }
