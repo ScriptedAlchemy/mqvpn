@@ -2837,6 +2837,9 @@ init_xquic_engine(mqvpn_client_t *c)
         c->gso_available = mqvpn_udp_gso_probe();
         tcbs.write_mmsg_ex = cb_write_mmsg_ex;
         xconfig.sendmmsg_on = 1;
+        /* The "udp-gso: " wording is grepped by
+         * scripts/ci_e2e/run_udp_gso_config_test.sh as a presence/absence
+         * invariant — rewording it silently breaks that test. */
         LOG_I(c, "udp-gso: %s",
               c->gso_available ? "GSO enabled" : "GSO unavailable, using sendmmsg");
     }
