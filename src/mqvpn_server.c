@@ -56,6 +56,7 @@
 #include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
+#include "udp_offload.h"
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
 #  include "hybrid/tcp_egress.h"
 #endif
@@ -158,6 +159,8 @@ struct mqvpn_server_s {
 
     /* UDP socket (provided by platform via set_socket_fd) */
     int udp_fd;
+    int gso_available; /* engine-create probe result */
+    int gso_disabled;  /* runtime sticky; reset on fd assignment */
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
 
@@ -487,6 +490,58 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     (void)path_id;
     return cb_write_socket(buf, size, peer, peerlen, conn_user_data);
 }
+
+#if defined(__linux__)
+/* Batch/GSO send for post-accept server conns. The server has ONE socket for
+ * all clients (unlike the client's per-path fd), so — unlike the client's
+ * cb_write_mmsg_ex, which resolves a path_entry_t per path_id — there is no
+ * per-path/per-client state to consult here: conn_user_data resolves to s
+ * exactly as cb_write_socket does (conn_user_data reinterpreted as
+ * svr_conn_t*, see the comment in cb_accept), and the burst always targets
+ * s->udp_fd with the peer sockaddr xquic hands in. path_id is unused for the
+ * same reason cb_write_socket_ex ignores it above. gso_available/gso_disabled
+ * are server-wide (one fd => one sticky flag): gso_available is probed once
+ * in mqvpn_server_new() at engine-create time and never re-probed, while
+ * only gso_disabled resets, on every mqvpn_server_set_socket_fd() call (fd
+ * numbers are kernel-recycled, so a fresh fd deserves a fresh GSO attempt).
+ */
+static ssize_t
+cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vlen,
+                 const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
+{
+    (void)path_id;
+    svr_conn_t *conn = (svr_conn_t *)conn_user_data;
+    mqvpn_server_t *s = conn->server;
+
+    if (s->udp_fd < 0) return XQC_SOCKET_ERROR; /* same check as svr_do_send */
+
+    uint64_t bytes = 0;
+    int was_gso = !s->gso_disabled;
+    ssize_t r = mqvpn_udp_send_batch(s->udp_fd, msg_iov, vlen, peer, peerlen,
+                                     s->gso_available, &s->gso_disabled, &bytes);
+    if (was_gso && s->gso_disabled) {
+        /* One-shot transition: gso_disabled only resets on
+         * mqvpn_server_set_socket_fd(), so this fires at most once per
+         * server socket lifetime — no spam guard needed. errno
+         * intentionally omitted — see the matching comment in the client's
+         * cb_write_mmsg_ex for why it isn't trustworthy at this point. */
+        LOG_W(s, "udp-gso: runtime GSO failure, sticky fallback to sendmmsg on the "
+                 "server socket");
+    }
+    /* single aggregate counter — the server has no per-path bytes_tx (that's
+     * a client-only concept) — matching svr_do_send's s->bytes_tx accounting.
+     * (bytes==0 when r<0 per udp_offload.h) */
+    s->bytes_tx += bytes;
+    if (r >= 0) return r;
+    if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
+    /* xquic's own |error send mmsg| log carries no errno, and XQC_SOCKET_ERROR
+     * from this callback can escalate to connection close; GSO-class errors
+     * are absorbed by the sticky fallback in mqvpn_udp_send_batch, so this
+     * branch is rare — no spam risk. */
+    LOG_E(s, "batch send: %s", strerror(errno));
+    return XQC_SOCKET_ERROR; /* same convention as svr_do_send's hard-error path */
+}
+#endif
 
 static ssize_t
 cb_write_before_accept(const unsigned char *buf, size_t size, const struct sockaddr *peer,
@@ -1818,6 +1873,30 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_SERVER) < 0) goto cleanup;
     xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
 
+#if defined(__linux__)
+    _Static_assert(XQC_MAX_SEND_MSG_ONCE <= MQVPN_OFFLOAD_MAX_BATCH,
+                   "fallback mmsghdr array must cover xquic's burst size");
+    /* `cfg` is mqvpn_server_new's own parameter, holding the same udp_gso
+     * value as s->config.udp_gso (memcpy'd above; never touched by the
+     * [Hybrid]-only sanitize pass). MQVPN_MAX_PKT_OUT_SIZE <= 1500 guards
+     * mqvpn_udp_send_batch()'s single-run/no-splitting contract
+     * (udp_offload.h) — mirrors the client-side registration in
+     * mqvpn_client.c's init_xquic_engine(). xquic requires
+     * XQC_CONN_FLAG_SERVER_ACCEPT for batch sends on server conns, so
+     * pre-accept traffic (cb_write_before_accept) keeps using
+     * conn_send_packet_before_accept unaffected by this registration. */
+    if (cfg->udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500) {
+        s->gso_available = mqvpn_udp_gso_probe();
+        tcbs.write_mmsg_ex = cb_write_mmsg_ex;
+        xconfig.sendmmsg_on = 1;
+        /* The "udp-gso: " wording is grepped by
+         * scripts/ci_e2e/run_udp_gso_config_test.sh as a presence/absence
+         * invariant — rewording it silently breaks that test. */
+        LOG_I(s, "udp-gso: %s",
+              s->gso_available ? "GSO enabled" : "GSO unavailable, using sendmmsg");
+    }
+#endif
+
     s->engine = xqc_engine_create(XQC_ENGINE_SERVER, &xconfig, &engine_ssl, &engine_cbs,
                                   &tcbs, s);
     if (!s->engine) goto cleanup;
@@ -1960,6 +2039,8 @@ mqvpn_server_set_socket_fd(mqvpn_server_t *s, int fd, const struct sockaddr *loc
 {
     if (!s || fd < 0) return MQVPN_ERR_INVALID_ARG;
     s->udp_fd = fd;
+    /* fd numbers are kernel-recycled; reset on every assignment */
+    s->gso_disabled = 0;
     if (local_addr && local_addrlen > 0) {
         if (local_addrlen > sizeof(s->local_addr)) local_addrlen = sizeof(s->local_addr);
         memcpy(&s->local_addr, local_addr, local_addrlen);

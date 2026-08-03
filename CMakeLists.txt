@@ -213,6 +213,7 @@ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 set(MQVPN_LIB_SOURCES
     src/mqvpn_config.c
     src/mqvpn_client.c
+    src/udp_offload.c
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
     src/mqvpn_util.c
@@ -797,6 +798,17 @@ if(BUILD_TESTING)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+
+    # UDP GSO TX offload (issue #167): pure syscall/mechanics layer, no xquic
+    # dependency. MQVPN_OFFLOAD_TEST_SEAM is wired: it swaps sendmsg/sendmmsg
+    # for mqvpn_seam_sendmsg/mqvpn_seam_sendmmsg (defined in
+    # tests/test_udp_offload.c), which the fault-injection tests use to force
+    # error/short-write/EAGAIN paths deterministically.
+    add_executable(test_udp_offload tests/test_udp_offload.c src/udp_offload.c)
+    target_compile_definitions(test_udp_offload PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
+    target_include_directories(test_udp_offload PRIVATE src include)
+    set_target_properties(test_udp_offload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_udp_offload COMMAND test_udp_offload)
 
     # Darwin platform-twin PATH-stub state machine tests (Task 10), also
     # registered here on Linux: the twins (darwin/dns.c, darwin/routing.c,

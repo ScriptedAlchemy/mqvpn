@@ -340,8 +340,9 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 | Key | Description | Default |
 |-----|-------------|---------|
 | `RecvRateLimit` | Conn-level receive-rate cap in bytes/sec; bounds the aggregate QUIC receive window to `rate x RTT`. Client-side only — the server ignores it (a server-side cap would throttle client upload). Maximum `10000000000` (10 GB/s); larger values are rejected with a warning and the key falls back to `0`. Leave `0` unless memory-constrained (mobile clients set this internally) | `0` (off) |
+| `UdpGso` | Batches UDP sends with kernel GSO for lower CPU use at high throughput. Automatically falls back to regular batched sends on kernels without support (< 4.18). Linux and Android only; no effect elsewhere. Set to `false` to restore the previous per-packet send path | `true` |
 
-In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`).
+In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`).
 
 ## MTU Guidelines
 
