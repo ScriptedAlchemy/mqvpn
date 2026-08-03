@@ -83,7 +83,13 @@ SANITIZER_FAIL=0
 cleanup() {
     local _rc=$?
     bench_cleanup
-    if (( _rc != 0 )); then
+    # Preserve logs on ANY failure mode, not just a nonzero $_rc: a run that
+    # returns 0 (every arm's own functional check passed) can still have
+    # SANITIZER_FAIL set from a check that only fires after the arm itself
+    # reported success — deleting the logs before that check is even
+    # consulted would defeat the "Logs preserved at: ..." message below for
+    # exactly the failure mode it exists to cover.
+    if (( _rc != 0 || SANITIZER_FAIL != 0 )); then
         echo "Logs preserved at: $LOG_DIR" >&2
     else
         rm -rf "$LOG_DIR"

@@ -178,7 +178,13 @@ log_line() {
 cleanup() {
     local _rc=$?
     bench_cleanup
-    if (( _rc != 0 )); then
+    # Preserve logs on ANY failure mode, not just a nonzero $_rc: a run that
+    # returns 0 (every arm's own functional check passed) can still have
+    # MARKER_FAIL or SANITIZER_FAIL set from a check that only fires after
+    # the arm itself reported success — deleting the logs before those
+    # checks are even consulted would defeat the "Logs preserved at: ..."
+    # message below for exactly the failure modes it exists to cover.
+    if (( _rc != 0 || MARKER_FAIL != 0 || SANITIZER_FAIL != 0 )); then
         echo "Logs preserved at: $LOG_DIR" >&2
     else
         rm -rf "$LOG_DIR"
@@ -474,7 +480,7 @@ run_one() {
     # shellcheck disable=SC2086  # extra_flags is intentionally word-split
     if ! bench_start_vpn_server "$extra_flags" "$server_log"; then
         echo "  FAIL: server did not start; tail of $server_log:" >&2
-        tail -30 "$server_log" 2>/dev/null >&2
+        tail -30 "$server_log" >&2 2>/dev/null
         return 1
     fi
 
