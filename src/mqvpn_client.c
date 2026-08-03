@@ -1142,8 +1142,23 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     if (!p || p->fd < 0) return path_send_dead_retcode(c);
 
     uint64_t bytes = 0;
+    int was_gso = !p->gso_disabled;
     ssize_t r = mqvpn_udp_send_batch(p->fd, msg_iov, vlen, peer, peerlen,
                                      c->gso_available, &p->gso_disabled, &bytes);
+    if (was_gso && p->gso_disabled) {
+        /* One-shot transition: gso_disabled only resets on fd (re)assignment
+         * (mqvpn_client_add_path_fd), so this fires at most once per fd
+         * lifetime — no spam guard needed. errno is intentionally omitted:
+         * this transition is also reachable when the call overall SUCCEEDED
+         * (r >= 0, via mqvpn_udp_send_batch's zero-sent retry-as-sendmmsg
+         * path), and errno is only meaningful right after a call reports
+         * failure — trusting it here would depend on an unenforced detail
+         * of udp_offload.c's internals (that nothing between the failed
+         * GSO send and a later successful retry touches errno) surviving
+         * future refactors. */
+        LOG_W(c,
+              "udp-gso: runtime GSO failure, sticky fallback to sendmmsg on this path");
+    }
     c->bytes_tx += bytes;
     /* bytes attributed to the slot owning the fd actually used — deliberately
      * differs from cb_write_socket_ex's requested-path attribution in the

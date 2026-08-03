@@ -516,8 +516,18 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     if (s->udp_fd < 0) return XQC_SOCKET_ERROR; /* same check as svr_do_send */
 
     uint64_t bytes = 0;
+    int was_gso = !s->gso_disabled;
     ssize_t r = mqvpn_udp_send_batch(s->udp_fd, msg_iov, vlen, peer, peerlen,
                                      s->gso_available, &s->gso_disabled, &bytes);
+    if (was_gso && s->gso_disabled) {
+        /* One-shot transition: gso_disabled only resets on
+         * mqvpn_server_set_socket_fd(), so this fires at most once per
+         * server socket lifetime — no spam guard needed. errno
+         * intentionally omitted — see the matching comment in the client's
+         * cb_write_mmsg_ex for why it isn't trustworthy at this point. */
+        LOG_W(s, "udp-gso: runtime GSO failure, sticky fallback to sendmmsg on the "
+                 "server socket");
+    }
     /* single aggregate counter — the server has no per-path bytes_tx (that's
      * a client-only concept) — matching svr_do_send's s->bytes_tx accounting.
      * (bytes==0 when r<0 per udp_offload.h) */
