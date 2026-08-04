@@ -80,6 +80,14 @@ main(void)
                           sizeof(a)) == SEG);
     }
 
+    /* The receiver should see the sender's address; capture it so the drain
+     * loop can verify the wrapper propagates *peer / *peerlen from the real
+     * kernel, not just the payload. tx is unbound until its first send, so
+     * this must come after the send block, not before it. */
+    struct sockaddr_in txaddr;
+    socklen_t txlen = sizeof(txaddr);
+    assert(getsockname(tx, (struct sockaddr *)&txaddr, &txlen) == 0);
+
     /* Drain: with coalescing this is one recvmsg, without it NSEGS. Either
      * way the concatenation of everything delivered must equal `payload`
      * exactly, in order. mqvpn_udp_recv_segmented passes MSG_DONTWAIT, so
@@ -105,6 +113,22 @@ main(void)
             continue;
         }
         assert(n > 0);
+        /* Value-result: the kernel writes the real length back, and the
+         * wrapper must hand it through unchanged. */
+        assert(plen == sizeof(struct sockaddr_in));
+        const struct sockaddr_in *from = (const struct sockaddr_in *)&peer;
+        assert(from->sin_family == AF_INET);
+        assert(from->sin_port == txaddr.sin_port);
+        /* tx was never bind()'d, only implicitly autobound by its first
+         * send(): Linux's UDP autobind fixes the port but leaves the address
+         * wildcard (INADDR_ANY) — the kernel still picks a real per-packet
+         * source address (here, loopback) at send time, it just never
+         * records it back into the socket's own local address. So the
+         * address side of getsockname(tx) is only comparable when it is
+         * NOT the wildcard; when it is, the port match above is the only
+         * meaningful check available from this angle. */
+        if (txaddr.sin_addr.s_addr != htonl(INADDR_ANY))
+            assert(from->sin_addr.s_addr == txaddr.sin_addr.s_addr);
         receives++;
         if (seg > 0 && (size_t)n > seg) coalesced++;
         size_t sl;
