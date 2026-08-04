@@ -1,61 +1,98 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 mp0rta and mqvpn contributors
-# run_udp_gso_config_test.sh — E2E test for [Advanced] UdpGso config key
+# run_udp_gso_config_test.sh — E2E test for the [Advanced] UdpGso and
+# UdpGro config keys. Filename kept as `udp_gso` on purpose even though
+# it now covers both offload knobs: .github/workflows/ci.yml:385 and
+# several bench-script comments reference this path, and a rename would
+# spread diff noise for no functional gain.
 #
 # `udp_gso` (Linux TX UDP GSO / batched-send registration, see
 # src/udp_offload.{c,h} and the wiring in mqvpn_client.c / mqvpn_server.c's
-# init_xquic_engine()) has NO CLI flag — the [Advanced] section of the INI
-# config file is its only input surface (src/config.c's
-# CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso) and
-# src/mqvpn_config.c's cfg->udp_gso = 1 default). This mirrors
-# run_reinjection_test.sh's rationale comment for the same reason
+# init_xquic_engine()) and `udp_gro` (Linux RX UDP GRO / recvmsg-based
+# coalesced-datagram splitting, see mqvpn_udp_gro_enable() called from the
+# client's path-registration loop and the server's svr_create_udp_socket() in
+# src/platform/linux/platform_linux.c) both have NO CLI flag — the
+# [Advanced] section of the INI config file is their only input surface
+# (src/config.c's CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso) /
+# CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro); both default to 1 in
+# src/config.c's mqvpn_config_defaults(). udp_gso additionally has a
+# library-side default in src/mqvpn_config.c because it crosses the public
+# ABI — udp_gro deliberately has no library-side presence at all, so do not
+# go looking for one there). This
+# mirrors run_reinjection_test.sh's rationale comment for the same reason
 # ([Multipath] Reinjection is also config-file-only).
 #
-# G13 note — log wording is an observable invariant, pinned here for the
-# FIRST time: this script greps both endpoints' startup logs for the
-# literal "udp-gso: " prefix that mqvpn_client.c / mqvpn_server.c emit at
-# engine-create time:
+# G13 note — log wording is an observable invariant, pinned here for
+# UdpGso and extended to UdpGro in the same spirit: this script greps
+# both endpoints' startup logs for two disjoint literal prefixes:
 #     LOG_I(c, "udp-gso: %s", c->gso_available ? "GSO enabled"
 #                                               : "GSO unavailable, using sendmmsg");
 #     LOG_I(s, "udp-gso: %s", s->gso_available ? "GSO enabled"
 #                                               : "GSO unavailable, using sendmmsg");
-# Changing that wording, or moving/removing either LOG_I call, silently
-# breaks BOTH assertions below (presence in Arm A, absence in Arm B) the
+#     LOG_INF("udp-gro: enabled on path[%d]", i);      /* client, per path */
+#     LOG_INF("udp-gro: unavailable on path[%d] (%s); ...", i, ...);
+#     LOG_INF("udp-gro: enabled");                     /* server */
+#     LOG_INF("udp-gro: unavailable (%s); ...", ...);
+# Changing either wording, or moving/removing any of these call sites,
+# silently breaks the corresponding assertions below (presence in the arm
+# where that knob is on, absence in the arm where it is forced off) the
 # same way the "reconnecting in" / "stuck in PENDING" wordings are pinned
 # invariants elsewhere in this suite (see sanitizer_check.sh and
-# AGENTS.md's e2e log marker note). If you reword it, update BOTH grep
-# patterns in this file (search "udp-gso:") in the same change. A
-# same-commit source comment at both LOG_I call sites points back here.
+# AGENTS.md's e2e log marker note). If you reword either, update the
+# matching grep pattern in this file (search "udp-gso:" / "udp-gro:") in
+# the same change. Note the receive-side telemetry line added alongside
+# UdpGro, "udp-rx: receives=N datagrams=M gro_config=X" (emitted
+# unconditionally at teardown, on both the enabled and disabled path), is
+# a different, disjoint prefix — it never matches either grep here and is
+# not asserted by this script (see run_udp_gso_bench.sh for its consumer).
 #
 # Race-freedom rationale (why asserting log-ABSENCE right after tunnel-up
 # is safe, not a best-effort poll): both LOG_I("udp-gso: ...") call sites
 # run inside init_xquic_engine(), synchronously before xqc_engine_create()
 # — i.e. strictly before the engine exists, and therefore strictly before
-# any handshake can begin. "Tunnel is up" (first successful tunnel ping)
-# can only happen after a completed handshake, which happens-after engine
-# creation, which happens-after the point where the marker would have been
-# emitted had GSO registration run. So by the time the tunnel-ping check
-# below passes, there is no remaining window where the marker could still
-# be about to appear — checking the log files at that point is equivalent
-# to checking them at any later time.
+# any handshake can begin. The udp-gro markers run even earlier in the
+# startup sequence: the client's fires per path inside the socket
+# registration loop, strictly before mqvpn_client_connect() is called;
+# the server's fires inside svr_create_udp_socket(), strictly before
+# event_base_dispatch() is reached. "Tunnel is up" (first successful
+# tunnel ping) can only happen after a completed handshake, which
+# happens-after engine creation and after the event loop starts running —
+# both of which happen-after every point above where a marker would have
+# been emitted had its knob been on. So by the time the tunnel-ping check
+# below passes, there is no remaining window where either marker could
+# still be about to appear — checking the log files at that point is
+# equivalent to checking them at any later time.
 #
 # Arms (single client/server pair per arm; fresh netns + fresh PSK/cert
-# each time via bench_env_setup.sh):
-#   A. default (true)  — no --config / -C. The "udp-gso: " line (either
-#      "GSO enabled" or "GSO unavailable, using sendmmsg" — both prove the
-#      batch send path was registered; the choice between them depends on
-#      the CI runner's kernel, which this test does not pin) MUST be
+# each time via bench_env_setup.sh). Each arm asserts BOTH markers'
+# present/absent state — checking only the knob under test would let a
+# regression in the OTHER knob's wiring pass silently:
+#   A. default (UdpGso=true, UdpGro=true) — no --config / -C. The
+#      "udp-gso: " line (either "GSO enabled" or "GSO unavailable, using
+#      sendmmsg" — both prove the batch send path was registered; the
+#      choice between them depends on the CI runner's kernel, which this
+#      test does not pin) and the "udp-gro: " line (either "enabled" or
+#      "unavailable...", same kernel-dependence caveat) MUST both be
 #      present in BOTH the client and server logs.
-#   B. false (-C)       — a minimal INI containing ONLY [Advanced] /
-#      UdpGso = false is passed via -C to BOTH endpoints, same flags as
-#      Arm A otherwise. The "udp-gso: " line MUST be ABSENT from both
-#      logs (proves the escape hatch cleanly restores the legacy
-#      per-packet xqc_engine_create() registration with no GSO callback
-#      wired in at all — not merely "GSO available but declined").
+#   B. UdpGso=false (-C), UdpGro stays default true — a minimal INI
+#      containing ONLY [Advanced] / UdpGso = false is passed via -C to
+#      BOTH endpoints, same flags as Arm A otherwise. The "udp-gso: " line
+#      MUST be ABSENT from both logs (proves the escape hatch cleanly
+#      restores the legacy per-packet xqc_engine_create() registration
+#      with no GSO callback wired in at all — not merely "GSO available
+#      but declined"); the "udp-gro: " line MUST still be PRESENT (UdpGro
+#      is untouched by this arm).
+#   C. UdpGro=false (-C), UdpGso stays default true — a minimal INI
+#      containing ONLY [Advanced] / UdpGro = false is passed via -C to
+#      BOTH endpoints. The "udp-gro: " line MUST be ABSENT from both logs
+#      (proves the escape hatch cleanly restores the legacy
+#      one-datagram-per-recvmsg() path with no GRO sockopt set at all);
+#      the "udp-gso: " line MUST still be PRESENT (UdpGso is untouched by
+#      this arm).
 #
-# Both arms verify tunnel connectivity (ping through the tunnel) after
-# the marker check, same idiom as every other 2-path e2e script in this
+# All arms verify tunnel connectivity (ping through the tunnel) after
+# the marker checks, same idiom as every other 2-path e2e script in this
 # directory (see run_dellink_test.sh / run_reconnect_test.sh).
 #
 # REQUIRES: root (netns + TUN), openssl (cert generation via
@@ -64,7 +101,7 @@
 # Run manually:
 #   sudo bash scripts/ci_e2e/run_udp_gso_config_test.sh [path/to/mqvpn]
 #
-# Exit code: 0 if both arms pass and no sanitizer error fired, 1 otherwise.
+# Exit code: 0 if all arms pass and no sanitizer error fired, 1 otherwise.
 
 set -e
 
@@ -191,15 +228,58 @@ finish_arm() {
     _BENCH_SERVER_PID=""
 }
 
+# check_marker <marker> <expect_present:0|1> <server_log> <client_log>
+#
+# Shared present/absent assertion for a single log-line prefix, factored
+# out of run_arm so both the "udp-gso: " and "udp-gro: " checks share one
+# implementation. Grep the log FILES directly (no writer | grep -q
+# pipeline — G19: a pipefail'd writer|grep -q can SIGPIPE-fail the writer
+# even on a successful match). Ends on an explicit `return 0`, never a
+# bare `[ cond ] && action` — a sourced/shared function that falls through
+# to a false condition would return 1 and could abort a caller's `set -e`.
+check_marker() {
+    local marker="$1" expect_present="$2" server_log="$3" client_log="$4"
+    local server_hits client_hits
+    server_hits=$(grep -c "$marker" "$server_log" 2>/dev/null || true)
+    client_hits=$(grep -c "$marker" "$client_log" 2>/dev/null || true)
+    server_hits="${server_hits:-0}"
+    client_hits="${client_hits:-0}"
+
+    if [ "$expect_present" -eq 1 ]; then
+        if [ "$server_hits" -eq 0 ] || [ "$client_hits" -eq 0 ]; then
+            echo "  FAIL: '$marker' marker missing (server_hits=$server_hits client_hits=$client_hits)"
+            echo "  --- server log tail ---"
+            tail -30 "$server_log"
+            echo "  --- client log tail ---"
+            tail -30 "$client_log"
+            return 1
+        fi
+        echo "  OK: '$marker' marker present on both ends:"
+        grep "$marker" "$server_log" | sed 's/^/    server: /'
+        grep "$marker" "$client_log" | sed 's/^/    client: /'
+    else
+        if [ "$server_hits" -ne 0 ] || [ "$client_hits" -ne 0 ]; then
+            echo "  FAIL: '$marker' marker unexpectedly present (server_hits=$server_hits client_hits=$client_hits)"
+            echo "  --- server log hits ---"
+            grep "$marker" "$server_log" || true
+            echo "  --- client log hits ---"
+            grep "$marker" "$client_log" || true
+            return 1
+        fi
+        echo "  OK: '$marker' marker absent on both ends (server_hits=0 client_hits=0)"
+    fi
+    return 0
+}
+
 # --- Shared arm body ---
 #
 # arm_id: short tag for log filenames.
-# expect_present: 1 = "udp-gso: " must be present in both logs (Arm A),
-#                 0 = must be absent from both (Arm B).
+# expect_gso: 1 = "udp-gso: " must be present in both logs, 0 = absent.
+# expect_gro: 1 = "udp-gro: " must be present in both logs, 0 = absent.
 # extra_flags: appended to BOTH the server and client command lines
-#              (e.g. "-C <ini>" for Arm B; empty for Arm A).
+#              (e.g. "-C <ini>" for Arm B/C; empty for Arm A).
 run_arm() {
-    local arm_id="$1" expect_present="$2" extra_flags="$3"
+    local arm_id="$1" expect_gso="$2" expect_gro="$3" extra_flags="$4"
     local server_log="${LOG_DIR}/${arm_id}_server.log"
     local client_log="${LOG_DIR}/${arm_id}_client.log"
 
@@ -237,41 +317,17 @@ run_arm() {
         return 1
     fi
 
-    # udp-gso: marker check. Race-freedom argument is in the file header:
-    # both LOG_I("udp-gso: ...") sites run before engine-create, strictly
-    # before any possible handshake, so tunnel-up (just verified above)
-    # happens-after the point the marker would have appeared. grep the log
-    # FILES directly (no writer | grep -q pipeline — see G19 in AGENTS.md:
-    # a pipefail'd writer|grep -q can SIGPIPE-fail the writer even on a
-    # successful match).
-    local server_hits client_hits
-    server_hits=$(grep -c "udp-gso: " "$server_log" 2>/dev/null || true)
-    client_hits=$(grep -c "udp-gso: " "$client_log" 2>/dev/null || true)
-    server_hits="${server_hits:-0}"
-    client_hits="${client_hits:-0}"
-
-    if [ "$expect_present" -eq 1 ]; then
-        if [ "$server_hits" -eq 0 ] || [ "$client_hits" -eq 0 ]; then
-            echo "  FAIL: 'udp-gso: ' marker missing (server_hits=$server_hits client_hits=$client_hits)"
-            echo "  --- server log tail ---"
-            tail -30 "$server_log"
-            echo "  --- client log tail ---"
-            tail -30 "$client_log"
-            return 1
-        fi
-        echo "  OK: 'udp-gso: ' marker present on both ends:"
-        grep "udp-gso: " "$server_log" | sed 's/^/    server: /'
-        grep "udp-gso: " "$client_log" | sed 's/^/    client: /'
-    else
-        if [ "$server_hits" -ne 0 ] || [ "$client_hits" -ne 0 ]; then
-            echo "  FAIL: 'udp-gso: ' marker unexpectedly present (server_hits=$server_hits client_hits=$client_hits)"
-            echo "  --- server log hits ---"
-            grep "udp-gso: " "$server_log" || true
-            echo "  --- client log hits ---"
-            grep "udp-gso: " "$client_log" || true
-            return 1
-        fi
-        echo "  OK: 'udp-gso: ' marker absent on both ends (server_hits=0 client_hits=0)"
+    # udp-gso: / udp-gro: marker checks. Race-freedom argument is in the
+    # file header: every marker's LOG call site runs before the point
+    # where a handshake could begin, so tunnel-up (just verified above)
+    # happens-after the point either marker would have appeared. Fail the
+    # arm if either marker doesn't match its arm's expectation — checking
+    # only one would let a regression in the other knob's wiring through.
+    if ! check_marker "udp-gso: " "$expect_gso" "$server_log" "$client_log"; then
+        return 1
+    fi
+    if ! check_marker "udp-gro: " "$expect_gro" "$server_log" "$client_log"; then
+        return 1
     fi
 
     # Tunnel connectivity, same idiom as run_dellink_test.sh /
@@ -290,13 +346,13 @@ run_arm() {
     return 0
 }
 
-# --- Arm A: default (UdpGso unset -> true) ---
+# --- Arm A: default (UdpGso, UdpGro unset -> both true) ---
 
 test_arm_default() {
-    run_arm "default" 1 ""
+    run_arm "default" 1 1 ""
 }
 
-# --- Arm B: UdpGso = false via -C ---
+# --- Arm B: UdpGso = false via -C (UdpGro stays default true) ---
 
 test_arm_disabled() {
     # Minimal INI containing ONLY [Advanced] / UdpGso = false — mirrors
@@ -314,19 +370,35 @@ test_arm_disabled() {
 [Advanced]
 UdpGso = false
 EOF
-    run_arm "disabled" 0 "-C $ini"
+    run_arm "disabled" 0 1 "-C $ini"
+}
+
+# --- Arm C: UdpGro = false via -C (UdpGso stays default true) ---
+
+test_arm_gro_disabled() {
+    # Minimal INI containing ONLY [Advanced] / UdpGro = false — mirrors
+    # tests/test_config.c's test_advanced_udp_gro fixture
+    # ("[Advanced]\nUdpGro = false\n") exactly, same rationale as Arm B's
+    # comment above (udp_gro also has no CLI flag).
+    local ini="${LOG_DIR}/udp_gro_false.ini"
+    cat >"$ini" <<EOF
+[Advanced]
+UdpGro = false
+EOF
+    run_arm "gro_disabled" 1 0 "-C $ini"
 }
 
 # --- Main runner ---
 
 echo ""
 echo "================================================================"
-echo " UdpGso config-key E2E"
+echo " UdpGso / UdpGro config-key E2E"
 echo " Binary: $MQVPN"
 echo "================================================================"
 
-run_test "Arm A — default (UdpGso unset, true): marker present"    test_arm_default
-run_test "Arm B — UdpGso = false via -C: marker absent"             test_arm_disabled
+run_test "Arm A — default (UdpGso, UdpGro unset, true): both markers present" test_arm_default
+run_test "Arm B — UdpGso = false via -C: gso marker absent, gro present"      test_arm_disabled
+run_test "Arm C — UdpGro = false via -C: gro marker absent, gso present"      test_arm_gro_disabled
 
 echo ""
 echo "================================================================"

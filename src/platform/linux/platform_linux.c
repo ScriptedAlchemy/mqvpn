@@ -19,6 +19,7 @@
 #include "log.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 #include "netlink_mon.h"
+#include "udp_offload.h" /* mqvpn_udp_gro_enable / recv_segmented / gro_seg_len */
 
 #include <stdio.h>
 #include <inttypes.h>
@@ -406,27 +407,64 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
     platform_ctx_t *p = (platform_ctx_t *)arg;
     uint8_t buf[SOCK_BUF_SIZE];
     struct sockaddr_storage peer;
-    socklen_t peer_len = sizeof(peer);
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
+    /* fd is constant for this callback, so resolve the path handle once.
+     * Safe to hoist: nothing on the receive path mutates path_mgr —
+     * cb_path_event is log-only, and the netlink re-add runs from its own
+     * libevent event, never reentrantly inside this one. */
+    mqvpn_path_handle_t handle = -1;
+    for (int j = 0; j < p->path_mgr.n_paths; j++) {
+        if (p->path_mgr.paths[j].fd == fd) {
+            handle = p->lib_path_handles[j];
+            break;
+        }
+    }
+    if (handle < 0) LOG_DBG("path rx: no handle for fd=%d, draining", (int)fd);
+
+    /* Budget counts receive work — datagrams delivered, plus one unit per
+     * dropped receive — not recvmsg calls: one GRO receive can
+     * carry dozens of datagrams, and counting syscalls would let a single
+     * callback do far more work than before GRO and starve the tick/timer
+     * path. It is a soft threshold: the current aggregate is always finished,
+     * so a full one can overshoot it. Nothing is ever discarded for it. */
+    int budget = BULK_READ_COUNT;
+    while (budget > 0) {
+        socklen_t peer_len = sizeof(peer); /* value-result, reset per call */
+        size_t seg = 0;
         // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
         // sizeof(buf); xquic validates internally
-        ssize_t n =
-            recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&peer, &peer_len);
-        if (n <= 0 || (size_t)n > sizeof(buf)) break;
-
-        /* Find which library path handle matches this fd */
-        mqvpn_path_handle_t handle = -1;
-        for (int j = 0; j < p->path_mgr.n_paths; j++) {
-            if (p->path_mgr.paths[j].fd == fd) {
-                handle = p->lib_path_handles[j];
-                break;
-            }
+        ssize_t n = mqvpn_udp_recv_segmented(fd, buf, sizeof(buf),
+                                             (struct sockaddr *)&peer, &peer_len, &seg);
+        if (n == MQVPN_RECV_DROP) {
+            LOG_DBG("path rx: truncated datagram dropped");
+            budget--;
+            continue;
         }
-        if (handle < 0) break;
+        if (n <= 0) break;
+        p->gro_receives++;
 
-        mqvpn_client_on_socket_recv(p->client, handle, buf, (size_t)n,
-                                    (struct sockaddr *)&peer, peer_len);
+        /* handle < 0 is defensive — events are registered only after the
+         * library accepted the path. The recvmsg above already consumed the
+         * data, which is what keeps the level-triggered event from refiring
+         * forever; charge one unit and move on, exactly like a dropped
+         * receive. */
+        if (handle < 0) {
+            budget--;
+            continue;
+        }
+
+        /* One coalesced buffer, N QUIC datagrams: hand them to the library one
+         * at a time, exactly as the pre-GRO loop did (seg == 0 degenerates to a
+         * single iteration), so recv_rate_limit accounting and every layer
+         * above stay per-packet. */
+        size_t sl;
+        for (size_t off = 0; (sl = mqvpn_gro_seg_len((size_t)n, seg, off)) > 0;
+             off += sl) {
+            mqvpn_client_on_socket_recv(p->client, handle, buf + off, sl,
+                                        (struct sockaddr *)&peer, peer_len);
+            p->gro_datagrams++;
+            budget--;
+        }
     }
     /* Drive engine after receiving packets */
     mqvpn_client_tick(p->client);
@@ -462,6 +500,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.manage_routes = cfg->manage_routes;
+    ctx.udp_gro = cfg->udp_gro;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -589,6 +628,21 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
             }
         }
 
+        /* GRO is per-socket and must be set before the socket is polled.
+         * Deliberately not inside the iface-pin branch above: the default
+         * no-iface single-path config would silently miss it. The "udp-gro: "
+         * prefix is asserted per-arm by scripts/ci_e2e/
+         * run_udp_gso_config_test.sh — keep the two in sync. */
+        if (ctx.udp_gro) {
+            if (mqvpn_udp_gro_enable(mp->fd) == 0) {
+                LOG_INF("udp-gro: enabled on path[%d]", i);
+            } else {
+                LOG_INF("udp-gro: unavailable on path[%d] (%s); receiving one "
+                        "datagram per syscall",
+                        i, strerror(errno));
+            }
+        }
+
         mqvpn_path_desc_t desc = {0};
         desc.struct_size = sizeof(desc);
         desc.fd = mp->fd;
@@ -635,6 +689,19 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = 0;
 
 cleanup:
+    /* Receive-side offload summary (counters documented in platform_ctx_t).
+     * Emitted on every teardown path — including gro_config=0 — so the bench
+     * and e2e can parse one stable line per run regardless of configuration.
+     * (The few pre-init failures that `return` instead of `goto cleanup` —
+     * host resolve, config alloc, client create — emit nothing; every later
+     * failure reaches here and emits zeros. Either way the run carried no
+     * traffic, so a consumer must treat a missing line and a zero line the
+     * same.) Deliberately NOT prefixed "udp-gro: ": that
+     * prefix is an enablement marker whose absence is asserted when
+     * UdpGro=false. */
+    LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
+            ctx.gro_receives, ctx.gro_datagrams, ctx.udp_gro);
+
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
     if (ctx.manage_routes) cleanup_routes(&ctx);
@@ -720,6 +787,13 @@ typedef struct server_platform_ctx_s {
     int udp_fd;
     int shutting_down;
     ctrl_socket_t *ctrl;
+
+    /* Receive-side offload telemetry — same meaning as platform_ctx_t's pair,
+     * written by svr_on_socket_read and read once at teardown. No udp_gro flag
+     * here: the listen socket is created exactly once, so the sockopt hook
+     * takes the flag as a parameter and teardown reads cfg->udp_gro. */
+    uint64_t gro_receives;  /* recvmsg calls that returned data */
+    uint64_t gro_datagrams; /* datagrams delivered to the library */
 
     /* Egress fd registry (hybrid TCP lane, D1). Sized once at server start
      * from mqvpn_server_egress_fd_budget() so the platform's registry and
@@ -853,18 +927,33 @@ svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     uint8_t buf[SOCK_BUF_SIZE];
     struct sockaddr_in6 peer;
-    socklen_t peer_len;
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
-        peer_len = sizeof(peer);
+    /* Budget counts receive work, not recvmsg calls — rationale in
+     * on_socket_read() above; keep the two loops in the same shape. */
+    int budget = BULK_READ_COUNT;
+    while (budget > 0) {
+        socklen_t peer_len = sizeof(peer); /* value-result, reset per call */
+        size_t seg = 0;
         // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
         // sizeof(buf); xquic validates internally
-        ssize_t n =
-            recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&peer, &peer_len);
-        if (n <= 0 || (size_t)n > sizeof(buf)) break;
+        ssize_t n = mqvpn_udp_recv_segmented(fd, buf, sizeof(buf),
+                                             (struct sockaddr *)&peer, &peer_len, &seg);
+        if (n == MQVPN_RECV_DROP) {
+            LOG_DBG("svr rx: truncated datagram dropped");
+            budget--;
+            continue;
+        }
+        if (n <= 0) break;
+        sp->gro_receives++;
 
-        mqvpn_server_on_socket_recv(sp->server, buf, (size_t)n, (struct sockaddr *)&peer,
-                                    peer_len);
+        size_t sl;
+        for (size_t off = 0; (sl = mqvpn_gro_seg_len((size_t)n, seg, off)) > 0;
+             off += sl) {
+            mqvpn_server_on_socket_recv(sp->server, buf + off, sl,
+                                        (struct sockaddr *)&peer, peer_len);
+            sp->gro_datagrams++;
+            budget--;
+        }
     }
     mqvpn_server_tick(sp->server);
     svr_schedule_next_tick(sp);
@@ -981,7 +1070,7 @@ svr_on_signal(evutil_socket_t sig, short what, void *arg)
 
 static int
 svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_addr,
-                      socklen_t *out_addrlen)
+                      socklen_t *out_addrlen, int udp_gro)
 {
     sa_family_t af = AF_INET;
     struct in_addr addr4;
@@ -1015,6 +1104,16 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
     int bufsize = 1 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    if (udp_gro) {
+        if (mqvpn_udp_gro_enable(fd) == 0) {
+            /* marker asserted by scripts/ci_e2e/run_udp_gso_config_test.sh */
+            LOG_INF("udp-gro: enabled");
+        } else {
+            LOG_INF("udp-gro: unavailable (%s); receiving one datagram per syscall",
+                    strerror(errno));
+        }
+    }
 
     memset(out_addr, 0, sizeof(*out_addr));
     if (af == AF_INET6) {
@@ -1140,7 +1239,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
     sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
-                                      &local_addrlen);
+                                      &local_addrlen, cfg->udp_gro);
     if (sp.udp_fd < 0) goto cleanup;
 
     mqvpn_server_set_socket_fd(sp.server, sp.udp_fd, (struct sockaddr *)&local_addr,
@@ -1189,6 +1288,11 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     rc = 0;
 
 cleanup:
+    /* Receive-side offload summary — same contract as the client's line in
+     * linux_platform_run_client(). */
+    LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
+            sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
+
     LOG_INF("server shutting down");
     ctrl_socket_destroy(sp.ctrl);
     if (sp.tun_up) {

@@ -568,6 +568,8 @@ main(int argc, char *argv[])
             .recv_rate_limit = file_cfg.recv_rate_limit,
             /* [Advanced] UdpGso; default 1. Applies to client and server. */
             .udp_gso = file_cfg.udp_gso,
+            /* [Advanced] UdpGro; default 1. Applies to client and server. */
+            .udp_gro = file_cfg.udp_gro,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -627,6 +629,8 @@ main(int argc, char *argv[])
             .hybrid = file_cfg.hybrid,
             /* [Advanced] UdpGso; default 1. Applies to client and server. */
             .udp_gso = file_cfg.udp_gso,
+            /* [Advanced] UdpGro; default 1. Applies to client and server. */
+            .udp_gro = file_cfg.udp_gro,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
