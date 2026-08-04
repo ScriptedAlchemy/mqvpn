@@ -60,6 +60,18 @@ typedef struct {
     int routing_configured;
     int routing6_configured;
     int manage_routes; /* 1=run setup_routes/cleanup_routes (default 1) */
+#if defined(__linux__)
+    /* [Advanced] UdpGro — effective RX GRO mode. Config-derived state kept
+     * here (pattern: manage_routes above) so the netlink re-add path can
+     * reproduce startup behavior on the fresh fd it creates. Linux-only:
+     * GRO is a Linux sockopt and Darwin would carry a dead field. */
+    int udp_gro;
+    /* Receive-side offload telemetry, written by on_socket_read and read once
+     * at teardown. The sockopt log proves GRO was requested; only
+     * gro_datagrams > gro_receives proves the kernel actually coalesced. */
+    uint64_t gro_receives;  /* recvmsg calls that returned data */
+    uint64_t gro_datagrams; /* datagrams delivered to the library */
+#endif
     char orig_gateway[INET6_ADDRSTRLEN];
     char orig_iface[IFNAMSIZ];
     char server_ip_str[INET6_ADDRSTRLEN];

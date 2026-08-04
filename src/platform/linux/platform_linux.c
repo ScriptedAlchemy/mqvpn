@@ -19,6 +19,7 @@
 #include "log.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 #include "netlink_mon.h"
+#include "udp_offload.h" /* mqvpn_udp_gro_enable / recv_segmented / gro_seg_len */
 
 #include <stdio.h>
 #include <inttypes.h>
@@ -406,27 +407,60 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
     platform_ctx_t *p = (platform_ctx_t *)arg;
     uint8_t buf[SOCK_BUF_SIZE];
     struct sockaddr_storage peer;
-    socklen_t peer_len = sizeof(peer);
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
+    /* fd is constant for this callback, so resolve the path handle once.
+     * Safe to hoist: nothing on the receive path mutates path_mgr —
+     * cb_path_event is log-only, and the netlink re-add runs from its own
+     * libevent event, never reentrantly inside this one. */
+    mqvpn_path_handle_t handle = -1;
+    for (int j = 0; j < p->path_mgr.n_paths; j++) {
+        if (p->path_mgr.paths[j].fd == fd) {
+            handle = p->lib_path_handles[j];
+            break;
+        }
+    }
+    if (handle < 0) LOG_DBG("path rx: no handle for fd=%d, draining", (int)fd);
+
+    /* Budget counts receive work — datagrams delivered, plus one unit per
+     * dropped receive — not recvmsg calls: one GRO receive can
+     * carry dozens of datagrams, and counting syscalls would let a single
+     * callback do far more work than before GRO and starve the tick/timer
+     * path. It is a soft threshold: the current aggregate is always finished,
+     * so a full one can overshoot it. Nothing is ever discarded for it. */
+    int budget = BULK_READ_COUNT;
+    while (budget > 0) {
+        socklen_t peer_len = sizeof(peer); /* value-result, reset per call */
+        size_t seg = 0;
         // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
         // sizeof(buf); xquic validates internally
-        ssize_t n =
-            recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&peer, &peer_len);
-        if (n <= 0 || (size_t)n > sizeof(buf)) break;
-
-        /* Find which library path handle matches this fd */
-        mqvpn_path_handle_t handle = -1;
-        for (int j = 0; j < p->path_mgr.n_paths; j++) {
-            if (p->path_mgr.paths[j].fd == fd) {
-                handle = p->lib_path_handles[j];
-                break;
-            }
+        ssize_t n = mqvpn_udp_recv_segmented(fd, buf, sizeof(buf),
+                                             (struct sockaddr *)&peer, &peer_len, &seg);
+        if (n == MQVPN_RECV_DROP) {
+            LOG_DBG("path rx: truncated datagram dropped");
+            budget--;
+            continue;
         }
-        if (handle < 0) break;
+        if (n <= 0) break;
+        p->gro_receives++;
 
-        mqvpn_client_on_socket_recv(p->client, handle, buf, (size_t)n,
-                                    (struct sockaddr *)&peer, peer_len);
+        /* One coalesced buffer, N QUIC datagrams: hand them to the library one
+         * at a time, exactly as the pre-GRO loop did (seg == 0 degenerates to a
+         * single iteration), so recv_rate_limit accounting and every layer
+         * above stay per-packet. */
+        size_t sl;
+        for (size_t off = 0; (sl = mqvpn_gro_seg_len((size_t)n, seg, off)) > 0;
+             off += sl) {
+            /* handle < 0 is defensive — events are registered only after the
+             * library accepted the path — but consume anyway: not reading
+             * would leave the data queued and the level-triggered event would
+             * refire immediately, spinning at 100% CPU. */
+            if (handle >= 0) {
+                mqvpn_client_on_socket_recv(p->client, handle, buf + off, sl,
+                                            (struct sockaddr *)&peer, peer_len);
+                p->gro_datagrams++;
+            }
+            budget--;
+        }
     }
     /* Drive engine after receiving packets */
     mqvpn_client_tick(p->client);
@@ -462,6 +496,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.manage_routes = cfg->manage_routes;
+    ctx.udp_gro = cfg->udp_gro;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -589,6 +624,21 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
             }
         }
 
+        /* GRO is per-socket and must be set before the socket is polled.
+         * Deliberately not inside the iface-pin branch above: the default
+         * no-iface single-path config would silently miss it. The "udp-gro: "
+         * prefix is asserted per-arm by scripts/ci_e2e/
+         * run_udp_gso_config_test.sh — keep the two in sync. */
+        if (ctx.udp_gro) {
+            if (mqvpn_udp_gro_enable(mp->fd) == 0) {
+                LOG_INF("udp-gro: enabled on path[%d]", i);
+            } else {
+                LOG_INF("udp-gro: unavailable on path[%d] (%s); receiving one "
+                        "datagram per syscall",
+                        i, strerror(errno));
+            }
+        }
+
         mqvpn_path_desc_t desc = {0};
         desc.struct_size = sizeof(desc);
         desc.fd = mp->fd;
@@ -635,6 +685,17 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = 0;
 
 cleanup:
+    /* Receive-side offload summary. Emitted on every teardown path — including
+     * gro_config=0 — so the bench and e2e can parse one stable line per run
+     * regardless of configuration. (Early startup failures return before this
+     * label; they carry no traffic and fail their arm anyway.)
+     * Deliberately NOT prefixed "udp-gro: ":
+     * that prefix is an enablement marker whose absence is asserted when
+     * UdpGro=false. gro_datagrams > gro_receives is the only direct evidence
+     * that the kernel actually coalesced. */
+    LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
+            ctx.gro_receives, ctx.gro_datagrams, ctx.udp_gro);
+
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
     if (ctx.manage_routes) cleanup_routes(&ctx);
