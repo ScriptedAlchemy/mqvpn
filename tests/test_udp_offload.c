@@ -14,10 +14,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #include "udp_offload.h"
 
 #ifndef UDP_SEGMENT
 #  define UDP_SEGMENT 103
+#endif
+
+#ifndef UDP_GRO
+#  define UDP_GRO 104
 #endif
 
 static struct iovec
@@ -582,6 +587,77 @@ test_fallback_32_burst(void)
     printf("test_fallback_32_burst OK\n");
 }
 
+/* ── RX: pure segment split ─────────────────────────────────────────── */
+
+static void
+test_gro_seg_len(void)
+{
+    /* full segments, then the terminator */
+    assert(mqvpn_gro_seg_len(4200, 1400, 0) == 1400);
+    assert(mqvpn_gro_seg_len(4200, 1400, 2800) == 1400);
+    assert(mqvpn_gro_seg_len(4200, 1400, 4200) == 0);
+
+    /* short tail */
+    assert(mqvpn_gro_seg_len(3000, 1400, 2800) == 200);
+    assert(mqvpn_gro_seg_len(3000, 1400, 3000) == 0);
+
+    /* seg == 0 means "no cmsg": the whole buffer is one datagram */
+    assert(mqvpn_gro_seg_len(1400, 0, 0) == 1400);
+    assert(mqvpn_gro_seg_len(1400, 0, 1400) == 0);
+
+    /* seg >= len: one (short) segment, never a zero-length second one. The
+     * seg > len row pins the fail-open policy for a segment size the kernel
+     * cannot legitimately report: it is delivered, not dropped. */
+    assert(mqvpn_gro_seg_len(500, 1400, 0) == 500);
+    assert(mqvpn_gro_seg_len(500, 1400, 500) == 0);
+    assert(mqvpn_gro_seg_len(1400, 1400, 0) == 1400);
+    assert(mqvpn_gro_seg_len(0, 1400, 0) == 0);
+
+    /* the split covers the buffer exactly — walk it as the read loop does */
+    size_t off = 0, total = 0, count = 0, sl;
+    while ((sl = mqvpn_gro_seg_len(65535, 1400, off)) > 0) {
+        total += sl;
+        count++;
+        off += sl;
+    }
+    assert(total == 65535);
+    assert(count == 47); /* 46 x 1400 + 1 x 1135 */
+    printf("  ok: gro_seg_len\n");
+}
+
+/* ── RX: sockopt enabler ────────────────────────────────────────────── */
+
+static void
+test_gro_enable(void)
+{
+    /* Like test_gso_probe: pin the contract (0 or -1, errno set on -1), NOT
+     * the kernel's capability — runners differ and a capability assert here
+     * would be a flake. */
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(fd >= 0);
+    int r = mqvpn_udp_gro_enable(fd);
+    assert(r == 0 || r == -1);
+    if (r == 0) {
+        /* Read-back is best-effort: UDP_GRO shipped in Linux 5.0 but its
+         * getsockopt handler was added later (kernel commit 98184612aca0)
+         * and backported unevenly, so ENOPROTOOPT here is a kernel-version
+         * artifact, not a failure of the setsockopt above. */
+        int val = 0;
+        socklen_t vlen = sizeof(val);
+        if (getsockopt(fd, SOL_UDP, UDP_GRO, &val, &vlen) == 0) {
+            assert(val != 0);
+        } else {
+            assert(errno == ENOPROTOOPT);
+        }
+    }
+    close(fd);
+
+    /* Closed fd: pins the -1 return mapping — a wrapper that always returned
+     * 0 would pass everything above and fail here. */
+    assert(mqvpn_udp_gro_enable(fd) == -1);
+    printf("  ok: gro_enable (r=%d)\n", r);
+}
+
 int
 main(void)
 {
@@ -605,5 +681,7 @@ main(void)
     test_sticky_short_circuit();
     test_full_32_burst();
     test_fallback_32_burst();
+    test_gro_seg_len();
+    test_gro_enable();
     return 0;
 }

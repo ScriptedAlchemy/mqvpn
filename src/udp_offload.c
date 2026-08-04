@@ -20,6 +20,10 @@
 #    define UDP_SEGMENT 103 /* old glibc headers; value from linux/udp.h UAPI */
 #  endif
 
+#  ifndef UDP_GRO
+#    define UDP_GRO 104 /* old glibc headers; value from linux/udp.h UAPI */
+#  endif
+
 #  ifdef MQVPN_OFFLOAD_TEST_SEAM
 /* Fault-injection seam for unit tests: prototypes live in udp_offload.h
  * (tests/test_udp_offload.c defines these symbols; the header declaration
@@ -56,6 +60,27 @@ mqvpn_udp_gso_probe(void)
     int ok = setsockopt(fd, SOL_UDP, UDP_SEGMENT, &zero, sizeof(zero)) == 0;
     close(fd);
     return ok;
+}
+
+int
+mqvpn_udp_gro_enable(int fd)
+{
+    int one = 1;
+    /* errno is left as setsockopt set it: the caller logs strerror(errno). */
+    return setsockopt(fd, SOL_UDP, UDP_GRO, &one, sizeof(one)) == 0 ? 0 : -1;
+}
+
+size_t
+mqvpn_gro_seg_len(size_t len, size_t seg, size_t off)
+{
+    if (off >= len) return 0;
+    size_t rest = len - off;
+    /* seg == 0: no cmsg, one datagram. seg >= rest: the short final segment.
+     * A segment size larger than the whole buffer cannot occur in a valid
+     * untruncated kernel result; this shape still delivers it as a single
+     * datagram rather than discarding a packet the kernel considers fine. */
+    if (seg == 0 || seg >= rest) return rest;
+    return seg;
 }
 
 /* Sends one GSO run (run == 1 or run > 1 equal-size datagrams, optionally
