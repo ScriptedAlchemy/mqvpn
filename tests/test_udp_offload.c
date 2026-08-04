@@ -596,6 +596,7 @@ test_gro_seg_len(void)
     assert(mqvpn_gro_seg_len(4200, 1400, 0) == 1400);
     assert(mqvpn_gro_seg_len(4200, 1400, 2800) == 1400);
     assert(mqvpn_gro_seg_len(4200, 1400, 4200) == 0);
+    assert(mqvpn_gro_seg_len(100, 40, 101) == 0);
 
     /* short tail */
     assert(mqvpn_gro_seg_len(3000, 1400, 2800) == 200);
@@ -622,7 +623,7 @@ test_gro_seg_len(void)
     }
     assert(total == 65535);
     assert(count == 47); /* 46 x 1400 + 1 x 1135 */
-    printf("  ok: gro_seg_len\n");
+    printf("test_gro_seg_len OK\n");
 }
 
 /* ── RX: sockopt enabler ────────────────────────────────────────────── */
@@ -653,9 +654,12 @@ test_gro_enable(void)
     close(fd);
 
     /* Closed fd: pins the -1 return mapping — a wrapper that always returned
-     * 0 would pass everything above and fail here. */
+     * 0 would pass everything above and fail here — and the errno-preservation
+     * contract the caller's log depends on. */
+    errno = 0;
     assert(mqvpn_udp_gro_enable(fd) == -1);
-    printf("  ok: gro_enable (r=%d)\n", r);
+    assert(errno == EBADF);
+    printf("test_gro_enable OK (r=%d)\n", r);
 }
 
 int
