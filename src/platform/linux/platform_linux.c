@@ -782,6 +782,15 @@ typedef struct server_platform_ctx_s {
     int shutting_down;
     ctrl_socket_t *ctrl;
 
+    /* Receive-side offload telemetry, written by svr_on_socket_read and read
+     * once at teardown. The sockopt log proves GRO was requested; only
+     * gro_datagrams > gro_receives proves the kernel actually coalesced. No
+     * udp_gro flag here: unlike the client, the listen socket is created
+     * exactly once, so the sockopt hook takes the flag as a parameter and
+     * teardown reads cfg->udp_gro directly. */
+    uint64_t gro_receives;  /* recvmsg calls that returned data */
+    uint64_t gro_datagrams; /* datagrams delivered to the library */
+
     /* Egress fd registry (hybrid TCP lane, D1). Sized once at server start
      * from mqvpn_server_egress_fd_budget() so the platform's registry and
      * the core's own fd cap can never drift apart. */
@@ -914,18 +923,37 @@ svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     uint8_t buf[SOCK_BUF_SIZE];
     struct sockaddr_in6 peer;
-    socklen_t peer_len;
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
-        peer_len = sizeof(peer);
+    /* Budget counts receive work — datagrams delivered, plus one unit per
+     * dropped receive — not recvmsg calls: one GRO receive can carry dozens
+     * of datagrams, and counting syscalls would let a single callback do
+     * far more work than before GRO and starve the tick/timer path. It is a
+     * soft threshold: the current aggregate is always finished, so a full
+     * one can overshoot it. Nothing is ever discarded for it. */
+    int budget = BULK_READ_COUNT;
+    while (budget > 0) {
+        socklen_t peer_len = sizeof(peer); /* value-result, reset per call */
+        size_t seg = 0;
         // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
         // sizeof(buf); xquic validates internally
-        ssize_t n =
-            recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&peer, &peer_len);
-        if (n <= 0 || (size_t)n > sizeof(buf)) break;
+        ssize_t n = mqvpn_udp_recv_segmented(fd, buf, sizeof(buf),
+                                             (struct sockaddr *)&peer, &peer_len, &seg);
+        if (n == MQVPN_RECV_DROP) {
+            LOG_DBG("svr rx: truncated datagram dropped");
+            budget--;
+            continue;
+        }
+        if (n <= 0) break;
+        sp->gro_receives++;
 
-        mqvpn_server_on_socket_recv(sp->server, buf, (size_t)n, (struct sockaddr *)&peer,
-                                    peer_len);
+        size_t sl;
+        for (size_t off = 0; (sl = mqvpn_gro_seg_len((size_t)n, seg, off)) > 0;
+             off += sl) {
+            mqvpn_server_on_socket_recv(sp->server, buf + off, sl,
+                                        (struct sockaddr *)&peer, peer_len);
+            sp->gro_datagrams++;
+            budget--;
+        }
     }
     mqvpn_server_tick(sp->server);
     svr_schedule_next_tick(sp);
@@ -1042,7 +1070,7 @@ svr_on_signal(evutil_socket_t sig, short what, void *arg)
 
 static int
 svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_addr,
-                      socklen_t *out_addrlen)
+                      socklen_t *out_addrlen, int udp_gro)
 {
     sa_family_t af = AF_INET;
     struct in_addr addr4;
@@ -1076,6 +1104,16 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
     int bufsize = 1 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    if (udp_gro) {
+        if (mqvpn_udp_gro_enable(fd) == 0) {
+            /* marker asserted by scripts/ci_e2e/run_udp_gso_config_test.sh */
+            LOG_INF("udp-gro: enabled");
+        } else {
+            LOG_INF("udp-gro: unavailable (%s); receiving one datagram per syscall",
+                    strerror(errno));
+        }
+    }
 
     memset(out_addr, 0, sizeof(*out_addr));
     if (af == AF_INET6) {
@@ -1201,7 +1239,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
     sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
-                                      &local_addrlen);
+                                      &local_addrlen, cfg->udp_gro);
     if (sp.udp_fd < 0) goto cleanup;
 
     mqvpn_server_set_socket_fd(sp.server, sp.udp_fd, (struct sockaddr *)&local_addr,
@@ -1250,6 +1288,17 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     rc = 0;
 
 cleanup:
+    /* Receive-side offload summary. Emitted on every teardown path — including
+     * gro_config=0 — so the bench and e2e can parse one stable line per run
+     * regardless of configuration. (Early startup failures return before this
+     * label; they carry no traffic and fail their arm anyway.)
+     * Deliberately NOT prefixed "udp-gro: ":
+     * that prefix is an enablement marker whose absence is asserted when
+     * UdpGro=false. gro_datagrams > gro_receives is the only direct evidence
+     * that the kernel actually coalesced. */
+    LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
+            sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
+
     LOG_INF("server shutting down");
     ctrl_socket_destroy(sp.ctrl);
     if (sp.tun_up) {
