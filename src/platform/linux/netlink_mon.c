@@ -16,6 +16,7 @@
 #include "platform_internal.h"
 #include "netlink_mon.h"
 #include "log.h"
+#include "udp_offload.h" /* mqvpn_udp_gro_enable */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -242,7 +243,7 @@ try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
  * Updates mp->local_addr / mp->local_addrlen on success.
  * Returns the new fd, or -1 (already logged). */
 static int
-recovery_socket_create(sa_family_t af, const char *ifname, mqvpn_path_t *mp)
+recovery_socket_create(sa_family_t af, const char *ifname, mqvpn_path_t *mp, int udp_gro)
 {
     int fd = (int)socket(af, SOCK_DGRAM, 0);
     if (fd < 0) {
@@ -277,6 +278,19 @@ recovery_socket_create(sa_family_t af, const char *ifname, mqvpn_path_t *mp)
     if (linux_pin_socket_to_iface(fd, ifname) < 0) {
         LOG_WRN("netlink: iface pin for re-add %s failed", ifname);
         goto fail;
+    }
+
+    /* Re-added paths get a brand-new fd: reproduce the startup sockopt or the
+     * recovered path silently degrades to one datagram per recvmsg. The
+     * "udp-gro: " prefix is asserted by scripts/ci_e2e/
+     * run_udp_gso_config_test.sh and by the link-flap e2e. */
+    if (udp_gro) {
+        if (mqvpn_udp_gro_enable(fd) == 0) {
+            LOG_INF("udp-gro: enabled on re-added path '%s'", ifname);
+        } else {
+            LOG_INF("udp-gro: unavailable on re-added path '%s' (%s)", ifname,
+                    strerror(errno));
+        }
     }
 
     return fd;
@@ -410,7 +424,7 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
         if (iface_has_route_to_server(ifname, &p->server_addr) == 0) return 0;
 
         mqvpn_path_t *mp = &p->path_mgr.paths[i];
-        int fd = recovery_socket_create(p->server_addr.ss_family, ifname, mp);
+        int fd = recovery_socket_create(p->server_addr.ss_family, ifname, mp, p->udp_gro);
         if (fd < 0) return 0;
 
         mp->fd = fd;
