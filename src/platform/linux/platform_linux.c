@@ -692,8 +692,11 @@ cleanup:
     /* Receive-side offload summary (counters documented in platform_ctx_t).
      * Emitted on every teardown path — including gro_config=0 — so the bench
      * and e2e can parse one stable line per run regardless of configuration.
-     * (Early startup failures return before this label; they carry no traffic
-     * and fail their arm anyway.) Deliberately NOT prefixed "udp-gro: ": that
+     * (The few pre-init failures that `return` instead of `goto cleanup` —
+     * host resolve, config alloc, client create — emit nothing; every later
+     * failure reaches here and emits zeros. Either way the run carried no
+     * traffic, so a consumer must treat a missing line and a zero line the
+     * same.) Deliberately NOT prefixed "udp-gro: ": that
      * prefix is an enablement marker whose absence is asserted when
      * UdpGro=false. */
     LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
