@@ -118,17 +118,12 @@ main(void)
         assert(plen == sizeof(struct sockaddr_in));
         const struct sockaddr_in *from = (const struct sockaddr_in *)&peer;
         assert(from->sin_family == AF_INET);
+        /* Port only, deliberately: tx is never bind()'d, and Linux's UDP
+         * autobind fixes the port but leaves the socket's own address at
+         * INADDR_ANY, so getsockname(tx) has no address to compare against
+         * even though the kernel does pick a real source address per
+         * packet. */
         assert(from->sin_port == txaddr.sin_port);
-        /* tx was never bind()'d, only implicitly autobound by its first
-         * send(): Linux's UDP autobind fixes the port but leaves the address
-         * wildcard (INADDR_ANY) — the kernel still picks a real per-packet
-         * source address (here, loopback) at send time, it just never
-         * records it back into the socket's own local address. So the
-         * address side of getsockname(tx) is only comparable when it is
-         * NOT the wildcard; when it is, the port match above is the only
-         * meaningful check available from this angle. */
-        if (txaddr.sin_addr.s_addr != htonl(INADDR_ANY))
-            assert(from->sin_addr.s_addr == txaddr.sin_addr.s_addr);
         receives++;
         if (seg > 0 && (size_t)n > seg) coalesced++;
         size_t sl;

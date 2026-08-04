@@ -9,7 +9,7 @@
 # init_xquic_engine() in mqvpn_client.c / mqvpn_server.c) and `udp_gro`
 # (Linux RX UDP GRO / recvmsg-based coalesced-datagram splitting — see
 # mqvpn_udp_gro_enable(), wired in the client's path-registration loop and
-# the server's create_socket() in src/platform/linux/platform_linux.c) on
+# the server's svr_create_udp_socket() in src/platform/linux/platform_linux.c) on
 # the SAME binary, so every comparison is purely a runtime UdpGso/UdpGro
 # toggle and never a rebuild artifact (G20 — see mqvpn-dev-gates skill:
 # compiler/flag drift between arms has produced false conclusions before).
@@ -19,9 +19,11 @@
 # Arms (single client/server pair, same 2-path netns topology as
 # run_udp_gso_config_test.sh, fresh netns/PSK/cert every run) — four
 # arms, the full 2x2 of the two independent knobs:
-#   A. "default"   — no --config / -C. udp_gso and udp_gro both default
-#      to true (src/mqvpn_config.c:153, src/config.c:1282 and their
-#      udp_gro counterparts).
+#   A. "default"   — no --config / -C. udp_gso and udp_gro both default to
+#      true in src/config.c's mqvpn_config_defaults(). (udp_gso also has a
+#      library-side default in src/mqvpn_config.c because it crosses the
+#      public ABI; udp_gro is platform-only and has none — do not look for
+#      one there.)
 #   B. "disabled"  — [Advanced]/UdpGso=false via -C <ini>, udp_gro stays
 #      default true. INI content mirrors run_udp_gso_config_test.sh's
 #      Arm B exactly (== tests/test_config.c's test_advanced_udp_gso
@@ -79,11 +81,12 @@
 #     (src/platform/linux/platform_linux.c), both unchecked, and Linux
 #     clamps to rmem_max unless SO_RCVBUFFORCE succeeds, so the effective
 #     value can be far smaller than the source suggests.
-#   - Latency under load (arms "default" and "gro_off" ONLY — see the
-#     "gro_flush_timeout is 0 by default" rationale in the plan this
-#     script implements: on an idle tunnel GRO and non-GRO are identical
-#     by construction, so only these two arms, which isolate the UdpGro
-#     toggle, are informative): `ping` runs concurrently with the iperf3
+#   - Latency under load (arms "default" and "gro_off" ONLY — the kernel
+#     only coalesces packets that arrive in the same NAPI poll and
+#     gro_flush_timeout is 0 by default, so on an idle tunnel GRO and
+#     non-GRO are identical by construction and a low-rate arm would
+#     compare nothing; only these two arms isolate the UdpGro toggle under
+#     real load): `ping` runs concurrently with the iperf3
 #     window and its `rtt min/avg/max/mdev` summary is recorded, compacted
 #     into one slash-delimited token (min/avg/max/mdev, no spaces) for the
 #     row format — the raw ping output is preserved at
@@ -735,7 +738,6 @@ run_one() {
     # teardown. Its own exit status is not the run's verdict.
     if [ -n "$PING_PID" ]; then
         wait "$PING_PID" 2>/dev/null || true
-        PING_PID=""
     fi
 
     local client_cpu server_cpu
@@ -945,6 +947,11 @@ with open(raw_file) as f:
     for line in f:
         parts = line.split()
         if len(parts) != len(FIELD_NAMES):
+            # Never drop a row silently: a short row means a helper emitted an
+            # empty field, and the only symptom downstream would be a smaller
+            # (n=...) in the medians.
+            print("WARN: skipping malformed result row (%d fields, expected %d): %s"
+                  % (len(parts), len(FIELD_NAMES), line.rstrip()), file=sys.stderr)
             continue
         r = dict(zip(FIELD_NAMES, parts))
         r["run"] = int(r["run"])

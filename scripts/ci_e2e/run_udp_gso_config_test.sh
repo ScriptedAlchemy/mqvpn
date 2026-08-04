@@ -11,12 +11,15 @@
 # src/udp_offload.{c,h} and the wiring in mqvpn_client.c / mqvpn_server.c's
 # init_xquic_engine()) and `udp_gro` (Linux RX UDP GRO / recvmsg-based
 # coalesced-datagram splitting, see mqvpn_udp_gro_enable() called from the
-# client's path-registration loop and the server's create_socket() in
+# client's path-registration loop and the server's svr_create_udp_socket() in
 # src/platform/linux/platform_linux.c) both have NO CLI flag — the
 # [Advanced] section of the INI config file is their only input surface
 # (src/config.c's CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso) /
-# CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro), and
-# src/mqvpn_config.c's cfg->udp_gso = 1 / cfg->udp_gro = 1 defaults). This
+# CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro); both default to 1 in
+# src/config.c's mqvpn_config_defaults(). udp_gso additionally has a
+# library-side default in src/mqvpn_config.c because it crosses the public
+# ABI — udp_gro deliberately has no library-side presence at all, so do not
+# go looking for one there). This
 # mirrors run_reinjection_test.sh's rationale comment for the same reason
 # ([Multipath] Reinjection is also config-file-only).
 #
@@ -51,7 +54,7 @@
 # any handshake can begin. The udp-gro markers run even earlier in the
 # startup sequence: the client's fires per path inside the socket
 # registration loop, strictly before mqvpn_client_connect() is called;
-# the server's fires inside create_socket(), strictly before
+# the server's fires inside svr_create_udp_socket(), strictly before
 # event_base_dispatch() is reached. "Tunnel is up" (first successful
 # tunnel ping) can only happen after a completed handshake, which
 # happens-after engine creation and after the event loop starts running —

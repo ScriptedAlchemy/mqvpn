@@ -924,12 +924,8 @@ svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
     uint8_t buf[SOCK_BUF_SIZE];
     struct sockaddr_in6 peer;
 
-    /* Budget counts receive work — datagrams delivered, plus one unit per
-     * dropped receive — not recvmsg calls: one GRO receive can carry dozens
-     * of datagrams, and counting syscalls would let a single callback do
-     * far more work than before GRO and starve the tick/timer path. It is a
-     * soft threshold: the current aggregate is always finished, so a full
-     * one can overshoot it. Nothing is ever discarded for it. */
+    /* Budget counts receive work, not recvmsg calls — rationale in
+     * on_socket_read() above; keep the two loops in the same shape. */
     int budget = BULK_READ_COUNT;
     while (budget > 0) {
         socklen_t peer_len = sizeof(peer); /* value-result, reset per call */
@@ -1288,14 +1284,9 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     rc = 0;
 
 cleanup:
-    /* Receive-side offload summary. Emitted on every teardown path — including
-     * gro_config=0 — so the bench and e2e can parse one stable line per run
-     * regardless of configuration. (Early startup failures return before this
-     * label; they carry no traffic and fail their arm anyway.)
-     * Deliberately NOT prefixed "udp-gro: ":
-     * that prefix is an enablement marker whose absence is asserted when
-     * UdpGro=false. gro_datagrams > gro_receives is the only direct evidence
-     * that the kernel actually coalesced. */
+    /* Receive-side offload summary — same contract as the client's line in
+     * linux_platform_run_client(); the server reads cfg->udp_gro directly
+     * because it keeps no copy of the flag. */
     LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
             sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
 
