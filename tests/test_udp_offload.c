@@ -786,13 +786,14 @@ test_recv_bad_cmsg_ignored(void)
         const char *what;
         int level, type, val;
         socklen_t len;
+        size_t expect_seg; /* what *seg_size must be after the call */
     } cases[] = {
-        {"wrong len", SOL_UDP, UDP_GRO, 1400, CMSG_LEN(sizeof(uint16_t))},
-        {"wrong type", SOL_UDP, UDP_SEGMENT, 1400, 0},
-        {"wrong level", SOL_SOCKET, UDP_GRO, 1400, 0},
-        {"zero seg", SOL_UDP, UDP_GRO, 0, 0},      /* pins the gso > 0 filter */
-        {"negative seg", SOL_UDP, UDP_GRO, -1, 0}, /* pins it against a signed cast */
-        {"seg > n", SOL_UDP, UDP_GRO, 4201, 0},    /* pins the fail-open policy */
+        {"wrong len", SOL_UDP, UDP_GRO, 1400, CMSG_LEN(sizeof(uint16_t)), 0},
+        {"wrong type", SOL_UDP, UDP_SEGMENT, 1400, 0, 0},
+        {"wrong level", SOL_SOCKET, UDP_GRO, 1400, 0, 0},
+        {"zero seg", SOL_UDP, UDP_GRO, 0, 0, 0},      /* pins the gso > 0 filter */
+        {"negative seg", SOL_UDP, UDP_GRO, -1, 0, 0}, /* pins gso > 0, not gso != 0 */
+        {"seg > n", SOL_UDP, UDP_GRO, 4201, 0, 4201}, /* stored, then fails open below */
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         rx_reset();
@@ -802,9 +803,12 @@ test_recv_bad_cmsg_ignored(void)
         rx_cmsg_val = cases[i].val;
         rx_cmsg_len = cases[i].len;
         assert(rx_call(&seg, &plen) == 4200);
-        /* Every row is delivered as a single datagram: the malformed ones are
-         * ignored outright, the oversize one comes back through
-         * mqvpn_gro_seg_len's seg >= rest arm. Nothing is dropped. */
+        /* The wrapper's own output: a malformed cmsg must leave seg at 0 —
+         * checking only the split below cannot tell "never stored" from
+         * "stored as a huge value", since both fail open to one datagram. */
+        assert(seg == cases[i].expect_seg);
+        /* And every row still delivers exactly one datagram: the malformed
+         * rows because seg is 0, the oversize row through the seg >= rest arm. */
         assert(mqvpn_gro_seg_len(4200, seg, 0) == 4200);
         assert(mqvpn_gro_seg_len(4200, seg, 4200) == 0);
     }
