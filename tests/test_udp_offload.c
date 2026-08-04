@@ -788,7 +788,10 @@ test_recv_bad_cmsg_ignored(void)
         socklen_t len;
         size_t expect_seg; /* what *seg_size must be after the call */
     } cases[] = {
-        {"wrong len", SOL_UDP, UDP_GRO, 1400, CMSG_LEN(sizeof(uint16_t)), 0},
+        {"undersized len", SOL_UDP, UDP_GRO, 1400, CMSG_LEN(sizeof(uint16_t)), 0},
+        /* oversized too: the length test is an exact compare, not a lower
+         * bound — a >= would accept a payload shape the kernel never emits */
+        {"oversized len", SOL_UDP, UDP_GRO, 1400, CMSG_LEN(sizeof(int) + 4), 0},
         {"wrong type", SOL_UDP, UDP_SEGMENT, 1400, 0, 0},
         {"wrong level", SOL_SOCKET, UDP_GRO, 1400, 0, 0},
         {"zero seg", SOL_UDP, UDP_GRO, 0, 0, 0},      /* pins the gso > 0 filter */
@@ -856,6 +859,17 @@ test_recv_eagain(void)
     rx_fail_errno = EAGAIN;
     assert(rx_call(&seg, &plen) == -1);
     assert(errno == EAGAIN); /* the read loop breaks on this */
+    assert(rx_calls == 1);
+
+    /* A hard error must surface with ITS OWN errno. EAGAIN alone cannot tell
+     * "errno preserved" from "every failure reported as EAGAIN", and the read
+     * loop's break is only correct because the caller can distinguish a
+     * drained socket from a dead one. */
+    rx_reset();
+    rx_fail_call = 1;
+    rx_fail_errno = EBADF;
+    assert(rx_call(&seg, &plen) == -1);
+    assert(errno == EBADF);
     assert(rx_calls == 1);
     printf("test_recv_eagain OK\n");
 }

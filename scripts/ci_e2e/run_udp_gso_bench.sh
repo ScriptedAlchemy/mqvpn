@@ -895,6 +895,16 @@ for arm in "${ARM_SEQUENCE[@]}"; do
 
     if ! run_one "$arm" "$expect_gso" "$expect_gro" "$extra_flags" "$run_idx"; then
         echo "  WARN: run ${arm} #${run_idx} did not complete cleanly (see $LOG_DIR)" >&2
+        # run_one returns early on setup failure, i.e. WITHOUT reaching its
+        # finish_run — and finish_run is what sanitizer-checks both endpoints.
+        # Without this, a run that died *because* of a sanitizer error would
+        # be reported as a mere WARN and the script could still exit 0, which
+        # contradicts the header's promise to fail on any sanitizer error.
+        # stop_and_check_sanitizer returns 0 for an empty PID, so calling this
+        # when an endpoint never started is a no-op.
+        finish_run "${arm} #${run_idx} (failed run)" \
+            "${LOG_DIR}/${arm}_r${run_idx}_server.log" \
+            "${LOG_DIR}/${arm}_r${run_idx}_client.log"
     fi
     sleep 2
 done
