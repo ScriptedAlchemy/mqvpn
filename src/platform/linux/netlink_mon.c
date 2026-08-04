@@ -283,9 +283,10 @@ recovery_socket_create(sa_family_t af, const char *ifname, mqvpn_path_t *mp, int
     /* Re-added paths get a brand-new fd: reproduce the startup sockopt or the
      * recovered path silently degrades to one datagram per recvmsg. The
      * "udp-gro: " prefix is asserted by scripts/ci_e2e/
-     * run_udp_gso_config_test.sh, but no script asserts THIS line: the
-     * re-add path is covered by reading the client log during the link-flap
-     * e2e run, so reword it only together with that manual check. */
+     * run_udp_gso_config_test.sh; no script pins THIS line's wording (the
+     * dellink wait regex /re.add/ matches it only incidentally, and matched
+     * the failure-path lines above before it existed). The re-add path is
+     * covered by reading the client log during the link-flap e2e run. */
     if (udp_gro) {
         if (mqvpn_udp_gro_enable(fd) == 0) {
             LOG_INF("udp-gro: enabled on re-added path '%s'", ifname);

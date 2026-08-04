@@ -730,6 +730,13 @@ run_one() {
         -c "$TUNNEL_SERVER_IP" -t "$DURATION" -P "$IPERF_STREAMS" --json \
         >"$iperf_json" 2>/dev/null || true
 
+    # Kill before wait: `iperf3 -s -1` exits only after it has served a
+    # client, so if the tunnel died between bench_wait_tunnel and the client
+    # above, the client fails (swallowed by `|| true`) and the one-shot
+    # server would keep listening forever — wait would then hang with no
+    # global timeout to rescue it. In the success path the server has
+    # already exited and the kill is a no-op.
+    kill "$iperf_srv_pid" 2>/dev/null || true
     wait "$iperf_srv_pid" 2>/dev/null || true
 
     # Reap the background ping BEFORE the result row is written: ping
@@ -925,9 +932,8 @@ FIELD_NAMES = [
     "rtt",
 ]
 
-# Four arms — the full 2x2 of the two independent knobs. A hardcoded
-# 2-tuple here would silently drop gro_off/both_off from the medians
-# summary even if the main bash loop above already launched all four.
+# Four arms — must stay in sync with ARM_SEQUENCE and the bash `case`
+# above (same silent-drop hazard, restated there).
 ARM_ORDER = ("default", "disabled", "gro_off", "both_off")
 
 

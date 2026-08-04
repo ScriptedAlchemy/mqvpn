@@ -443,6 +443,16 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
         if (n <= 0) break;
         p->gro_receives++;
 
+        /* handle < 0 is defensive — events are registered only after the
+         * library accepted the path. The recvmsg above already consumed the
+         * data, which is what keeps the level-triggered event from refiring
+         * forever; charge one unit and move on, exactly like a dropped
+         * receive. */
+        if (handle < 0) {
+            budget--;
+            continue;
+        }
+
         /* One coalesced buffer, N QUIC datagrams: hand them to the library one
          * at a time, exactly as the pre-GRO loop did (seg == 0 degenerates to a
          * single iteration), so recv_rate_limit accounting and every layer
@@ -450,15 +460,9 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
         size_t sl;
         for (size_t off = 0; (sl = mqvpn_gro_seg_len((size_t)n, seg, off)) > 0;
              off += sl) {
-            /* handle < 0 is defensive — events are registered only after the
-             * library accepted the path — but consume anyway: not reading
-             * would leave the data queued and the level-triggered event would
-             * refire immediately, spinning at 100% CPU. */
-            if (handle >= 0) {
-                mqvpn_client_on_socket_recv(p->client, handle, buf + off, sl,
-                                            (struct sockaddr *)&peer, peer_len);
-                p->gro_datagrams++;
-            }
+            mqvpn_client_on_socket_recv(p->client, handle, buf + off, sl,
+                                        (struct sockaddr *)&peer, peer_len);
+            p->gro_datagrams++;
             budget--;
         }
     }
@@ -685,14 +689,13 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = 0;
 
 cleanup:
-    /* Receive-side offload summary. Emitted on every teardown path — including
-     * gro_config=0 — so the bench and e2e can parse one stable line per run
-     * regardless of configuration. (Early startup failures return before this
-     * label; they carry no traffic and fail their arm anyway.)
-     * Deliberately NOT prefixed "udp-gro: ":
-     * that prefix is an enablement marker whose absence is asserted when
-     * UdpGro=false. gro_datagrams > gro_receives is the only direct evidence
-     * that the kernel actually coalesced. */
+    /* Receive-side offload summary (counters documented in platform_ctx_t).
+     * Emitted on every teardown path — including gro_config=0 — so the bench
+     * and e2e can parse one stable line per run regardless of configuration.
+     * (Early startup failures return before this label; they carry no traffic
+     * and fail their arm anyway.) Deliberately NOT prefixed "udp-gro: ": that
+     * prefix is an enablement marker whose absence is asserted when
+     * UdpGro=false. */
     LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
             ctx.gro_receives, ctx.gro_datagrams, ctx.udp_gro);
 
@@ -782,12 +785,10 @@ typedef struct server_platform_ctx_s {
     int shutting_down;
     ctrl_socket_t *ctrl;
 
-    /* Receive-side offload telemetry, written by svr_on_socket_read and read
-     * once at teardown. The sockopt log proves GRO was requested; only
-     * gro_datagrams > gro_receives proves the kernel actually coalesced. No
-     * udp_gro flag here: unlike the client, the listen socket is created
-     * exactly once, so the sockopt hook takes the flag as a parameter and
-     * teardown reads cfg->udp_gro directly. */
+    /* Receive-side offload telemetry — same meaning as platform_ctx_t's pair,
+     * written by svr_on_socket_read and read once at teardown. No udp_gro flag
+     * here: the listen socket is created exactly once, so the sockopt hook
+     * takes the flag as a parameter and teardown reads cfg->udp_gro. */
     uint64_t gro_receives;  /* recvmsg calls that returned data */
     uint64_t gro_datagrams; /* datagrams delivered to the library */
 
@@ -1285,8 +1286,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 
 cleanup:
     /* Receive-side offload summary — same contract as the client's line in
-     * linux_platform_run_client(); the server reads cfg->udp_gro directly
-     * because it keeps no copy of the flag. */
+     * linux_platform_run_client(). */
     LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
             sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
 
