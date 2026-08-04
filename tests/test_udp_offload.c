@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/udp.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -662,6 +663,199 @@ test_gro_enable(void)
     printf("test_gro_enable OK (r=%d)\n", r);
 }
 
+/* ── RX seam ────────────────────────────────────────────────────────── */
+
+static int rx_calls;
+static int rx_fail_call; /* 1-based call index to fail; 0 = never */
+static int rx_fail_errno;
+static size_t rx_payload_len; /* bytes the fake kernel delivers */
+static int rx_emit_cmsg;      /* 1 = emit a UDP_GRO cmsg */
+static int rx_cmsg_level;
+static int rx_cmsg_type;
+static socklen_t rx_cmsg_len; /* 0 = the correct CMSG_LEN(sizeof(int)) */
+static int rx_cmsg_val;
+static int rx_msg_flags; /* flags the fake kernel reports back */
+
+static void
+rx_reset(void)
+{
+    rx_calls = 0;
+    rx_fail_call = 0;
+    rx_fail_errno = 0;
+    rx_payload_len = 4200;
+    rx_emit_cmsg = 0;
+    rx_cmsg_level = SOL_UDP;
+    rx_cmsg_type = UDP_GRO;
+    rx_cmsg_len = 0;
+    rx_cmsg_val = 1400;
+    rx_msg_flags = 0;
+}
+
+ssize_t
+mqvpn_seam_recvmsg(int fd, struct msghdr *msg, int flags)
+{
+    assert(fd == 3);
+    assert(flags & MSG_DONTWAIT);
+    /* Value-result contract: both lengths, and msg_flags, must be at full
+     * capacity / zero on EVERY call, retries included. The failure branch
+     * below poisons them precisely so a caller that resets only once outside
+     * the retry loop trips these asserts on the retry. */
+    assert(msg->msg_namelen == sizeof(struct sockaddr_storage));
+    assert(msg->msg_controllen == CMSG_SPACE(sizeof(int)));
+    assert(msg->msg_flags == 0);
+    assert(msg->msg_iovlen == 1);
+    assert(msg->msg_iov[0].iov_base != NULL);
+    assert(msg->msg_iov[0].iov_len == 65536);
+    assert(msg->msg_name != NULL);
+    rx_calls++;
+
+    if (rx_fail_call == rx_calls) {
+        msg->msg_namelen = 0; /* simulate the kernel shrinking these */
+        msg->msg_controllen = 0;
+        msg->msg_flags = MSG_TRUNC; /* and leaving stale flags behind */
+        errno = rx_fail_errno;
+        return -1;
+    }
+
+    memset(msg->msg_iov[0].iov_base, 0xAB, rx_payload_len);
+    struct sockaddr_in *sin = (struct sockaddr_in *)msg->msg_name;
+    memset(sin, 0, sizeof(*sin));
+    sin->sin_family = AF_INET;
+    sin->sin_port = htons(4433);
+    msg->msg_namelen = sizeof(*sin);
+    msg->msg_flags = rx_msg_flags;
+
+    if (rx_emit_cmsg) {
+        struct cmsghdr *cm = CMSG_FIRSTHDR(msg);
+        assert(cm != NULL);
+        cm->cmsg_level = rx_cmsg_level;
+        cm->cmsg_type = rx_cmsg_type;
+        cm->cmsg_len = rx_cmsg_len ? rx_cmsg_len : CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(cm), &rx_cmsg_val, sizeof(rx_cmsg_val));
+        msg->msg_controllen = CMSG_SPACE(sizeof(int));
+    } else {
+        msg->msg_controllen = 0;
+    }
+    return (ssize_t)rx_payload_len;
+}
+
+/* ── RX: recvmsg wrapper ────────────────────────────────────────────── */
+
+static ssize_t
+rx_call(size_t *seg, socklen_t *plen)
+{
+    static uint8_t buf[65536];
+    static struct sockaddr_storage peer;
+    *plen = sizeof(peer);
+    *seg = 12345; /* poison: the wrapper must always write this */
+    return mqvpn_udp_recv_segmented(3, buf, sizeof(buf), (struct sockaddr *)&peer, plen,
+                                    seg);
+}
+
+static void
+test_recv_no_cmsg(void)
+{
+    size_t seg;
+    socklen_t plen;
+    rx_reset();
+    assert(rx_call(&seg, &plen) == 4200);
+    assert(seg == 0); /* no cmsg → one datagram */
+    assert(plen == sizeof(struct sockaddr_in));
+    assert(rx_calls == 1);
+    printf("test_recv_no_cmsg OK\n");
+}
+
+static void
+test_recv_gro_cmsg(void)
+{
+    size_t seg;
+    socklen_t plen;
+    rx_reset();
+    rx_emit_cmsg = 1;
+    assert(rx_call(&seg, &plen) == 4200);
+    assert(seg == 1400);
+    printf("test_recv_gro_cmsg OK\n");
+}
+
+static void
+test_recv_bad_cmsg_ignored(void)
+{
+    size_t seg;
+    socklen_t plen;
+    struct {
+        const char *what;
+        int level, type, val;
+        socklen_t len;
+    } cases[] = {
+        {"wrong len", SOL_UDP, UDP_GRO, 1400, CMSG_LEN(sizeof(uint16_t))},
+        {"wrong type", SOL_UDP, UDP_SEGMENT, 1400, 0},
+        {"wrong level", SOL_SOCKET, UDP_GRO, 1400, 0},
+        {"zero seg", SOL_UDP, UDP_GRO, 0, 0},      /* pins the gso > 0 filter */
+        {"negative seg", SOL_UDP, UDP_GRO, -1, 0}, /* pins it against a signed cast */
+        {"seg > n", SOL_UDP, UDP_GRO, 4201, 0},    /* pins the fail-open policy */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        rx_reset();
+        rx_emit_cmsg = 1;
+        rx_cmsg_level = cases[i].level;
+        rx_cmsg_type = cases[i].type;
+        rx_cmsg_val = cases[i].val;
+        rx_cmsg_len = cases[i].len;
+        assert(rx_call(&seg, &plen) == 4200);
+        /* Every row is delivered as a single datagram: the malformed ones are
+         * ignored outright, the oversize one comes back through
+         * mqvpn_gro_seg_len's seg >= rest arm. Nothing is dropped. */
+        assert(mqvpn_gro_seg_len(4200, seg, 0) == 4200);
+        assert(mqvpn_gro_seg_len(4200, seg, 4200) == 0);
+    }
+    printf("test_recv_bad_cmsg_ignored OK\n");
+}
+
+static void
+test_recv_truncated_dropped(void)
+{
+    size_t seg;
+    socklen_t plen;
+
+    rx_reset();
+    rx_msg_flags = MSG_TRUNC;
+    assert(rx_call(&seg, &plen) == MQVPN_RECV_DROP);
+
+    rx_reset();
+    rx_emit_cmsg = 1;
+    rx_msg_flags = MSG_CTRUNC;
+    assert(rx_call(&seg, &plen) == MQVPN_RECV_DROP);
+
+    printf("test_recv_truncated_dropped OK\n");
+}
+
+static void
+test_recv_eintr_retried(void)
+{
+    size_t seg;
+    socklen_t plen;
+    rx_reset();
+    rx_fail_call = 1;
+    rx_fail_errno = EINTR;
+    assert(rx_call(&seg, &plen) == 4200); /* retried, not surfaced */
+    assert(rx_calls == 2);
+    printf("test_recv_eintr_retried OK\n");
+}
+
+static void
+test_recv_eagain(void)
+{
+    size_t seg;
+    socklen_t plen;
+    rx_reset();
+    rx_fail_call = 1;
+    rx_fail_errno = EAGAIN;
+    assert(rx_call(&seg, &plen) == -1);
+    assert(errno == EAGAIN); /* the read loop breaks on this */
+    assert(rx_calls == 1);
+    printf("test_recv_eagain OK\n");
+}
+
 int
 main(void)
 {
@@ -687,5 +881,11 @@ main(void)
     test_fallback_32_burst();
     test_gro_seg_len();
     test_gro_enable();
+    test_recv_no_cmsg();
+    test_recv_gro_cmsg();
+    test_recv_bad_cmsg_ignored();
+    test_recv_truncated_dropped();
+    test_recv_eintr_retried();
+    test_recv_eagain();
     return 0;
 }

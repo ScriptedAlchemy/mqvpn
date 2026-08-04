@@ -30,9 +30,11 @@
  * makes those definitions compiler-checked against this mapping). */
 #    define OFFLOAD_SENDMSG  mqvpn_seam_sendmsg
 #    define OFFLOAD_SENDMMSG mqvpn_seam_sendmmsg
+#    define OFFLOAD_RECVMSG  mqvpn_seam_recvmsg
 #  else
 #    define OFFLOAD_SENDMSG  sendmsg
 #    define OFFLOAD_SENDMMSG sendmmsg
+#    define OFFLOAD_RECVMSG  recvmsg
 #  endif
 
 size_t
@@ -192,6 +194,62 @@ mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
         sent += (unsigned int)run;
     }
     return sent;
+}
+
+ssize_t
+mqvpn_udp_recv_segmented(int fd, void *buf, size_t buflen, struct sockaddr *peer,
+                         socklen_t *peerlen, size_t *seg_size)
+{
+    struct msghdr msg;
+    struct iovec iov;
+    /* union, not a bare char[]: CMSG_FIRSTHDR casts this to struct cmsghdr*,
+     * which is UB on an alignment-1 array (same fix as the TX path). */
+    union {
+        char buf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } ctrl;
+    const socklen_t peerlen_in = *peerlen;
+
+    *seg_size = 0;
+
+    ssize_t n;
+    do {
+        /* msg_namelen / msg_controllen / msg_flags are value-result: the
+         * kernel overwrites them, so every call — retries included — starts
+         * from full capacity. */
+        memset(&msg, 0, sizeof(msg));
+        iov.iov_base = buf;
+        iov.iov_len = buflen;
+        msg.msg_name = peer;
+        msg.msg_namelen = peerlen_in;
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = ctrl.buf;
+        msg.msg_controllen = sizeof(ctrl.buf);
+        n = OFFLOAD_RECVMSG(fd, &msg, MSG_DONTWAIT);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0) return -1; /* errno preserved for the caller (EAGAIN = drained) */
+
+    *peerlen = msg.msg_namelen;
+
+    /* Never hand a truncated buffer to the library as a whole datagram: the
+     * QUIC packet at the tail would be silently cut. The 64 KB caller buffer
+     * makes this unreachable in practice — but that is an assumption about
+     * the current kernel's coalescing bound, not a documented ABI ceiling
+     * (udp(7) promises only "multiple datagrams worth of data"), so the check
+     * stays and an oversize aggregate is discarded rather than mangled. */
+    if (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) return MQVPN_RECV_DROP;
+
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(&msg); cm != NULL;
+         cm = CMSG_NXTHDR(&msg, cm)) {
+        if (cm->cmsg_level != SOL_UDP || cm->cmsg_type != UDP_GRO) continue;
+        if (cm->cmsg_len != CMSG_LEN(sizeof(int))) continue; /* kernel ABI */
+        int gso = 0;
+        memcpy(&gso, CMSG_DATA(cm), sizeof(gso)); /* alignment-safe copy-out */
+        if (gso > 0) *seg_size = (size_t)gso;
+        break;
+    }
+    return n;
 }
 
 #endif

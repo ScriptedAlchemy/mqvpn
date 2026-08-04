@@ -25,6 +25,7 @@
  * tests/test_udp_offload.c) already #defines before its first #include. */
 ssize_t mqvpn_seam_sendmsg(int fd, const struct msghdr *msg, int flags);
 int mqvpn_seam_sendmmsg(int fd, struct mmsghdr *msgvec, unsigned int vlen, int flags);
+ssize_t mqvpn_seam_recvmsg(int fd, struct msghdr *msg, int flags);
 #  endif
 
 /* Result classes for mqvpn_udp_send_batch() when 0 datagrams were sent.
@@ -39,25 +40,6 @@ int mqvpn_seam_sendmmsg(int fd, struct mmsghdr *msgvec, unsigned int vlen, int f
  * XQC_MAX_SEND_MSG_ONCE; compile-pinned by the _Static_assert next to each
  * write_mmsg_ex registration in mqvpn_client.c / mqvpn_server.c. */
 #  define MQVPN_OFFLOAD_MAX_BATCH 32
-
-/* mqvpn_udp_recv_segmented(): the datagram was truncated and discarded — the
- * caller keeps draining the socket. Disjoint from -1 (syscall error), 0
- * (zero-length datagram) and from the MQVPN_SEND_* codes above, so a return
- * value routed to the wrong consumer can never look plausible. */
-#  define MQVPN_RECV_DROP (-5)
-
-/* Enable kernel UDP GRO on fd (SOL_UDP/UDP_GRO): the kernel coalesces a
- * burst of same-flow datagrams into one buffer and reports the segment size
- * as a cmsg. Returns 0 on success, -1 with errno preserved for the caller's
- * log (kernels < 5.0 fail with ENOPROTOOPT). */
-int mqvpn_udp_gro_enable(int fd);
-
-/* Length of the GRO segment starting at byte offset `off` inside a `len`-byte
- * receive buffer whose segments are `seg` bytes each (only the last may be
- * shorter). `seg == 0` means no UDP_GRO cmsg was present, i.e. the buffer
- * holds exactly one datagram. Returns 0 once `off` reaches the end — the read
- * loop's terminator. Pure function. */
-size_t mqvpn_gro_seg_len(size_t len, size_t seg, size_t off);
 
 /* Stateless capability probe: does the kernel accept UDP_SEGMENT?
  * (Kernel property; callers store the result per client/server instance —
@@ -104,6 +86,43 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
 ssize_t mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
                              const struct sockaddr *peer, socklen_t peerlen, int use_gso,
                              int *gso_disabled, uint64_t *bytes_sent);
+
+/* ── RX ─────────────────────────────────────────────────────────────── */
+
+/* mqvpn_udp_recv_segmented(): the datagram was truncated and discarded — the
+ * caller keeps draining the socket. Disjoint from -1 (syscall error), 0
+ * (zero-length datagram) and from the MQVPN_SEND_* codes above, so a return
+ * value routed to the wrong consumer can never look plausible. */
+#  define MQVPN_RECV_DROP (-5)
+
+/* Enable kernel UDP GRO on fd (SOL_UDP/UDP_GRO): the kernel coalesces a
+ * burst of same-flow datagrams into one buffer and reports the segment size
+ * as a cmsg. Returns 0 on success, -1 with errno preserved for the caller's
+ * log (kernels < 5.0 fail with ENOPROTOOPT). */
+int mqvpn_udp_gro_enable(int fd);
+
+/* Length of the GRO segment starting at byte offset `off` inside a `len`-byte
+ * receive buffer whose segments are `seg` bytes each (only the last may be
+ * shorter). `seg == 0` means no UDP_GRO cmsg was present, i.e. the buffer
+ * holds exactly one datagram. Returns 0 once `off` reaches the end — the read
+ * loop's terminator. Pure function. */
+size_t mqvpn_gro_seg_len(size_t len, size_t seg, size_t off);
+
+/* Receive one datagram — or one GRO-coalesced burst — from fd into buf.
+ *   - Returns the byte count (> 0), 0 for a zero-length datagram, -1 on a
+ *     syscall error (errno preserved; EAGAIN means the socket is drained),
+ *     or MQVPN_RECV_DROP when the kernel reported truncation.
+ *   - *seg_size is the UDP_GRO segment size, or 0 when the kernel sent no
+ *     cmsg (an un-coalesced datagram). Feed it to mqvpn_gro_seg_len().
+ *   - *peerlen is value-result: set it to the size of the peer buffer before
+ *     the call; it is reset on every internal retry and written back with the
+ *     kernel's value.
+ *   - EINTR is retried internally. The syscall uses MSG_DONTWAIT.
+ * A cmsg with an unexpected level, type, length or a non-positive segment
+ * size is ignored, not fatal: *seg_size stays 0 and the buffer is delivered
+ * as a single datagram — the pre-GRO behavior. */
+ssize_t mqvpn_udp_recv_segmented(int fd, void *buf, size_t buflen, struct sockaddr *peer,
+                                 socklen_t *peerlen, size_t *seg_size);
 
 #endif /* __linux__ */
 #endif /* MQVPN_UDP_OFFLOAD_H */
