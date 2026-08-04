@@ -810,6 +810,15 @@ if(BUILD_TESTING)
     set_target_properties(test_udp_offload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_udp_offload COMMAND test_udp_offload)
 
+    # Kernel-backed UDP GSO/GRO round trip (issue #167): built WITHOUT
+    # MQVPN_OFFLOAD_TEST_SEAM, so every syscall is the real one — this pins
+    # the wrapper against the actual kernel rather than the fabricated seam
+    # kernel above.
+    add_executable(test_udp_gro_kernel tests/test_udp_gro_kernel.c src/udp_offload.c)
+    target_include_directories(test_udp_gro_kernel PRIVATE src include)
+    set_target_properties(test_udp_gro_kernel PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_udp_gro_kernel COMMAND test_udp_gro_kernel)
+
     # Darwin platform-twin PATH-stub state machine tests (Task 10), also
     # registered here on Linux: the twins (darwin/dns.c, darwin/routing.c,
     # darwin/killswitch.c) are portable POSIX C except for two Darwin-only
