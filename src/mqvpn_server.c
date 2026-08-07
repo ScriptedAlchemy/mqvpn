@@ -2027,7 +2027,12 @@ mqvpn_server_destroy(mqvpn_server_t *s)
     LOG_I(s, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d", s->tx_sends,
           s->tx_datagrams, s->config.udp_gso);
 
-    /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free */
+    /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free.
+     * Flush first when the deferred flush is engaged: xqc_engine_destroy
+     * tears down queued connections without processing them, so datagrams
+     * mqvpn_server_on_tun_packet already accepted would be dropped. Same
+     * guarantee the client side restores in mqvpn_client_disconnect. */
+    if (s->tx_batch && s->engine) xqc_engine_main_logic(s->engine);
     if (s->engine) {
         xqc_engine_destroy(s->engine);
         s->engine = NULL;
