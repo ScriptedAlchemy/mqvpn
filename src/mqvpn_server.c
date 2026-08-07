@@ -1900,7 +1900,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
      * XQC_CONN_FLAG_SERVER_ACCEPT for batch sends on server conns, so
      * pre-accept traffic (cb_write_before_accept) keeps using
      * conn_send_packet_before_accept unaffected by this registration. */
-    if (cfg->udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500) {
+    if (mqvpn_tx_batch_enabled(cfg->udp_gso)) {
         /* Recorded rather than re-derived: the cs_input below feeds this same
          * flag to conn_settings.defer_dgram_flush, so the deferred flush
          * cannot outlive the batch callback it exists to fill. */

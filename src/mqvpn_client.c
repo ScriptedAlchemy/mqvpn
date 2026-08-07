@@ -2875,7 +2875,7 @@ init_xquic_engine(mqvpn_client_t *c)
      * of the constant above ~2KB must revisit run-splitting before this
      * registration can stay unconditional. constant-vs-constant compare
      * is warning-clean under -Werror. */
-    if (cfg->udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500) {
+    if (mqvpn_tx_batch_enabled(cfg->udp_gso)) {
         /* Recorded rather than re-derived: cli_start_connection() feeds this
          * same flag to conn_settings.defer_dgram_flush, so the deferred flush
          * cannot outlive the batch callback it exists to fill. */
