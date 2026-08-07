@@ -305,11 +305,60 @@ test_reinjection_mapping(void)
     return 0;
 }
 
+/* The escape hatch: with UdpGso=false no batched send callback is
+ * registered, so xquic emits one syscall per packet no matter when the flush
+ * happens — deferring would only move the flush, for zero benefit. The
+ * builder must therefore leave defer_dgram_flush at 0, which is what keeps
+ * "UdpGso=false behaves exactly as it did before the deferral patch" true.
+ *
+ * This is the regression the e2e cannot see: its UdpGso=false arm passes
+ * either way, because the udp-tx factor is 1.0 by construction once the
+ * batch callback is absent. */
+static int
+test_defer_dgram_flush_tracks_batch_registration(void)
+{
+    xqc_conn_settings_t cs;
+
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+        .defer_dgram_flush = false,
+    };
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_dgram_flush, 0);
+
+    in.defer_dgram_flush = true;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_dgram_flush, 1);
+
+    /* Server path shares the builder but is reached by its own call site. */
+    in.is_server = true;
+    in.defer_dgram_flush = false;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_dgram_flush, 0);
+
+    in.defer_dgram_flush = true;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_dgram_flush, 1);
+
+    /* Absent from a designated initializer = 0: a future call site that
+     * forgets the field gets the pre-patch behavior, never deferral. */
+    mqvpn_conn_settings_input_t unset = {
+        .is_server = false,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+    mqvpn_build_conn_settings(&unset, &cs);
+    ASSERT_EQ(cs.defer_dgram_flush, 0);
+    return 0;
+}
+
 int
 main(void)
 {
     int failed = 0;
     failed += test_asymmetry_server_vs_client();
+    failed += test_defer_dgram_flush_tracks_batch_registration();
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();

@@ -249,6 +249,11 @@ struct mqvpn_client_s {
     uint64_t tx_datagrams;
     int srtt_ms;
     int gso_available; /* engine-create probe result */
+    /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
+     * drives conn_settings.defer_dgram_flush, so the two can never disagree —
+     * see mqvpn_conn_settings.h. Independent of gso_available: a failed
+     * UDP_SEGMENT probe still batches via sendmmsg. */
+    int tx_batch;
 
     /* Multipath (Level 1) */
     path_entry_t paths[MQVPN_MAX_PATHS];
@@ -2698,6 +2703,9 @@ cli_start_connection(mqvpn_client_t *c)
         .reinj_srtt_factor_pct = c->config.reinj_srtt_factor_pct,
         .reinj_hard_deadline_ms = c->config.reinj_hard_deadline_ms,
         .reinj_deadline_lower_bound_ms = c->config.reinj_deadline_lower_bound_ms,
+        /* set by init_xquic_engine, which runs in mqvpn_client_new() before
+         * any cli_start_connection() — connect and reconnect alike */
+        .defer_dgram_flush = (c->tx_batch != 0),
     };
     mqvpn_build_conn_settings(&cs_input, &cs);
 
@@ -2868,6 +2876,10 @@ init_xquic_engine(mqvpn_client_t *c)
      * registration can stay unconditional. constant-vs-constant compare
      * is warning-clean under -Werror. */
     if (cfg->udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500) {
+        /* Recorded rather than re-derived: cli_start_connection() feeds this
+         * same flag to conn_settings.defer_dgram_flush, so the deferred flush
+         * cannot outlive the batch callback it exists to fill. */
+        c->tx_batch = 1;
         c->gso_available = mqvpn_udp_gso_probe();
         tcbs.write_mmsg_ex = cb_write_mmsg_ex;
         xconfig.sendmmsg_on = 1;
