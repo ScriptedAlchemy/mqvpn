@@ -525,14 +525,16 @@ mqvpn follows semantic versioning for the control API:
   struct producers write `sizeof(mqvpn_stats_t)` bytes, so binaries linked
   against the shared library must be recompiled against the new header. The
   shared-library SOVERSION was bumped 1 → 2 for exactly this reason.
-- `get_stats` gained the outer-UDP offload counters `udp_tx_sends`,
-  `udp_tx_datagrams`, `udp_rx_receives`, and `udp_rx_datagrams`. Existing
-  JSON consumers remain unaffected. The two transmit-side fields also grow
-  `mqvpn_stats_t`, so the same C-API caveat as the v0.9.0 entry above applies:
-  `mqvpn_client_get_stats`/`mqvpn_server_get_stats` write
-  `sizeof(mqvpn_stats_t)` bytes without consulting the caller's `struct_size`,
-  so binaries linked against the shared library must be recompiled against the
-  new header. The receive-side pair is deliberately NOT in `mqvpn_stats_t`:
+- `get_stats` was extended in v0.16.0 with the outer-UDP offload counters
+  `udp_tx_sends`, `udp_tx_datagrams`, `udp_rx_receives`, and
+  `udp_rx_datagrams`. Existing JSON consumers remain unaffected. The two
+  transmit-side fields also grow `mqvpn_stats_t`, so the same C-API caveat as
+  the v0.9.0 entry above applies: `mqvpn_client_get_stats` /
+  `mqvpn_server_get_stats` write `sizeof(mqvpn_stats_t)` bytes without
+  consulting the caller's `struct_size`, so binaries linked against the shared
+  library must be recompiled against the new header — the shared-library
+  SOVERSION was bumped 2 → 3 for exactly this reason.
+  The receive-side pair is deliberately NOT in `mqvpn_stats_t`:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.

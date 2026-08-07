@@ -551,7 +551,9 @@ target_include_directories(mqvpn_darwin_platform PRIVATE
 add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
-    SOVERSION 2
+    # Keep in lockstep with the Linux twin below, which carries the rationale
+    # for each bump (2 -> 3: mqvpn_stats_t grew by the udp_tx_* pair).
+    SOVERSION 3
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
 )
@@ -670,7 +672,11 @@ set_target_properties(mqvpn_shared PROPERTIES
     # Bumped 1 -> 2: mqvpn_stats_t grew (hybrid lane/flow counters). Producers
     # write sizeof(mqvpn_stats_t) with no caller-size negotiation, so a binary
     # built against the old header must not resolve to the new .so.
-    SOVERSION 2
+    # Bumped 2 -> 3: mqvpn_stats_t grew again (udp_tx_sends/udp_tx_datagrams),
+    # same reason. Every growth of this struct needs a bump here AND in the
+    # Darwin twin above, until the getters honour the caller's struct_size
+    # instead of writing sizeof(*out) unconditionally.
+    SOVERSION 3
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
 )
