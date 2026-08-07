@@ -89,6 +89,8 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->struct_size = sizeof(*out);
     out->bytes_tx = 111;
     out->tcp_flows_total = 7;
+    out->udp_tx_sends = 1234;
+    out->udp_tx_datagrams = 5678;
     return 0;
 }
 
@@ -231,11 +233,24 @@ static int g_dummy_server; /* opaque sentinel — stubs never dereference it */
         }                                                                            \
     } while (0)
 
+/* Platform-owned RX offload counters the control socket borrows. Non-zero and
+ * unequal so a get_stats regression that hardcodes 0 or swaps the pair cannot
+ * pass. */
+static uint64_t g_gro_receives = 61;
+static uint64_t g_gro_datagrams = 83;
+
 static void
 call(const char *req)
 {
     memset(g_resp, 0, sizeof(g_resp));
-    dispatch(req, g_resp, sizeof(g_resp) - 2, (mqvpn_server_t *)&g_dummy_server);
+    /* Stack-built context: dispatch and the handlers only read ->server and
+     * the borrowed counter pointers, never the libevent members. */
+    ctrl_socket_t cs = {
+        .server = (mqvpn_server_t *)&g_dummy_server,
+        .gro_receives = &g_gro_receives,
+        .gro_datagrams = &g_gro_datagrams,
+    };
+    dispatch(req, g_resp, sizeof(g_resp) - 2, &cs);
 }
 
 /* ── Envelope / routing ───────────────────────────────────────────────────── */
@@ -344,6 +359,16 @@ test_get_stats(void)
     CHECK_HAS("\"bytes_tx\":111");
     CHECK_HAS("\"tcp_flows_total\":7");
     CHECK_HAS("\"uptime_sec\":4242");
+    /* Offload counters reach the JSON from BOTH sources: udp_tx_* through
+     * mqvpn_stats_t (the library issues those sends), udp_rx_* straight from
+     * the platform's borrowed counters (GRO never crosses the library ABI).
+     * The get_stats body is a hand-written field-by-field snprintf, so a new
+     * mqvpn_stats_t field silently reads 0 here unless it is added in both
+     * places — that is exactly the failure this pins. */
+    CHECK_HAS("\"udp_tx_sends\":1234");
+    CHECK_HAS("\"udp_tx_datagrams\":5678");
+    CHECK_HAS("\"udp_rx_receives\":61");
+    CHECK_HAS("\"udp_rx_datagrams\":83");
 }
 
 /* ── get_status ───────────────────────────────────────────────────────────── */

@@ -3942,6 +3942,8 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
      * field comment on c->pkts_lane_tcp above for why this must not be
      * summed with the lane's internal flows_rejected_cap. */
     out->tcp_flows_rejected = c->tcp_flows_rejected;
+    out->udp_tx_sends = c->tx_sends;
+    out->udp_tx_datagrams = c->tx_datagrams;
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* tcp_flows_active/total and raw_markers_active are gauges/counters
      * the TCP-lane flow table already maintains (mqvpn_tcp_lane_get_stats)

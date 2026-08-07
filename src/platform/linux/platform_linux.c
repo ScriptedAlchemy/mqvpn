@@ -1275,8 +1275,12 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 
     /* Control API (optional) */
     if (cfg->control_port > 0) {
-        sp.ctrl =
-            ctrl_socket_create(sp.eb, cfg->control_addr, cfg->control_port, sp.server);
+        /* sp outlives the control socket (both are torn down in this
+         * function's cleanup, ctrl first), so lending the RX counters is
+         * safe. They are written only by svr_on_socket_read, on this same
+         * event loop. */
+        sp.ctrl = ctrl_socket_create(sp.eb, cfg->control_addr, cfg->control_port,
+                                     sp.server, &sp.gro_receives, &sp.gro_datagrams);
         if (!sp.ctrl) LOG_WRN("control API setup failed — continuing without it");
     }
 
