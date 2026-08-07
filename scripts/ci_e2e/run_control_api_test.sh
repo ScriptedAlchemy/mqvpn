@@ -486,6 +486,32 @@ PY
     fi
     echo "  get_stats bytes_total=$bytes_total: OK"
 
+    # Outer-UDP offload counters, under real traffic. Phase H.2 only proves
+    # the four keys exist; this proves they are wired to something that
+    # actually counts — the "present but always 0" class the hand-written
+    # get_stats snprintf keeps inviting. Deliberately NOT asserting a ratio
+    # > 1: batching depends on the kernel and the offered load, and this
+    # phase must pass with UdpGso/UdpGro off. datagrams >= syscalls is the
+    # invariant that holds in every configuration.
+    local offload_check
+    offload_check=$(python3 - "$resp" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+ts, td = d.get("udp_tx_sends", 0), d.get("udp_tx_datagrams", 0)
+rr, rd = d.get("udp_rx_receives", 0), d.get("udp_rx_datagrams", 0)
+errs = []
+if ts < 1 or td < 1: errs.append(f"tx not counting (sends={ts} datagrams={td})")
+if rr < 1 or rd < 1: errs.append(f"rx not counting (receives={rr} datagrams={rd})")
+if td < ts: errs.append(f"tx datagrams<sends ({td}<{ts})")
+if rd < rr: errs.append(f"rx datagrams<receives ({rd}<{rr})")
+print("; ".join(errs) if errs else f"OK tx={td}/{ts} rx={rd}/{rr}")
+PY
+)
+    case "$offload_check" in
+        OK\ *) echo "  get_stats offload counters $offload_check" ;;
+        *) echo "  get_stats offload counters: $offload_check ($resp)"; return 1 ;;
+    esac
+
     # get_status: clients[0].user == "alice", paths populated, pkt_sent > 0
     resp=$(ctrl_local '{"cmd":"get_status"}')
     if ! assert_json_field "$resp" ok true; then
@@ -1244,7 +1270,8 @@ test_phase_h_new_commands() {
     echo "--- Phase H.2: get_stats extended fields ---"
     RESP=$(ctrl_local '{"cmd":"get_stats"}')
     assert_json_field "$RESP" ok true        || { echo "FAIL H.2: ok ($RESP)"; return 1; }
-    for k in n_clients bytes_tx bytes_rx dgram_sent dgram_recv dgram_lost dgram_acked uptime_sec; do
+    for k in n_clients bytes_tx bytes_rx dgram_sent dgram_recv dgram_lost dgram_acked \
+             udp_tx_sends udp_tx_datagrams udp_rx_receives udp_rx_datagrams uptime_sec; do
         local v
         v=$(echo "$RESP" | jget "$k")
         [[ -n "$v" ]] || { echo "FAIL H.2: missing $k in $RESP"; return 1; }
