@@ -4,6 +4,20 @@ project(mqvpn VERSION 0.15.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Shared-library ABI version, consumed by BOTH the Darwin and the Linux
+# mqvpn_shared blocks far below. One definition on purpose: the platform
+# blocks are ~120 lines apart and only the Linux one used to carry the
+# rationale, so a bump applied to that copy alone would ship a macOS dylib
+# whose struct layout no longer matches its soname.
+#
+# Bump whenever mqvpn_stats_t (or any struct the public API fills in place)
+# grows: the getters write sizeof(*out) without consulting the caller's
+# struct_size, so a binary built against an older header must not resolve to
+# the newer library.
+#   1 -> 2  hybrid lane/flow counters
+#   2 -> 3  udp_tx_sends / udp_tx_datagrams
+set(MQVPN_SOVERSION 3)
+
 # ---------- Options ----------
 option(XQUIC_BUILD_DIR "Path to pre-built xquic build directory" "")
 option(ENABLE_SANITIZERS "Enable ASan + UBSan" OFF)
@@ -551,9 +565,7 @@ target_include_directories(mqvpn_darwin_platform PRIVATE
 add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
-    # Keep in lockstep with the Linux twin below, which carries the rationale
-    # for each bump (2 -> 3: mqvpn_stats_t grew by the udp_tx_* pair).
-    SOVERSION 3
+    SOVERSION ${MQVPN_SOVERSION}
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
 )
@@ -669,14 +681,9 @@ else() # NOT WIN32, NOT APPLE — Linux
 add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
-    # Bumped 1 -> 2: mqvpn_stats_t grew (hybrid lane/flow counters). Producers
-    # write sizeof(mqvpn_stats_t) with no caller-size negotiation, so a binary
-    # built against the old header must not resolve to the new .so.
-    # Bumped 2 -> 3: mqvpn_stats_t grew again (udp_tx_sends/udp_tx_datagrams),
-    # same reason. Every growth of this struct needs a bump here AND in the
-    # Darwin twin above, until the getters honour the caller's struct_size
-    # instead of writing sizeof(*out) unconditionally.
-    SOVERSION 3
+    # Defined once at the top of this file, with the bump history — both this
+    # block and the Darwin twin above read it, so they cannot drift.
+    SOVERSION ${MQVPN_SOVERSION}
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
 )

@@ -461,6 +461,13 @@ test_phase_b_active_session() {
     fi
     echo "  client connected: OK"
 
+    # Offload counters BEFORE the traffic. The tunnel handshake and the ping
+    # above have already moved all four off zero, so a ">0 afterwards" check
+    # would pass even if post-accept accounting were entirely broken. The
+    # delta below is what actually tests "counting under traffic".
+    local resp_pre
+    resp_pre=$(ctrl_local '{"cmd":"get_stats"}')
+
     # Drive 5s of iperf3 traffic (client NS → server VIP)
     ip netns exec "$NS_SERVER" iperf3 -s -1 -D --logfile "${LOG_DIR}/phase_b_iperf3_server.log" || true
     sleep 0.2
@@ -488,23 +495,34 @@ PY
 
     # Outer-UDP offload counters, under real traffic. Phase H.2 only proves
     # the four keys exist; this proves they are wired to something that
-    # actually counts — the "present but always 0" class the hand-written
-    # get_stats snprintf keeps inviting. Deliberately NOT asserting a ratio
-    # > 1: batching depends on the kernel and the offered load, and this
-    # phase must pass with UdpGso/UdpGro off. datagrams >= syscalls is the
-    # invariant that holds in every configuration.
+    # actually counts during the traffic above — the "present but always 0"
+    # and "counted once at startup, then frozen" classes that the
+    # hand-written get_stats snprintf keeps inviting. Deliberately NOT
+    # asserting a ratio > 1: batching depends on the kernel and the offered
+    # load, and this phase must pass with UdpGso/UdpGro off, where datagrams
+    # and syscalls are exactly equal.
     local offload_check
-    offload_check=$(python3 - "$resp" <<'PY'
+    offload_check=$(python3 - "$resp_pre" "$resp" <<'PY'
 import json, sys
-d = json.loads(sys.argv[1])
-ts, td = d.get("udp_tx_sends", 0), d.get("udp_tx_datagrams", 0)
-rr, rd = d.get("udp_rx_receives", 0), d.get("udp_rx_datagrams", 0)
+KEYS = ("udp_tx_sends", "udp_tx_datagrams", "udp_rx_receives", "udp_rx_datagrams")
+pre, post = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 errs = []
-if ts < 1 or td < 1: errs.append(f"tx not counting (sends={ts} datagrams={td})")
-if rr < 1 or rd < 1: errs.append(f"rx not counting (receives={rr} datagrams={rd})")
+for k in KEYS:
+    if k not in post:
+        errs.append(f"{k} absent")
+        continue
+    # Strictly greater, not just non-zero: the handshake and the tunnel ping
+    # already made all four positive before the traffic started.
+    d = post[k] - pre.get(k, 0)
+    if d <= 0:
+        errs.append(f"{k} did not advance ({pre.get(k)} -> {post[k]})")
+ts, td = post.get("udp_tx_sends", 0), post.get("udp_tx_datagrams", 0)
+rr, rd = post.get("udp_rx_receives", 0), post.get("udp_rx_datagrams", 0)
 if td < ts: errs.append(f"tx datagrams<sends ({td}<{ts})")
 if rd < rr: errs.append(f"rx datagrams<receives ({rd}<{rr})")
-print("; ".join(errs) if errs else f"OK tx={td}/{ts} rx={rd}/{rr}")
+print("; ".join(errs) if errs
+      else f"OK tx=+{td - pre.get('udp_tx_datagrams', 0)}/+{ts - pre.get('udp_tx_sends', 0)}"
+           f" rx=+{rd - pre.get('udp_rx_datagrams', 0)}/+{rr - pre.get('udp_rx_receives', 0)}")
 PY
 )
     case "$offload_check" in
