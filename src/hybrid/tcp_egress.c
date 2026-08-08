@@ -31,9 +31,28 @@
 /* One relay-loop chunk (both directions) and the lazily-allocated stash
  * buffer size: a single in-flight chunk per direction, matching the
  * client's tcp_lane precedent (downlink_stash is TCP_MSS-sized there; here
- * both directions share a flat 4096 to match the relay loop's stack
- * buffers). */
-#define TCP_EGRESS_RELAY_CHUNK 4096
+ * both directions share one flat size to match the relay loop's stack
+ * buffers).
+ *
+ * The value is a send-batching parameter, not just a buffer size. Each
+ * xqc_h3_request_send_body() of one chunk queues floor(chunk / packet) full
+ * QUIC packets plus a short remainder, and a GSO run cannot span the
+ * remainder — so the chunk caps how much the outer-UDP send can batch. At
+ * 4096 (~3 packets) the measured batching factor was pinned near 3 no matter
+ * how many flows were live; raising it moves the ceiling:
+ *
+ *     chunk    factor (netns, 8 parallel flows, downlink)
+ *      4096    3.40
+ *      8192   19.64
+ *     16384   20.75      <- here
+ *     32768   22.58
+ *
+ * 16384 sits just past the knee: 8192 already captures most of the win but
+ * with 5x the run-to-run spread, and 32768 buys ~9% more for another
+ * doubling of both the stash bound below and the relay loop's stack frames.
+ * Revisit only with a measurement — the knee is a property of the packet
+ * size, so a different MTU regime moves it. */
+#define TCP_EGRESS_RELAY_CHUNK 16384
 
 int
 svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
@@ -308,15 +327,19 @@ typedef struct svr_tcp_egress_flow_s {
      *
      * Plain booleans, not the client's high/low-water byte-count scheme
      * (tcp_lane.h's MQVPN_TCP_LANE_BP_*_WATER): the server relays between
-     * two syscalls through a fixed 4096B stack buffer with no accumulation
-     * phase, so there is nothing to hysteresis over — withhold on ANY
-     * EWOULDBLOCK/-XQC_EAGAIN, resume on the very next writable/write-ready
-     * signal. Stash buffers are lazily malloc'd (first pause) and freed only
-     * in svr_tcp_egress_flow_destroy, matching the client's downlink_stash
-     * precedent. Memory bound: 2 * TCP_EGRESS_RELAY_CHUNK (8 KiB) per flow
-     * that has EVER paused in either direction, times the global egress fd
-     * budget — bounded by egress_fd_budget, not tcp_max_flows, since that's
-     * the true worst case (every admitted flow pauses once). */
+     * two syscalls through a fixed TCP_EGRESS_RELAY_CHUNK stack buffer with
+     * no accumulation phase, so there is nothing to hysteresis over —
+     * withhold on ANY EWOULDBLOCK/-XQC_EAGAIN, resume on the very next
+     * writable/write-ready signal. Stash buffers are lazily malloc'd (first
+     * pause) and freed only in svr_tcp_egress_flow_destroy, matching the
+     * client's downlink_stash precedent. Memory bound:
+     * 2 * TCP_EGRESS_RELAY_CHUNK (32 KiB at the current 16384) per flow that
+     * has EVER paused in either direction, times the global egress fd budget
+     * — bounded by egress_fd_budget, not tcp_max_flows, since that's the
+     * true worst case (every admitted flow pauses once). At the 4096-flow
+     * ceiling that is ~128 MiB, which is why the chunk's own comment treats
+     * its size as a deployment-visible number and not an implementation
+     * detail. */
     int downlink_paused; /* send()-side backpressure: downlink_stash holds
                           * one unsent chunk pulled out of xquic's body_buf
                           * (already destructively consumed — cannot be
