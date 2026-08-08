@@ -2391,6 +2391,8 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->tcp_flows_total = s->tcp_egress_flows_total_opened;
     out->tcp_flows_rejected = s->tcp_egress_flows_rejected_cap;
 #endif
+    out->udp_tx_sends = s->tx_sends;
+    out->udp_tx_datagrams = s->tx_datagrams;
     return MQVPN_OK;
 }
 

@@ -298,6 +298,21 @@ typedef struct {
      * held in the TCP-lane flow table (5-tuples pinned to RAW under
      * tcp=auto). Always 0 server-side. */
     uint64_t raw_markers_active;
+    /* Outer-UDP transmit offload counters, the live counterpart of the
+     * "udp-tx: " teardown log line. udp_tx_datagrams / udp_tx_sends is the
+     * achieved batching factor: 1.0 means every datagram cost its own send
+     * syscall — the state the one-shot "udp-gso: GSO enabled" marker cannot
+     * distinguish, because that marker only reports the kernel capability
+     * probe. Fed by every outer-UDP send path, so the ratio stays meaningful
+     * with UdpGso=false and on platforms without the batched callback, where
+     * it is exactly 1.0 by construction.
+     *
+     * There is deliberately no receive-side pair here: RX offload (UDP GRO)
+     * is set up and un-coalesced entirely in the platform layer, which the
+     * library never sees — the server's control API reports those counters
+     * from the platform instead (see ctrl_socket_create). */
+    uint64_t udp_tx_sends;
+    uint64_t udp_tx_datagrams;
 } mqvpn_stats_t;
 
 typedef struct {

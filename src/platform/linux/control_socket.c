@@ -93,14 +93,19 @@ struct ctrl_socket_s {
     struct event *ev_accept;
     struct event_base *eb;
     mqvpn_server_t *server;
+    /* Borrowed platform-owned RX offload counters; see ctrl_socket_create's
+     * doc for why these do not travel through mqvpn_stats_t. NULL = report 0. */
+    const uint64_t *gro_receives;
+    const uint64_t *gro_datagrams;
     int n_conns; /* active control connections */
 };
 
 /* ── Command dispatch ────────────────────────────────────────────────────── */
 
 static int
-ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     char name[64] = {0}, key[256] = {0};
     const char *nv = json_find_key(req, "name");
     const char *kv = json_find_key(req, "key");
@@ -117,8 +122,9 @@ ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, mqvpn_server_t *
 }
 
 static int
-ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     char name[64] = {0};
     const char *nv = json_find_key(req, "name");
     if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
@@ -131,8 +137,9 @@ ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, mqvpn_server_
 }
 
 static int
-ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     char unames[MQVPN_MAX_USERS][64];
     int n_users = mqvpn_server_list_users(server, unames, MQVPN_MAX_USERS);
@@ -155,8 +162,9 @@ ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, mqvpn_server_t
 }
 
 static int
-ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     mqvpn_stats_t st = {0};
     st.struct_size = sizeof(st);
@@ -173,16 +181,27 @@ ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, mqvpn_server_t 
         "\"pkts_lane_raw\":%" PRIu64 ",\"pkts_lane_tcp_dropped\":%" PRIu64 ","
         "\"tcp_flows_active\":%" PRIu64 ",\"tcp_flows_total\":%" PRIu64 ","
         "\"tcp_flows_rejected\":%" PRIu64 ",\"raw_markers_active\":%" PRIu64 ","
+        /* udp_tx_* from the library (it issues those sends); udp_rx_* from the
+         * platform (GRO never crosses the library ABI). datagrams/sends and
+         * datagrams/receives are the achieved batching and coalescing factors
+         * — 1.0 means every datagram cost its own syscall, which the one-shot
+         * "udp-gso:"/"udp-gro:" startup markers cannot distinguish because
+         * they only report the kernel capability probe. */
+        "\"udp_tx_sends\":%" PRIu64 ",\"udp_tx_datagrams\":%" PRIu64 ","
+        "\"udp_rx_receives\":%" PRIu64 ",\"udp_rx_datagrams\":%" PRIu64 ","
         "\"uptime_sec\":%" PRIu64 "}",
         nc, st.bytes_tx, st.bytes_rx, st.dgram_sent, st.dgram_recv, st.dgram_lost,
         st.dgram_acked, st.pkts_lane_tcp, st.pkts_lane_dgram, st.pkts_lane_raw,
         st.pkts_lane_tcp_dropped, st.tcp_flows_active, st.tcp_flows_total,
-        st.tcp_flows_rejected, st.raw_markers_active, uptime);
+        st.tcp_flows_rejected, st.raw_markers_active, st.udp_tx_sends,
+        st.udp_tx_datagrams, cs->gro_receives ? *cs->gro_receives : 0,
+        cs->gro_datagrams ? *cs->gro_datagrams : 0, uptime);
 }
 
 static int
-ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     mqvpn_client_info_t clients[MQVPN_MAX_USERS];
     int n_clients = 0;
@@ -285,9 +304,9 @@ get_status_done:
 }
 
 static int
-ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len,
-                        mqvpn_server_t *server)
+ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     const char *ver = mqvpn_version_string();
     const char *sched = mqvpn_server_scheduler_label(server);
@@ -303,9 +322,9 @@ ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len,
 }
 
 static int
-ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len,
-                       mqvpn_server_t *server)
+ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     char user[64] = {0};
     const char *uv = json_find_key(req, "user");
     if (!uv || json_read_string(uv, user, sizeof(user)) < 0)
@@ -340,8 +359,9 @@ ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len,
 
 static int
 ctrl_cmd_get_all_fec_stats(const char *req, char *resp, size_t resp_len,
-                           mqvpn_server_t *server)
+                           ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     /* Bulk variant collapsing the per-user N+1 RPC pattern in scrapers
      * (Prometheus exporter) to a single call. Same XQC_ENABLE_FEC guard
@@ -399,8 +419,9 @@ get_all_fec_done:
 
 static int
 ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
-                           mqvpn_server_t *server)
+                           ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     /* Aggregate reorder-shim RX counters across all live conns (§17). One
      * fixed-shape object, no per-conn array, so a single snprintf with a
@@ -433,8 +454,12 @@ ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
         mqvpn_reorder_latency_buffered_percentile(&rs, 0.99));
 }
 
+/* Commands take the whole socket context, not just the server handle: some
+ * answers (get_stats' udp_rx_* pair) come from platform-owned state that
+ * never crosses the library ABI. Handlers that only need the server open
+ * with `mqvpn_server_t *server = cs->server;` and are otherwise unchanged. */
 typedef int (*ctrl_cmd_fn)(const char *req, char *resp, size_t resp_len,
-                           mqvpn_server_t *server);
+                           ctrl_socket_t *cs);
 
 /* Keep in sync (and in order) with the file-header command list. */
 static const struct {
@@ -453,7 +478,7 @@ static const struct {
 };
 
 static int
-dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     char cmd[32] = {0};
     const char *v = json_find_key(req, "cmd");
@@ -462,7 +487,7 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
 
     for (size_t i = 0; i < sizeof(ctrl_cmds) / sizeof(ctrl_cmds[0]); i++)
         if (strcmp(cmd, ctrl_cmds[i].name) == 0)
-            return ctrl_cmds[i].fn(req, resp, resp_len, server);
+            return ctrl_cmds[i].fn(req, resp, resp_len, cs);
 
     return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
 }
@@ -546,7 +571,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     conn->req[conn->req_len] = '\0';
 
     char resp[CTRL_MAX_RESP_BYTES];
-    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server);
+    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs);
     if (rlen <= 0) {
         /* dispatch failed to format anything — close silently. */
     } else if ((size_t)rlen >= sizeof(resp) - 2) {
@@ -618,7 +643,8 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
 
 ctrl_socket_t *
 ctrl_socket_create(struct event_base *eb, const char *addr, int port,
-                   mqvpn_server_t *server)
+                   mqvpn_server_t *server, const uint64_t *gro_receives,
+                   const uint64_t *gro_datagrams)
 {
     if (!eb || port <= 0 || port > 65535 || !server) return NULL;
 
@@ -634,6 +660,9 @@ ctrl_socket_create(struct event_base *eb, const char *addr, int port,
     if (!cs) return NULL;
     cs->eb = eb;
     cs->server = server;
+    /* Borrowed, not copied — the platform ctx outlives this socket. */
+    cs->gro_receives = gro_receives;
+    cs->gro_datagrams = gro_datagrams;
 
     /* Determine address family */
     struct sockaddr_in sin4;
