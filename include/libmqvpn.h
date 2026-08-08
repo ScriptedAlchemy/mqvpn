@@ -799,7 +799,17 @@ MQVPN_API int mqvpn_server_on_socket_recv(mqvpn_server_t *server, const uint8_t 
 
 /* Platform calls this when a previously-registered egress fd (via
  * egress_fd_register) becomes readable and/or writable. fd_ctx is the
- * opaque pointer the core passed to egress_fd_register for that fd. */
+ * opaque pointer the core passed to egress_fd_register for that fd.
+ *
+ * The caller MUST run mqvpn_server_tick() after servicing an event-loop
+ * iteration's egress readiness — the same obligation the TUN and UDP receive
+ * entry points carry. This call relays bytes into the QUIC connection's send
+ * queue; it does not by itself put them on the wire. (Before UDP send
+ * batching was wired up it happened to transmit synchronously, so a caller
+ * that ticked only occasionally still made progress by accident; that is no
+ * longer true.) A caller that ticks on a coarse timer instead will relay one
+ * chunk per tick period, and a half-close whose FIN was queued here will not
+ * reach the peer until that tick. */
 MQVPN_API void mqvpn_server_on_egress_fd_ready(mqvpn_server_t *server, int fd,
                                                void *fd_ctx, int readable, int writable);
 

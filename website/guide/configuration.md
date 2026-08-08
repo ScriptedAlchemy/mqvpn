@@ -316,8 +316,8 @@ the cap is hit, both differ.
 | Checked | **before lwIP ever sees the SYN** | when the CONNECT-TCP request arrives |
 | Inner TCP terminated | yes, by lwIP inside the lane | no — relayed over ordinary kernel sockets |
 | **Over the cap** | **degraded to the RAW lane** — the connection still works | **HTTP `503`**, and the client then **resets** that inner connection; no RAW fallback at that point |
-| Memory per flow | **~0.75 MiB** (uplink-queue ceiling) | **~8 KiB** (two lazily-allocated 4 KiB relay chunks) plus one fd |
-| Binding resource | RAM — worst case `TcpMaxFlows` × 0.75 MiB (≈ 192 MiB at the default 256, ≈ 3.0 GiB at 4096) | the **fd budget** — `TcpMaxGlobalFlows` is checked first |
+| Memory per flow | **~0.75 MiB** (uplink-queue ceiling) | **~32 KiB** (two lazily-allocated 16 KiB relay chunks) plus one fd |
+| Binding resource | RAM — worst case `TcpMaxFlows` × 0.75 MiB (≈ 192 MiB at the default 256, ≈ 3.0 GiB at 4096) | the **fd budget** — `TcpMaxGlobalFlows` is checked first, but size the RAM too: worst case `TcpMaxGlobalFlows` × 32 KiB (≈ 128 MiB at 4096) once every admitted flow has paused once in each direction |
 | Clamped | to **half** the lwIP TCP pcb pool (below) | not clamped (no lwIP involved) |
 
 **Client-side clamp:** the honored value is capped at half the lwIP TCP pcb pool —

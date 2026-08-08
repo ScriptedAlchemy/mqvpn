@@ -43,7 +43,7 @@
  *
  * ONE definition, used by both the client and the server for two decisions
  * that must never disagree: registering the write_mmsg_ex callback (with
- * xconfig.sendmmsg_on), and setting conn_settings.defer_dgram_flush. With no
+ * xconfig.sendmmsg_on), and setting conn_settings.defer_send_flush. With no
  * batch callback registered xquic sends one packet per syscall regardless, so
  * deferring the flush there would move it for no benefit at all. Spelling the
  * condition out per call site is what would let the two drift — notably if
