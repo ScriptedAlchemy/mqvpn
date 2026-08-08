@@ -36,23 +36,49 @@
  *
  * The value is a send-batching parameter, not just a buffer size. Each
  * xqc_h3_request_send_body() of one chunk queues floor(chunk / packet) full
- * QUIC packets plus a short remainder, and a GSO run cannot span the
- * remainder — so the chunk caps how much the outer-UDP send can batch. At
- * 4096 (~3 packets) the measured batching factor was pinned near 3 no matter
- * how many flows were live; raising it moves the ceiling:
+ * QUIC packets plus a short remainder, and a GSO run cannot span that
+ * remainder. Measured, downlink, netns, 8 parallel flows:
  *
- *     chunk    factor (netns, 8 parallel flows, downlink)
+ *     chunk    outer-UDP batching factor
  *      4096    3.40
  *      8192   19.64
  *     16384   20.75      <- here
  *     32768   22.58
  *
- * 16384 sits just past the knee: 8192 already captures most of the win but
- * with 5x the run-to-run spread, and 32768 buys ~9% more for another
+ * Read the shape, not the formula: the numbers are NOT floor(chunk/packet)
+ * (that would predict ~6 at 8192 and ~12 at 16384). Only 4096 is anomalous —
+ * with just ~3 full packets per write the remainder interrupts almost every
+ * run, so runs never span writes. From 8192 up the factor is essentially flat,
+ * i.e. the chunk has stopped being the binding constraint and something else
+ * (burst budget, pacing, cwnd) sets the ceiling. So the win here is escaping
+ * the 4096 pathology, NOT a proportional return on a bigger buffer.
+ *
+ * 16384 sits just past the knee. 8192 captures most of the win at half the
+ * memory but with 5x the run-to-run spread; 32768 buys ~9% more for another
  * doubling of both the stash bound below and the relay loop's stack frames.
- * Revisit only with a measurement — the knee is a property of the packet
- * size, so a different MTU regime moves it. */
+ * A different MTU regime changes where the pathology ends, so re-tune only
+ * against a fresh sweep (benchmarks/bench_stream_gso.sh with IPERF_EXTRA=-R,
+ * rebuilding per value) — and expect to find another flat region rather than
+ * a number that keeps climbing.
+ *
+ * Stack: two functions hold a chunk-sized automatic buffer —
+ * svr_tcp_egress_drain_body() and svr_tcp_egress_on_relay_ready() — and a
+ * writable event can have both live at once (relay_ready calls into the
+ * downlink drain). Peak is therefore 2*chunk plus frame overhead, on the
+ * process main stack: nothing under src/ calls pthread_create, so these run
+ * on the 8 MiB default rather than a small thread stack. The assert below
+ * bounds that against the smallest stack this could plausibly land on — a
+ * musl/OpenWrt default pthread stack is 128 KiB — so moving the egress relay
+ * onto a spawned thread, or raising the chunk far enough to matter, fails the
+ * build instead of overflowing a guard page at runtime. */
 #define TCP_EGRESS_RELAY_CHUNK 16384
+
+/* 1/4 of a 128 KiB thread stack, leaving the rest for the xquic engine call
+ * chain this can sit under (drain_body is also reachable from the H3 body
+ * read-notify). Deliberately not a tight bound — it exists to catch an
+ * order-of-magnitude mistake, not to certify a specific target. */
+_Static_assert(2 * TCP_EGRESS_RELAY_CHUNK <= 32 * 1024,
+               "relay chunk pair must stay within a small-thread stack budget");
 
 int
 svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
@@ -673,7 +699,7 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
     /* Downlink-activity accounting: bytes that actually reached the egress
      * socket are summed here and folded into last_activity_us ONCE at the
      * "still alive" exits (a per-send() refresh inside the loop would call
-     * svr_now_us per 4 KiB chunk for no precision gain — the idle sweep has
+     * svr_now_us per relay chunk for no precision gain — the idle sweep has
      * seconds granularity). The relay-error exits skip the refresh: `ef`
      * may already be freed there (see on_relay_error's contract). */
     size_t moved = 0;

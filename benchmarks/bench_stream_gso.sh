@@ -7,12 +7,20 @@
 #
 # Question this answers: xqc_datagram_send() queued exactly one packet per
 # call, so the datagram lane's batching factor was structurally 1.00 until
-# defer_dgram_flush landed. The stream lane is NOT structurally 1: one
-# xqc_h3_stream_send_data() carries up to lwIP's TCP_MSS (8960 B, client
-# uplink) or TCP_EGRESS_RELAY_CHUNK (4096 B, server egress), which
-# xqc_stream_send() splits into several packet_outs BEFORE the flush. So the
-# baseline may already batch, and the headroom a deferred stream flush could
-# win is whatever is left between that and the 32-packet burst cap.
+# defer_dgram_flush landed. The stream lane looked like it should differ,
+# since xqc_stream_send() splits one write into several packet_outs before the
+# flush — but measurement said otherwise for the client uplink, because the
+# lwIP netif MTU (not lwIP's TCP_MSS setting) bounds a relayed segment to a
+# single QUIC packet. Server egress writes TCP_EGRESS_RELAY_CHUNK at a time,
+# so its ceiling is that constant instead; see its comment in
+# src/hybrid/tcp_egress.c, which carries the measured chunk sweep.
+#
+# DIRECTION MATTERS. Upload (the default) exercises the CLIENT uplink relay;
+# the server's factor column then reflects ACK traffic and says nothing about
+# the stream lane. Set IPERF_EXTRA="-R" to move the bulk send to the server
+# (svr_tcp_egress relaying via xqc_h3_request_send_body) — that is the only
+# configuration in which the server column, and any chunk-size conclusion
+# drawn from it, means anything.
 #
 # Topology / lane engagement: identical to bench_hybrid_scheduler.sh — the
 # iperf3 target is 10.222.0.1, a /32 loopback alias in the SERVER netns,
@@ -161,10 +169,13 @@ udp_tx_of() {
 }
 
 # _stats <list> — "mean min max n" in one pass ("- - - 0" when empty).
+# 4 decimals, not 2: the on_nogso control's whole claim is "exactly 1.0000",
+# and a non-batching arm that actually read 1.0005 (a value already seen on
+# this tree) would print as a passing "1.00" at 2 decimals.
 _stats() {
     awk '{for(i=1;i<=NF;i++){v=$i;s+=v;n++; if(n==1||v<mn)mn=v; if(n==1||v>mx)mx=v}}
          END{ if(!n){print "- - - 0";exit}
-              printf "%.2f %.2f %.2f %d", s/n, mn, mx, n }' <<<"$1"
+              printf "%.4f %.4f %.4f %d", s/n, mn, mx, n }' <<<"$1"
 }
 
 # ── one cell (all reps) ─────────────────────────────────────────────────────
@@ -272,21 +283,32 @@ echo "================================================================"
 echo "  Results — outer-UDP TX batching factor (datagrams/sends)"
 echo "================================================================"
 echo ""
-printf "  %-9s │ %-2s │ %-24s │ %-24s │ %s\n" \
+if [ -n "${IPERF_EXTRA:-}" ]; then
+    BULK_SIDE="server (download: -R)"
+    BULK_NOTE="  BULK SIDE: server. The SERVER column measures the stream lane; client = ACKs."
+else
+    BULK_SIDE="client (upload: default)"
+    BULK_NOTE="  BULK SIDE: client. The SERVER column is ACK traffic, NOT the stream lane —
+             set IPERF_EXTRA=-R to measure the server egress relay."
+fi
+printf "  %-9s │ %-2s │ %-26s │ %-26s │ %s\n" \
     "arm" "P" "client factor mean(min-max)" "server factor mean(min-max)" "Mbps"
-echo "  ──────────┼────┼──────────────────────────┼──────────────────────────┼───────"
+echo "  ──────────┼────┼────────────────────────────┼────────────────────────────┼───────"
 for arm in $ARMS; do
     for P in $PVALUES; do
         read -r cm cl ch cn <<<"$(_stats "${R_CF[${arm}_P${P}]:-}")"
         read -r sm sl sh sn <<<"$(_stats "${R_SF[${arm}_P${P}]:-}")"
         read -r bm bl bh bn <<<"$(_stats "${R_BW[${arm}_P${P}]:-}")"
-        printf "  %-9s │ %-2s │ %8s (%6s-%6s) %d │ %8s (%6s-%6s) %d │ %s\n" \
+        printf "  %-9s │ %-2s │ %9s (%8s-%8s) %d │ %9s (%8s-%8s) %d │ %s\n" \
             "$arm" "$P" "$cm" "$cl" "$ch" "$cn" "$sm" "$sl" "$sh" "$sn" "$bm"
     done
 done
 echo ""
+echo "  Direction: ${BULK_SIDE}"
+echo "$BULK_NOTE"
 echo "  factor = datagrams/sends from the 'udp-tx:' teardown line, per endpoint."
-echo "  on_nogso MUST read exactly 1.0000 on both endpoints — it is the control."
+echo "  on_nogso MUST read exactly 1.0000 on both endpoints — it is the control,"
+echo "    which is why this table prints 4 decimals rather than 2."
 echo "  Only status=OK reps enter the means; see $CSV for the rest."
 echo "  Logs: $LOG_DIR"
 echo "================================================================"

@@ -356,7 +356,33 @@ test_defer_flush_tracks_batch_registration(void)
 
     /* Independently carried, not aliased: mqvpn always sets the two together,
      * but the builder must not be the thing that makes that true — otherwise
-     * a caller that legitimately wants only one silently gets both. */
+     * a caller that legitimately wants only one silently gets both.
+     *
+     * BOTH directions are pinned deliberately. Checking only (dgram=1,
+     * stream=0) would still pass a builder written as
+     * `out->defer_dgram_flush = in->defer_dgram_flush || in->defer_stream_flush;`
+     * — a plausible "they're always set together anyway" simplification —
+     * because that expression preserves exactly the one case being checked. */
+    in.defer_stream_flush = false;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_dgram_flush, 1);
+    ASSERT_EQ(cs.defer_stream_flush, 0);
+
+    in.defer_dgram_flush = false;
+    in.defer_stream_flush = true;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_dgram_flush, 0);
+    ASSERT_EQ(cs.defer_stream_flush, 1);
+
+    /* Same two asymmetries on the client side: the client and server feed the
+     * builder from separate call sites, so a side-conditional alias would slip
+     * past a server-only check. */
+    in.is_server = false;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_dgram_flush, 0);
+    ASSERT_EQ(cs.defer_stream_flush, 1);
+
+    in.defer_dgram_flush = true;
     in.defer_stream_flush = false;
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_EQ(cs.defer_dgram_flush, 1);
