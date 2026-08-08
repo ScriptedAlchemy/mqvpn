@@ -39,29 +39,19 @@ typedef struct {
     int reinj_srtt_factor_pct;
     int reinj_hard_deadline_ms;
     int reinj_deadline_lower_bound_ms;
-    /* defer_dgram_flush / defer_stream_flush: hold the engine flush until the
-     * caller drives the engine, so a run of sends forms one sendmmsg/GSO batch
-     * instead of one syscall per packet. The first covers the DATAGRAM lane
-     * (raw IP), the second the hybrid TCP lane's QUIC STREAM writes — measured
-     * at a 1.00 batching factor before this, i.e. UdpGso bought hybrid mode
-     * nothing at all.
+    /* defer_send_flush: hold the engine flush until the caller drives the
+     * engine, so a run of sends forms one sendmmsg/GSO batch instead of one
+     * syscall per packet. Covers both lanes — the DATAGRAM lane (raw IP) and
+     * the hybrid TCP lane's QUIC STREAM writes, which measured a 1.00 batching
+     * factor before this, i.e. UdpGso bought hybrid mode nothing at all.
      *
-     * BOTH must track the batched-send (write_mmsg_ex) registration exactly:
-     * with no batch callback registered xquic sends one packet per syscall
+     * MUST track the batched-send (write_mmsg_ex) registration exactly: with
+     * no batch callback registered xquic sends one packet per syscall
      * regardless, so deferring would move the flush for no benefit at all.
      * Every call site therefore passes the SAME stored flag it gated that
      * registration on — never a re-derived condition, which is what would let
-     * them drift apart.
-     *
-     * They stay two fields only because xquic keeps them two; setting them
-     * differently would not buy a mixed regime anyway. The two select which
-     * send calls flush, not which packets a flush transmits: datagram and
-     * STREAM packet_outs share one xquic send queue, so on a hybrid
-     * connection a non-deferred stream send flushes the deferred datagrams
-     * too. Enabling one alone would leave batching at the mercy of the other
-     * lane's send rate. */
-    bool defer_dgram_flush;
-    bool defer_stream_flush;
+     * them drift apart. */
+    bool defer_send_flush;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins
