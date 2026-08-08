@@ -51,8 +51,15 @@ typedef struct {
      * regardless, so deferring would move the flush for no benefit at all.
      * Every call site therefore passes the SAME stored flag it gated that
      * registration on — never a re-derived condition, which is what would let
-     * them drift apart. They are separate fields only because xquic keeps them
-     * separate; mqvpn has no case for enabling one without the other. */
+     * them drift apart.
+     *
+     * They stay two fields only because xquic keeps them two; setting them
+     * differently would not buy a mixed regime anyway. The two select which
+     * send calls flush, not which packets a flush transmits: datagram and
+     * STREAM packet_outs share one xquic send queue, so on a hybrid
+     * connection a non-deferred stream send flushes the deferred datagrams
+     * too. Enabling one alone would leave batching at the mercy of the other
+     * lane's send rate. */
     bool defer_dgram_flush;
     bool defer_stream_flush;
 } mqvpn_conn_settings_input_t;
