@@ -7,7 +7,7 @@
 #
 # Question this answers: xqc_datagram_send() queued exactly one packet per
 # call, so the datagram lane's batching factor was structurally 1.00 until
-# defer_dgram_flush landed. The stream lane looked like it should differ,
+# xquic's defer_send_flush landed. The stream lane looked like it should differ,
 # since xqc_stream_send() splits one write into several packet_outs before the
 # flush — but measurement said otherwise for the client uplink, because the
 # lwIP netif MTU (not lwIP's TCP_MSS setting) bounds a relayed segment to a
