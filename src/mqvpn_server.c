@@ -161,6 +161,11 @@ struct mqvpn_server_s {
     int udp_fd;
     int gso_available; /* engine-create probe result */
     int gso_disabled;  /* runtime sticky; reset on fd assignment */
+    /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
+     * drives conn_settings.defer_dgram_flush, so the two can never disagree —
+     * see mqvpn_conn_settings.h. Independent of gso_available: a failed
+     * UDP_SEGMENT probe still batches via sendmmsg. */
+    int tx_batch;
     /* Outer-UDP TX syscall counters; see the matching comment in
      * mqvpn_client.c's struct. tx_datagrams / tx_sends is the achieved
      * batching factor, fed by both the batched and the single-datagram send
@@ -1895,7 +1900,11 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
      * XQC_CONN_FLAG_SERVER_ACCEPT for batch sends on server conns, so
      * pre-accept traffic (cb_write_before_accept) keeps using
      * conn_send_packet_before_accept unaffected by this registration. */
-    if (cfg->udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500) {
+    if (mqvpn_tx_batch_enabled(cfg->udp_gso)) {
+        /* Recorded rather than re-derived: the cs_input below feeds this same
+         * flag to conn_settings.defer_dgram_flush, so the deferred flush
+         * cannot outlive the batch callback it exists to fill. */
+        s->tx_batch = 1;
         s->gso_available = mqvpn_udp_gso_probe();
         tcbs.write_mmsg_ex = cb_write_mmsg_ex;
         xconfig.sendmmsg_on = 1;
@@ -1930,6 +1939,9 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .reinj_srtt_factor_pct = cfg->reinj_srtt_factor_pct,
         .reinj_hard_deadline_ms = cfg->reinj_hard_deadline_ms,
         .reinj_deadline_lower_bound_ms = cfg->reinj_deadline_lower_bound_ms,
+        /* set by the batched-send registration a few lines above; 0 on
+         * non-Linux, where that block is compiled out entirely */
+        .defer_dgram_flush = (s->tx_batch != 0),
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
     xqc_server_set_conn_settings(s->engine, &conn_settings);
@@ -2015,7 +2027,12 @@ mqvpn_server_destroy(mqvpn_server_t *s)
     LOG_I(s, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d", s->tx_sends,
           s->tx_datagrams, s->config.udp_gso);
 
-    /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free */
+    /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free.
+     * Flush first when the deferred flush is engaged: xqc_engine_destroy
+     * tears down queued connections without processing them, so datagrams
+     * mqvpn_server_on_tun_packet already accepted would be dropped. Same
+     * guarantee the client side restores in mqvpn_client_disconnect. */
+    if (s->tx_batch && s->engine) xqc_engine_main_logic(s->engine);
     if (s->engine) {
         xqc_engine_destroy(s->engine);
         s->engine = NULL;

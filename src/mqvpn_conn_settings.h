@@ -39,6 +39,17 @@ typedef struct {
     int reinj_srtt_factor_pct;
     int reinj_hard_deadline_ms;
     int reinj_deadline_lower_bound_ms;
+    /* defer_dgram_flush: hold the engine flush until the caller drives the
+     * engine, so a run of datagram sends forms one sendmmsg/GSO batch instead
+     * of one syscall per packet.
+     *
+     * MUST track the batched-send (write_mmsg_ex) registration exactly: with
+     * no batch callback registered xquic sends one packet per syscall
+     * regardless, so deferring would move the flush for no benefit at all.
+     * Both call sites therefore pass the SAME stored flag they gated that
+     * registration on — never a re-derived condition, which is what would let
+     * the two drift apart. */
+    bool defer_dgram_flush;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins

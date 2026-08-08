@@ -249,6 +249,11 @@ struct mqvpn_client_s {
     uint64_t tx_datagrams;
     int srtt_ms;
     int gso_available; /* engine-create probe result */
+    /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
+     * drives conn_settings.defer_dgram_flush, so the two can never disagree —
+     * see mqvpn_conn_settings.h. Independent of gso_available: a failed
+     * UDP_SEGMENT probe still batches via sendmmsg. */
+    int tx_batch;
 
     /* Multipath (Level 1) */
     path_entry_t paths[MQVPN_MAX_PATHS];
@@ -2698,6 +2703,9 @@ cli_start_connection(mqvpn_client_t *c)
         .reinj_srtt_factor_pct = c->config.reinj_srtt_factor_pct,
         .reinj_hard_deadline_ms = c->config.reinj_hard_deadline_ms,
         .reinj_deadline_lower_bound_ms = c->config.reinj_deadline_lower_bound_ms,
+        /* set by init_xquic_engine, which runs in mqvpn_client_new() before
+         * any cli_start_connection() — connect and reconnect alike */
+        .defer_dgram_flush = (c->tx_batch != 0),
     };
     mqvpn_build_conn_settings(&cs_input, &cs);
 
@@ -2867,7 +2875,11 @@ init_xquic_engine(mqvpn_client_t *c)
      * of the constant above ~2KB must revisit run-splitting before this
      * registration can stay unconditional. constant-vs-constant compare
      * is warning-clean under -Werror. */
-    if (cfg->udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500) {
+    if (mqvpn_tx_batch_enabled(cfg->udp_gso)) {
+        /* Recorded rather than re-derived: cli_start_connection() feeds this
+         * same flag to conn_settings.defer_dgram_flush, so the deferred flush
+         * cannot outlive the batch callback it exists to fill. */
+        c->tx_batch = 1;
         c->gso_available = mqvpn_udp_gso_probe();
         tcbs.write_mmsg_ex = cb_write_mmsg_ex;
         xconfig.sendmmsg_on = 1;
@@ -2982,6 +2994,13 @@ mqvpn_client_destroy(mqvpn_client_t *client)
     LOG_I(client, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d",
           client->tx_sends, client->tx_datagrams, client->config.udp_gso);
 
+    /* Same reason as in mqvpn_client_disconnect: destroy must not silently
+     * drop datagrams the API already accepted but the caller has not ticked
+     * out yet. Emitted after the udp-tx line above on purpose — the line
+     * documents that it excludes teardown-time sends, and this is one. */
+    if (client->tx_batch && client->engine && client->conn && client->conn->tunnel_ok)
+        xqc_engine_main_logic(client->engine);
+
     client_destroy_engine(client);
     cli_conn_destroy(client);
     free(client);
@@ -3038,8 +3057,27 @@ mqvpn_client_disconnect(mqvpn_client_t *c)
 
     c->shutting_down = 1;
     if (c->conn && c->engine) {
-        xqc_conn_close(c->engine, &c->conn->cid);
-        xqc_engine_main_logic(c->engine);
+        /* Flush before closing, not only after. With the deferred flush
+         * engaged (tx_batch), mqvpn_client_on_tun_packet returns MQVPN_OK
+         * once the datagram is queued, so a caller that disconnects before
+         * its next tick() would otherwise lose it: xqc_conn_close runs
+         * xqc_conn_shutdown immediately (mqvpn leaves xquic's linger off)
+         * and that drops the send queue. Without deferral each send had
+         * already reached the socket, so this restores the pre-deferral
+         * guarantee that an accepted packet is not silently discarded.
+         *
+         * Gated on tunnel_ok because that is exactly the precondition
+         * on_tun_packet enforces, so nothing can be queued before it — and
+         * because running the engine mid-handshake can tear the connection
+         * down, leaving c->conn dangling for the close below (ASan caught
+         * that on test_client_disconnect_from_connecting). The re-check
+         * covers the same hazard for the established case, where an idle
+         * timeout or error can still close the conn inside this flush. */
+        if (c->tx_batch && c->conn->tunnel_ok) xqc_engine_main_logic(c->engine);
+        if (c->conn && c->engine) {
+            xqc_conn_close(c->engine, &c->conn->cid);
+            xqc_engine_main_logic(c->engine);
+        }
     }
     client_set_state(c, MQVPN_STATE_CLOSED);
     return MQVPN_OK;
