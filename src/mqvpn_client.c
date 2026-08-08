@@ -250,9 +250,9 @@ struct mqvpn_client_s {
     int srtt_ms;
     int gso_available; /* engine-create probe result */
     /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
-     * drives conn_settings.defer_dgram_flush, so the two can never disagree —
-     * see mqvpn_conn_settings.h. Independent of gso_available: a failed
-     * UDP_SEGMENT probe still batches via sendmmsg. */
+     * drives conn_settings.defer_dgram_flush and defer_stream_flush, so the
+     * three can never disagree — see mqvpn_conn_settings.h. Independent of
+     * gso_available: a failed UDP_SEGMENT probe still batches via sendmmsg. */
     int tx_batch;
 
     /* Multipath (Level 1) */
@@ -2704,8 +2704,12 @@ cli_start_connection(mqvpn_client_t *c)
         .reinj_hard_deadline_ms = c->config.reinj_hard_deadline_ms,
         .reinj_deadline_lower_bound_ms = c->config.reinj_deadline_lower_bound_ms,
         /* set by init_xquic_engine, which runs in mqvpn_client_new() before
-         * any cli_start_connection() — connect and reconnect alike */
+         * any cli_start_connection() — connect and reconnect alike. Both lanes
+         * read the same flag: the stream lane only exists in hybrid mode, but
+         * gating it on hybrid too would tie a transport-level batching
+         * decision to a feature switch that can change per connection. */
         .defer_dgram_flush = (c->tx_batch != 0),
+        .defer_stream_flush = (c->tx_batch != 0),
     };
     mqvpn_build_conn_settings(&cs_input, &cs);
 

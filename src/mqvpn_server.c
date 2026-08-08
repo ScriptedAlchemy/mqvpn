@@ -162,9 +162,9 @@ struct mqvpn_server_s {
     int gso_available; /* engine-create probe result */
     int gso_disabled;  /* runtime sticky; reset on fd assignment */
     /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
-     * drives conn_settings.defer_dgram_flush, so the two can never disagree —
-     * see mqvpn_conn_settings.h. Independent of gso_available: a failed
-     * UDP_SEGMENT probe still batches via sendmmsg. */
+     * drives conn_settings.defer_dgram_flush and defer_stream_flush, so the
+     * three can never disagree — see mqvpn_conn_settings.h. Independent of
+     * gso_available: a failed UDP_SEGMENT probe still batches via sendmmsg. */
     int tx_batch;
     /* Outer-UDP TX syscall counters; see the matching comment in
      * mqvpn_client.c's struct. tx_datagrams / tx_sends is the achieved
@@ -1940,8 +1940,10 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .reinj_hard_deadline_ms = cfg->reinj_hard_deadline_ms,
         .reinj_deadline_lower_bound_ms = cfg->reinj_deadline_lower_bound_ms,
         /* set by the batched-send registration a few lines above; 0 on
-         * non-Linux, where that block is compiled out entirely */
+         * non-Linux, where that block is compiled out entirely. Both lanes
+         * read the same flag — see the client's matching comment. */
         .defer_dgram_flush = (s->tx_batch != 0),
+        .defer_stream_flush = (s->tx_batch != 0),
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
     xqc_server_set_conn_settings(s->engine, &conn_settings);

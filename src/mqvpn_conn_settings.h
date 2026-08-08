@@ -39,17 +39,22 @@ typedef struct {
     int reinj_srtt_factor_pct;
     int reinj_hard_deadline_ms;
     int reinj_deadline_lower_bound_ms;
-    /* defer_dgram_flush: hold the engine flush until the caller drives the
-     * engine, so a run of datagram sends forms one sendmmsg/GSO batch instead
-     * of one syscall per packet.
+    /* defer_dgram_flush / defer_stream_flush: hold the engine flush until the
+     * caller drives the engine, so a run of sends forms one sendmmsg/GSO batch
+     * instead of one syscall per packet. The first covers the DATAGRAM lane
+     * (raw IP), the second the hybrid TCP lane's QUIC STREAM writes — measured
+     * at a 1.00 batching factor before this, i.e. UdpGso bought hybrid mode
+     * nothing at all.
      *
-     * MUST track the batched-send (write_mmsg_ex) registration exactly: with
-     * no batch callback registered xquic sends one packet per syscall
+     * BOTH must track the batched-send (write_mmsg_ex) registration exactly:
+     * with no batch callback registered xquic sends one packet per syscall
      * regardless, so deferring would move the flush for no benefit at all.
-     * Both call sites therefore pass the SAME stored flag they gated that
+     * Every call site therefore passes the SAME stored flag it gated that
      * registration on — never a re-derived condition, which is what would let
-     * the two drift apart. */
+     * them drift apart. They are separate fields only because xquic keeps them
+     * separate; mqvpn has no case for enabling one without the other. */
     bool defer_dgram_flush;
+    bool defer_stream_flush;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins

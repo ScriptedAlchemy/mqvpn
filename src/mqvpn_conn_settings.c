@@ -130,9 +130,10 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->init_idle_time_out = 10000;
 
     /* Caller-gated, never derived here: see the field comment in
-     * mqvpn_conn_settings.h for why this must equal the batched-send
+     * mqvpn_conn_settings.h for why these must equal the batched-send
      * registration decision rather than any locally recomputed condition. */
     out->defer_dgram_flush = in->defer_dgram_flush ? 1 : 0;
+    out->defer_stream_flush = in->defer_stream_flush ? 1 : 0;
 
     /* --- congestion control ---
      * Invalid/out-of-range values fall back to BBR2, matching the old

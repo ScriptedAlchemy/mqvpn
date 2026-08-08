@@ -308,14 +308,18 @@ test_reinjection_mapping(void)
 /* The escape hatch: with UdpGso=false no batched send callback is
  * registered, so xquic emits one syscall per packet no matter when the flush
  * happens — deferring would only move the flush, for zero benefit. The
- * builder must therefore leave defer_dgram_flush at 0, which is what keeps
- * "UdpGso=false behaves exactly as it did before the deferral patch" true.
+ * builder must therefore leave defer_dgram_flush AND defer_stream_flush at 0,
+ * which is what keeps "UdpGso=false behaves exactly as it did before the
+ * deferral patches" true for both the datagram and the hybrid TCP lane.
  *
  * This is the regression the e2e cannot see: its UdpGso=false arm passes
  * either way, because the udp-tx factor is 1.0 by construction once the
- * batch callback is absent. */
+ * batch callback is absent. Note the stream field additionally has NO e2e
+ * signal at all in the non-hybrid config the offload e2e runs — the stream
+ * lane only carries traffic under [Hybrid] Tcp=stream/auto — so for that one
+ * this test is the only automated coverage of the gating. */
 static int
-test_defer_dgram_flush_tracks_batch_registration(void)
+test_defer_flush_tracks_batch_registration(void)
 {
     xqc_conn_settings_t cs;
 
@@ -324,32 +328,49 @@ test_defer_dgram_flush_tracks_batch_registration(void)
         .enable_multipath = true,
         .scheduler = MQVPN_SCHED_WLB,
         .defer_dgram_flush = false,
+        .defer_stream_flush = false,
     };
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_EQ(cs.defer_dgram_flush, 0);
+    ASSERT_EQ(cs.defer_stream_flush, 0);
 
     in.defer_dgram_flush = true;
+    in.defer_stream_flush = true;
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_EQ(cs.defer_dgram_flush, 1);
+    ASSERT_EQ(cs.defer_stream_flush, 1);
 
     /* Server path shares the builder but is reached by its own call site. */
     in.is_server = true;
     in.defer_dgram_flush = false;
+    in.defer_stream_flush = false;
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_EQ(cs.defer_dgram_flush, 0);
+    ASSERT_EQ(cs.defer_stream_flush, 0);
 
     in.defer_dgram_flush = true;
+    in.defer_stream_flush = true;
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_EQ(cs.defer_dgram_flush, 1);
+    ASSERT_EQ(cs.defer_stream_flush, 1);
+
+    /* Independently carried, not aliased: mqvpn always sets the two together,
+     * but the builder must not be the thing that makes that true — otherwise
+     * a caller that legitimately wants only one silently gets both. */
+    in.defer_stream_flush = false;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_dgram_flush, 1);
+    ASSERT_EQ(cs.defer_stream_flush, 0);
 
     /* Absent from a designated initializer = 0: a future call site that
-     * forgets the field gets the pre-patch behavior, never deferral. */
+     * forgets the fields gets the pre-patch behavior, never deferral. */
     mqvpn_conn_settings_input_t unset = {
         .is_server = false,
         .scheduler = MQVPN_SCHED_WLB,
     };
     mqvpn_build_conn_settings(&unset, &cs);
     ASSERT_EQ(cs.defer_dgram_flush, 0);
+    ASSERT_EQ(cs.defer_stream_flush, 0);
     return 0;
 }
 
@@ -358,7 +379,7 @@ main(void)
 {
     int failed = 0;
     failed += test_asymmetry_server_vs_client();
-    failed += test_defer_dgram_flush_tracks_batch_registration();
+    failed += test_defer_flush_tracks_batch_registration();
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();
