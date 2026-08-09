@@ -351,6 +351,35 @@ test_gso_error_enotsup_resends(void)
 }
 
 static void
+test_gso_error_emsgsize_resends(void)
+{
+    /* EMSGSIZE joins the GSO-class set (found on a real network): the
+     * kernel refuses a GSO superpacket whose per-segment wire size exceeds
+     * the route's cached PMTU, while the same datagrams without the cmsg
+     * are locally fragmented and delivered. Without this classification the
+     * engine retried the failing burst forever (uplink collapsed to ~1
+     * Mbps); with it, the sticky sendmmsg fallback restores delivery. */
+    seam_reset();
+    struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(4433);
+    int sticky = 0;
+    mqvpn_tx_counters_t tx = {0};
+    seam_fail_call = 1;
+    seam_fail_errno = EMSGSIZE;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
+                                     &sticky, &tx);
+    assert(r == 4);
+    assert(sticky == 1);
+    assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
+    assert(tx.sends == 1);
+    assert(tx.datagrams == 4);
+    printf("test_gso_error_emsgsize_resends OK\n");
+}
+
+static void
 test_gso_error_after_progress_stops(void)
 {
     seam_reset();
@@ -986,6 +1015,7 @@ main(void)
     test_gso_error_zero_sent_resends();
     test_gso_error_einval_resends();
     test_gso_error_enotsup_resends();
+    test_gso_error_emsgsize_resends();
     test_gso_error_after_progress_stops();
     test_eintr_retries();
     test_fallback_eintr_retries();

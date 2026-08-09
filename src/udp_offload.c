@@ -156,11 +156,22 @@ send_batch_mmsg(int fd, const struct iovec *iov, unsigned int cnt,
 
 /* Errnos that indicate the *kernel/NIC* rejected UDP_SEGMENT itself (as
  * opposed to an ordinary transient send failure) — evidence to sticky-
- * disable GSO for the rest of this socket's lifetime. */
+ * disable GSO for the rest of this socket's lifetime.
+ *
+ * EMSGSIZE is in the set because a GSO superpacket must fit the route's
+ * cached PMTU per segment: the kernel refuses to build it when
+ * gso_size + IP/UDP headers exceed the PMTU (udp_send_skb), while the very
+ * same datagrams sent WITHOUT the cmsg are locally fragmented under Linux's
+ * default IP_PMTUDISC_WANT and delivered. Real-network case that found
+ * this: QUIC payload 1428B (1456B on wire) over a PMTU-1454 route — every
+ * cmsg-carrying run failed EMSGSIZE forever while the engine retried,
+ * collapsing uplink to ~1 Mbps; sticky sendmmsg fallback restores the
+ * pre-GSO delivery behavior. Only run > 1 sends classify (see the caller):
+ * a cmsg-less EMSGSIZE stays a plain hard error. */
 static int
 gso_class_error(int e)
 {
-    return e == EIO || e == EINVAL || e == ENOTSUP;
+    return e == EIO || e == EINVAL || e == ENOTSUP || e == EMSGSIZE;
 }
 
 ssize_t

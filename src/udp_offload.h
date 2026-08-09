@@ -70,7 +70,9 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  * contract:
  *   - use_gso != 0 and *gso_disabled == 0: one sendmsg + UDP_SEGMENT cmsg
  *     per run (single-datagram runs skip the cmsg); GSO-class errors
- *     (EIO/EINVAL/ENOTSUP) set *gso_disabled = 1 and, iff nothing was sent
+ *     (EIO/EINVAL/ENOTSUP/EMSGSIZE — the last because GSO segments must fit
+ *     the route PMTU while plain sends fragment locally, see udp_offload.c)
+ *     set *gso_disabled = 1 and, iff nothing was sent
  *     yet, the whole batch is retried via sendmmsg within this call.
  *     Sticky-disable fires ONLY when the failed send carried the
  *     UDP_SEGMENT cmsg (run > 1) — a cmsg-less single-datagram (run == 1)
@@ -96,8 +98,9 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  * full run cannot approach the 64KB ceiling today. Run splitting inside this
  * module would only become necessary if that registration guard were lifted
  * (MQVPN_MAX_PKT_OUT_SIZE raised above ~2KB without adding splitting here
- * first) — otherwise a full run could exceed 64KB and fail EMSGSIZE (not a
- * GSO-class errno here). */
+ * first) — otherwise a full run could exceed 64KB and fail EMSGSIZE, which
+ * classifies as GSO-class and would permanently (and misleadingly)
+ * sticky-disable GSO on that socket. */
 ssize_t mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
                              const struct sockaddr *peer, socklen_t peerlen, int use_gso,
                              int *gso_disabled, mqvpn_tx_counters_t *tx);
