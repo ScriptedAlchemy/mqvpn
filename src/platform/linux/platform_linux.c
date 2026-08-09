@@ -28,6 +28,10 @@
 #define BULK_READ_COUNT     64
 #define TUN_BUF_SIZE        65536
 #define SOCK_BUF_SIZE       65536
+/* Teardown RX-offload telemetry line (client and server cleanup labels).
+ * ONE format definition, same drift hazard and consumers as
+ * MQVPN_UDP_TX_LINE_FMT in mqvpn_internal.h. */
+#define UDP_RX_LINE_FMT "udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d"
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
 #include <stdlib.h>
 #include <string.h>
@@ -444,12 +448,16 @@ drain_udp_rx(int fd, const char *tag, udp_rx_deliver_fn deliver, void *ctx,
             continue;
         }
         if (n <= 0) break;
-        (*receives)++;
 
+        /* Counted only when delivering: a drained-but-undelivered receive
+         * (defensive no-handle path) reaches neither counter, so the logged
+         * datagrams/receives coalescing factor cannot dip below 1.0 on a
+         * path that never delivered anything. */
         if (!deliver) {
             budget--;
             continue;
         }
+        (*receives)++;
 
         size_t sl;
         for (size_t off = 0; (sl = mqvpn_gro_seg_len((size_t)n, seg, off)) > 0;
@@ -732,8 +740,20 @@ cleanup:
      * same.) Deliberately NOT prefixed "udp-gro: ": that
      * prefix is an enablement marker whose absence is asserted when
      * UdpGro=false. */
-    LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
-            ctx.gro_receives, ctx.gro_datagrams, ctx.udp_gro);
+    LOG_INF(UDP_RX_LINE_FMT, ctx.gro_receives, ctx.gro_datagrams, ctx.udp_gro);
+
+    /* Library teardown FIRST, while every callback-owned platform object is
+     * still alive: the destroy-time deferred flush drives the engine, which
+     * can fire the same callbacks as normal operation — cb_state_changed
+     * pauses/frees events and tears down the TUN, NULLing ctx fields as it
+     * goes, exactly as it does for an in-loop close. Freeing those objects
+     * before the destroy (the old order) handed the callbacks freed events
+     * and a dead TUN. After destroy returns no callback can fire, and the
+     * NULL guards below skip whatever the callbacks already released. Path
+     * fds must also outlive the destroy (the flush sends on them), so
+     * path_mgr_destroy stays below as well. */
+    mqvpn_client_destroy(ctx.client);
+    ctx.client = NULL;
 
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
@@ -782,12 +802,9 @@ cleanup:
         event_free(ctx.ev_recover);
     }
 
-    /* Library first, sockets second: mqvpn_client_destroy's deferred-flush
-     * pass (tx_batch) sends on the path fds, so closing them before the
-     * destroy would turn that flush into EBADF noise — or worse, a write to
-     * a recycled fd number. The library never closes path fds itself (fd
-     * ownership stays with the platform), so the swap is otherwise inert. */
-    mqvpn_client_destroy(ctx.client);
+    /* Path fds close only here, after the library is gone (see the destroy
+     * comment at the top of this cleanup): the destroy-time flush sends on
+     * them, and the library never closes them itself. */
     mqvpn_path_mgr_destroy(&ctx.path_mgr);
 
     if (ctx.eb) event_base_free(ctx.eb);
@@ -1316,11 +1333,23 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 cleanup:
     /* Receive-side offload summary — same contract as the client's line in
      * linux_platform_run_client(). */
-    LOG_INF("udp-rx: receives=%" PRIu64 " datagrams=%" PRIu64 " gro_config=%d",
-            sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
+    LOG_INF(UDP_RX_LINE_FMT, sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
 
     LOG_INF("server shutting down");
     ctrl_socket_destroy(sp.ctrl);
+
+    /* Library teardown FIRST, while the TUN, the UDP socket and the egress
+     * fd registry are all still alive: the destroy-time deferred flush
+     * drives the engine, and connection teardown can invoke tun_output
+     * (needs the TUN open) and egress_fd_unregister (scans the registry)
+     * in addition to sending on udp_fd. The old order destroyed the TUN
+     * first, so those late writes went to a closed — possibly recycled —
+     * fd. After destroy returns no callback can fire, and the platform
+     * frees everything at its leisure. */
+    mqvpn_server_destroy(sp.server);
+    sp.server = NULL;
+    if (sp.udp_fd >= 0) close(sp.udp_fd);
+
     if (sp.tun_up) {
         if (sp.ev_tun) {
             event_del(sp.ev_tun);
@@ -1344,12 +1373,6 @@ cleanup:
         event_del(sp.ev_sigterm);
         event_free(sp.ev_sigterm);
     }
-    /* Library first, socket second: mqvpn_server_destroy's deferred-flush
-     * pass (tx_batch) sends on udp_fd, so closing it before the destroy
-     * would turn that flush into EBADF noise — or worse, a write to a
-     * recycled fd number. */
-    mqvpn_server_destroy(sp.server);
-    if (sp.udp_fd >= 0) close(sp.udp_fd);
     /* After server destroy: teardown may call egress_fd_unregister for any
      * still-open egress fds, which scans this registry — free it only once
      * the server is gone (but before the event base the events belong to). */

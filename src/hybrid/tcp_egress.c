@@ -64,7 +64,9 @@
  * Stack: two functions hold a chunk-sized automatic buffer —
  * svr_tcp_egress_drain_body() and svr_tcp_egress_on_relay_ready() — and a
  * writable event can have both live at once (relay_ready calls into the
- * downlink drain). Peak is therefore 2*chunk plus frame overhead, on the
+ * downlink drain); the relay-error flush can nest one more drain_body via
+ * the engine (see the assert comment below). Peak is therefore 3*chunk plus
+ * frame overhead, on the
  * process main stack: nothing under src/ calls pthread_create, so these run
  * on the 8 MiB default rather than a small thread stack. The assert below
  * bounds that against the smallest stack this could plausibly land on — a
@@ -73,12 +75,17 @@
  * build instead of overflowing a guard page at runtime. */
 #define TCP_EGRESS_RELAY_CHUNK 16384
 
-/* 1/4 of a 128 KiB thread stack, leaving the rest for the xquic engine call
- * chain this can sit under (drain_body is also reachable from the H3 body
- * read-notify). Deliberately not a tight bound — it exists to catch an
- * order-of-magnitude mistake, not to certify a specific target. */
-_Static_assert(2 * TCP_EGRESS_RELAY_CHUNK <= 32 * 1024,
-               "relay chunk pair must stay within a small-thread stack budget");
+/* 3 chunk-sized frames can nest since the relay-error flush: relay_ready
+ * (1) -> drain_body (2) -> on_relay_error -> svr_flush_deferred_sends ->
+ * engine run -> h3 read/write notify -> drain_body for ANOTHER flow (3);
+ * deeper nesting is impossible because the nested engine run's re-entrancy
+ * guard makes any further flush a no-op. 3/8 of a 128 KiB thread stack
+ * (musl/OpenWrt pthread default) leaves the rest for the two xquic engine
+ * call chains this can sit under. Deliberately not a tight bound — it
+ * exists to catch an order-of-magnitude mistake, not to certify a specific
+ * target. */
+_Static_assert(3 * TCP_EGRESS_RELAY_CHUNK <= 48 * 1024,
+               "relay chunk frames must stay within a small-thread stack budget");
 
 int
 svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
@@ -392,6 +399,13 @@ typedef struct svr_tcp_egress_flow_s {
     int egress_eof_seen; /* recv()==0 observed — want_read is dropped
                           * PERMANENTLY for this fd (EOF is level-triggered
                           * readable; re-arming would busy-loop). */
+    uint64_t serial;     /* Unique per flow for the server's lifetime (the
+                          * post-increment value of flows_total_opened at
+                          * creation). Exists for one consumer:
+                          * on_relay_error's post-flush revalidation, where
+                          * pointer identity alone is ABA-unsafe — a flow
+                          * freed by the flush and a new one allocated at
+                          * the same address must not pass for each other. */
     int uplink_fin_sent; /* send_body(NULL,0,1) succeeded — no more FIN
                           * retries needed. Until this is true and
                           * egress_eof_seen is true, cb_request_write
@@ -553,14 +567,19 @@ svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
      *
      * The flush may run timers and teardown paths that destroy flows —
      * including this one (e.g. a send hard error killing the whole conn).
-     * Re-validate `ef` by pointer identity against the live-flow list
-     * before touching it again; if it is gone, the teardown that removed it
-     * already closed the stream and the close below must be skipped. */
+     * Re-validate `ef` against the live-flow list before touching it again:
+     * pointer identity AND serial, because the flush can both free ef and
+     * admit a new flow that the allocator places at the same address (ABA)
+     * — the serial is read before the flush, while ef is still valid, and
+     * a recycled allocation necessarily carries a newer one. If the flow is
+     * gone, the teardown that removed it already closed the stream and the
+     * close below must be skipped. */
+    uint64_t serial = ef->serial;
     svr_flush_deferred_sends(server);
     svr_tcp_egress_srv_ctx_t ctx;
     svr_get_tcp_egress_ctx(server, &ctx);
     svr_tcp_egress_flow_t *live = *ctx.flow_list_head;
-    while (live && live != ef)
+    while (live && !(live == ef && live->serial == serial))
         live = live->next;
     if (!live) return; /* flushed teardown already destroyed the flow */
 
@@ -1088,6 +1107,7 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     if (conn_count) (*conn_count)++;
     (*ctx.global_fd_count)++;
     (*ctx.flows_total_opened)++;
+    ef->serial = *ctx.flows_total_opened; /* cumulative => unique; see field doc */
 
     int r = connect(fd, (struct sockaddr *)&dst, dst_len);
     if (r == 0) {

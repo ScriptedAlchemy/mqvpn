@@ -2039,8 +2039,7 @@ mqvpn_server_destroy(mqvpn_server_t *s)
      * mqvpn_client_destroy — emitted after the flush above so a short run's
      * final deferred burst is counted, before the engine teardown whose few
      * close-frame sends fall outside the count. */
-    LOG_I(s, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d", s->tx_sends,
-          s->tx_datagrams, s->config.udp_gso);
+    LOG_I(s, MQVPN_UDP_TX_LINE_FMT, s->tx_sends, s->tx_datagrams, s->config.udp_gso);
 
     /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free */
     if (s->engine) {

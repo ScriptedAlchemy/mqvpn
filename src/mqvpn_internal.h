@@ -59,6 +59,17 @@ mqvpn_tx_batch_enabled(int udp_gso)
     return udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500;
 }
 
+/* Teardown TX-offload telemetry line, emitted by mqvpn_client_destroy and
+ * mqvpn_server_destroy. ONE format definition so the two endpoints'
+ * script-parsed wording (benchmarks/bench_stream_gso.sh,
+ * scripts/ci_e2e/run_udp_gso_bench.sh, run_udp_gso_config_test.sh's
+ * check_teardown_line) cannot drift — same hazard class the
+ * MQVPN_UDP_GSO_MARKER_* strings solve for the enablement marker.
+ * Callers pass (sends, datagrams, gso_config) as PRIu64/PRIu64/int and
+ * must include <inttypes.h>. */
+#define MQVPN_UDP_TX_LINE_FMT \
+    "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d"
+
 /* Server "auto" TUN MTU.  The true MASQUE datagram MSS is per-connection
  * (peer TPs, CID length, FEC headroom, PMTUD) and unknowable at server
  * startup, so "auto" uses the typical negotiated value on a 1500-MTU path

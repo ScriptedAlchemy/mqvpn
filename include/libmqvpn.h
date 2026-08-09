@@ -643,6 +643,13 @@ MQVPN_API mqvpn_client_t *mqvpn_client_new(const mqvpn_config_t *cfg,
                                            const mqvpn_client_callbacks_t *cbs,
                                            void *user_ctx);
 
+/* Destroy the client. May still fire callbacks (state_changed,
+ * tunnel_closed — never reconnect_scheduled) from inside the call: with the
+ * batched send path engaged it first flushes datagrams already accepted by
+ * mqvpn_client_on_tun_packet, and that engine pass can close the
+ * connection. Callback-owned resources must therefore stay valid until
+ * this returns, and nothing — including those callbacks — may use the
+ * handle afterwards. */
 MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
 
 MQVPN_API int mqvpn_client_connect(mqvpn_client_t *client);
@@ -794,6 +801,11 @@ MQVPN_API mqvpn_server_t *mqvpn_server_new(const mqvpn_config_t *cfg,
                                            const mqvpn_server_callbacks_t *cbs,
                                            void *user_ctx);
 
+/* Destroy the server. Same callback contract as mqvpn_client_destroy: the
+ * deferred-flush pass and engine teardown can still invoke callbacks
+ * (tun_output, egress fd unregister, log), so callback-owned resources —
+ * the TUN, the UDP socket, the egress registry — must stay valid until
+ * this returns. */
 MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
 
 MQVPN_API int mqvpn_server_set_socket_fd(mqvpn_server_t *server, int fd,

@@ -2972,16 +2972,31 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     return c;
 }
 
+/* One definition of the client's deferred-flush gate (the server's twin is
+ * svr_flush_deferred_sends): drive the engine once iff the batched send path
+ * is engaged and something can be queued — tunnel_ok is exactly the
+ * precondition on_tun_packet enforces, so nothing can be queued before it,
+ * and running the engine mid-handshake can tear the connection down
+ * (ASan-caught on test_client_disconnect_from_connecting). */
+static void
+cli_flush_deferred_sends(mqvpn_client_t *c)
+{
+    if (c->tx_batch && c->engine && c->conn && c->conn->tunnel_ok)
+        xqc_engine_main_logic(c->engine);
+}
+
 void
 mqvpn_client_destroy(mqvpn_client_t *client)
 {
     if (!client) return;
 
-    /* The flush below can close the connection (send error, timer); without
-     * this, cb_h3_conn_close would take the reconnect branch and fire
-     * state/reconnect callbacks for a client this function is about to
-     * free — a consumer scheduling work from those callbacks would then use
-     * a dangling handle. Same flag mqvpn_client_disconnect sets first. */
+    /* The flush below can close the connection (send error, timer).
+     * shutting_down suppresses the reconnect branch of cb_h3_conn_close —
+     * NOT every callback: state_changed and tunnel_closed can still fire
+     * from inside this destroy, exactly as they can from inside
+     * mqvpn_client_disconnect. That is the documented contract (see
+     * mqvpn_client_destroy in libmqvpn.h): consumers must not touch the
+     * handle after calling destroy, including from callbacks it fires. */
     client->shutting_down = 1;
 
     /* Same reason as in mqvpn_client_disconnect: destroy must not silently
@@ -2989,8 +3004,7 @@ mqvpn_client_destroy(mqvpn_client_t *client)
      * out yet. Best-effort, like the disconnect-time flush: one engine pass
      * cannot drain what the socket refuses (EAGAIN residue is dropped by
      * the engine teardown below) — see the disconnect comment. */
-    if (client->tx_batch && client->engine && client->conn && client->conn->tunnel_ok)
-        xqc_engine_main_logic(client->engine);
+    cli_flush_deferred_sends(client);
 
     /* Transmit-side offload summary — the TX counterpart of the "udp-rx: "
      * line platform_linux.c emits at teardown. Emitted after the flush
@@ -3000,8 +3014,8 @@ mqvpn_client_destroy(mqvpn_client_t *client)
      * parse one stable line per run regardless of configuration.
      * Deliberately NOT prefixed "udp-gso: ": that prefix is an enablement
      * marker whose absence is asserted when UdpGso=false. */
-    LOG_I(client, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d",
-          client->tx_sends, client->tx_datagrams, client->config.udp_gso);
+    LOG_I(client, MQVPN_UDP_TX_LINE_FMT, client->tx_sends, client->tx_datagrams,
+          client->config.udp_gso);
 
     client_destroy_engine(client);
     cli_conn_destroy(client);
@@ -3074,14 +3088,11 @@ mqvpn_client_disconnect(mqvpn_client_t *c)
          * state (keep ticking until empty), which the synchronous
          * disconnect/destroy API deliberately does not promise.
          *
-         * Gated on tunnel_ok because that is exactly the precondition
-         * on_tun_packet enforces, so nothing can be queued before it — and
-         * because running the engine mid-handshake can tear the connection
-         * down, leaving c->conn dangling for the close below (ASan caught
-         * that on test_client_disconnect_from_connecting). The re-check
-         * covers the same hazard for the established case, where an idle
-         * timeout or error can still close the conn inside this flush. */
-        if (c->tx_batch && c->conn->tunnel_ok) xqc_engine_main_logic(c->engine);
+         * The tunnel_ok/mid-handshake gating rationale lives on
+         * cli_flush_deferred_sends. The re-check below covers the
+         * established case, where an idle timeout or error can still close
+         * the conn inside this flush. */
+        cli_flush_deferred_sends(c);
         if (c->conn && c->engine) {
             xqc_conn_close(c->engine, &c->conn->cid);
             xqc_engine_main_logic(c->engine);

@@ -26,10 +26,10 @@
 # G13 note — log wording is an observable invariant, pinned here for
 # UdpGso and extended to UdpGro in the same spirit: this script greps
 # both endpoints' startup logs for two disjoint literal prefixes:
-#     LOG_I(c, "udp-gso: %s", c->gso_available ? "GSO enabled"
-#                                               : "GSO unavailable, using sendmmsg");
-#     LOG_I(s, "udp-gso: %s", s->gso_available ? "GSO enabled"
-#                                               : "GSO unavailable, using sendmmsg");
+#     LOG_I(x, "%s", ...gso_available ? MQVPN_UDP_GSO_MARKER_ENABLED
+#                                     : MQVPN_UDP_GSO_MARKER_UNAVAILABLE);
+#         (both endpoints; strings defined once in mqvpn_conn_settings.h:
+#          "udp-gso: GSO enabled" / "udp-gso: GSO unavailable, using sendmmsg")
 #     LOG_INF("udp-gro: enabled on path[%d]", i);      /* client, per path */
 #     LOG_INF("udp-gro: unavailable on path[%d] (%s); ...", i, ...);
 #     LOG_INF("udp-gro: enabled");                     /* server */
@@ -42,10 +42,11 @@
 # AGENTS.md's e2e log marker note). If you reword either, update the
 # matching grep pattern in this file (search "udp-gso:" / "udp-gro:") in
 # the same change. Two teardown telemetry lines use further, disjoint
-# prefixes that never match either grep above:
-#     LOG_INF("udp-rx: receives=%llu datagrams=%llu gro_config=%d", ...);
-#     LOG_I(c, "udp-tx: sends=%llu datagrams=%llu gso_config=%d", ...);
-#     LOG_I(s, "udp-tx: sends=%llu datagrams=%llu gso_config=%d", ...);
+# prefixes that never match either grep above (formats defined once as
+# UDP_RX_LINE_FMT in platform_linux.c and MQVPN_UDP_TX_LINE_FMT in
+# mqvpn_internal.h):
+#     "udp-rx: receives=%llu datagrams=%llu gro_config=%d"
+#     "udp-tx: sends=%llu datagrams=%llu gso_config=%d"   (client and server)
 # Both are emitted unconditionally — on the enabled and the disabled path
 # alike — so a knob's state shows up in the *_config field value rather
 # than in the line's presence, and neither can serve as an enablement
