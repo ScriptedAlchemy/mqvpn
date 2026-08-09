@@ -1180,8 +1180,12 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
          * of udp_offload.c's internals (that nothing between the failed
          * GSO send and a later successful retry touches errno) surviving
          * future refactors. */
-        LOG_W(c,
-              "udp-gso: runtime GSO failure, sticky fallback to sendmmsg on this path");
+        /* The handle names WHICH path fell back — on a mixed-MTU multipath
+         * bond (e.g. fiber + LTE) only the narrow path degrades, and the
+         * operator needs to see which one. Same identifier as the
+         * "path %lld -> %s" event log. */
+        LOG_W(c, "udp-gso: runtime GSO failure, sticky fallback to sendmmsg on path %lld",
+              (long long)p->handle);
     }
     c->bytes_tx += tx.bytes;
     /* bytes attributed to the slot owning the fd actually used — deliberately
