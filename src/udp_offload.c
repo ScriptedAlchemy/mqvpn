@@ -156,11 +156,31 @@ send_batch_mmsg(int fd, const struct iovec *iov, unsigned int cnt,
 
 /* Errnos that indicate the *kernel/NIC* rejected UDP_SEGMENT itself (as
  * opposed to an ordinary transient send failure) — evidence to sticky-
- * disable GSO for the rest of this socket's lifetime. */
+ * disable GSO for the rest of this socket's lifetime.
+ *
+ * EMSGSIZE is in the set because a GSO superpacket must fit the route's
+ * cached PMTU per segment: the kernel refuses to build it when
+ * gso_size + IP/UDP headers exceed the PMTU (udp_send_skb), while the very
+ * same datagrams sent WITHOUT the cmsg are locally fragmented under Linux's
+ * default IP_PMTUDISC_WANT and delivered. Real-network case that found
+ * this: QUIC payload 1428B (1456B on wire) over a PMTU-1454 route — every
+ * cmsg-carrying run failed EMSGSIZE forever while the engine retried,
+ * collapsing uplink to ~1 Mbps; sticky sendmmsg fallback restores the
+ * pre-GSO delivery behavior. Only run > 1 sends classify (see the caller):
+ * a cmsg-less EMSGSIZE stays a plain hard error.
+ *
+ * Deliberate stopgap, not the end state: the fallback delivers by local IP
+ * fragmentation (Linux default IP_PMTUDISC_WANT), a pre-existing RFC 9000
+ * §14 deviation this module inherits rather than introduces, and one that
+ * still blackholes on fragment-dropping middleboxes. The EMSGSIZE consumed
+ * here is exactly the signal a PLPMTU reduction would want; routing it to
+ * the QUIC layer requires a PLPMTUD that can lower max_pkt_out_size, which
+ * xquic does not have yet (issue #7). When that lands, packets shrink
+ * below the route PMTU and this classification simply stops firing. */
 static int
 gso_class_error(int e)
 {
-    return e == EIO || e == EINVAL || e == ENOTSUP;
+    return e == EIO || e == EINVAL || e == ENOTSUP || e == EMSGSIZE;
 }
 
 ssize_t
@@ -187,8 +207,14 @@ mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
              * send actually carried the UDP_SEGMENT cmsg (run > 1); a plain
              * single-datagram sendmsg EINVAL/EIO must not sticky-disable. */
             if (run > 1 && gso_class_error(errno)) {
-                *gso_disabled = 1; /* sticky, any burst position */
-                if (sent == 0)     /* in-call retry only at 0 sent */
+                /* Sticky, any burst position. The stored value IS the
+                 * classifying errno (always nonzero), so callers can log
+                 * WHY this socket fell back — errno itself is not
+                 * trustworthy by the time they observe the transition (the
+                 * in-call retry below may have succeeded and overwritten
+                 * it). Truthiness is all the gating logic ever reads. */
+                *gso_disabled = errno;
+                if (sent == 0) /* in-call retry only at 0 sent */
                     return mqvpn_udp_send_batch(fd, iov, cnt, peer, peerlen, 0,
                                                 gso_disabled, tx);
             }

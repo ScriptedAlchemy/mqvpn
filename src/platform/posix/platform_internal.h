@@ -69,7 +69,11 @@ typedef struct {
     /* Receive-side offload telemetry, written by on_socket_read and read once
      * at teardown. The sockopt log proves GRO was requested; only
      * gro_datagrams > gro_receives proves the kernel actually coalesced. */
-    uint64_t gro_receives;  /* recvmsg calls that returned data */
+    uint64_t gro_receives;  /* recvmsg calls whose data was DELIVERED —
+                             * truncated-dropped and drained-but-undelivered
+                             * receives count toward neither counter, so the
+                             * datagrams/receives factor cannot dip below
+                             * 1.0 (see drain_udp_rx) */
     uint64_t gro_datagrams; /* datagrams delivered to the library */
 #endif
     char orig_gateway[INET6_ADDRSTRLEN];

@@ -643,6 +643,13 @@ MQVPN_API mqvpn_client_t *mqvpn_client_new(const mqvpn_config_t *cfg,
                                            const mqvpn_client_callbacks_t *cbs,
                                            void *user_ctx);
 
+/* Destroy the client. May still fire callbacks (state_changed,
+ * tunnel_closed — never reconnect_scheduled) from inside the call: with the
+ * batched send path engaged it first flushes datagrams already accepted by
+ * mqvpn_client_on_tun_packet, and that engine pass can close the
+ * connection. Callback-owned resources must therefore stay valid until
+ * this returns, and nothing — including those callbacks — may use the
+ * handle afterwards. */
 MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
 
 MQVPN_API int mqvpn_client_connect(mqvpn_client_t *client);
@@ -751,7 +758,16 @@ MQVPN_API int mqvpn_client_reactivate_path(mqvpn_client_t *client,
 
 MQVPN_API int mqvpn_client_set_tun_active(mqvpn_client_t *client, int active, int tun_fd);
 
-/* Feed data from platform into the engine */
+/* Feed data from platform into the engine.
+ *
+ * MQVPN_OK means accepted, not sent: when the batched send path is engaged
+ * (Linux, UdpGso enabled — the default), the datagram may sit in the send
+ * queue until the caller's next mqvpn_client_tick(), which is what lets a
+ * run of packets leave as one sendmmsg/GSO batch. Feed-then-tick promptly;
+ * a consumer that ticks on a coarse timer adds up to one tick period of
+ * latency to every packet accepted here. (Before the deferred flush every
+ * call flushed synchronously, so this obligation is new as of UdpGso
+ * batching — same contract as mqvpn_server_on_egress_fd_ready.) */
 MQVPN_API int mqvpn_client_on_tun_packet(mqvpn_client_t *client, const uint8_t *pkt,
                                          size_t len);
 
@@ -785,6 +801,11 @@ MQVPN_API mqvpn_server_t *mqvpn_server_new(const mqvpn_config_t *cfg,
                                            const mqvpn_server_callbacks_t *cbs,
                                            void *user_ctx);
 
+/* Destroy the server. Same callback contract as mqvpn_client_destroy: the
+ * deferred-flush pass and engine teardown can still invoke callbacks
+ * (tun_output, egress fd unregister, log), so callback-owned resources —
+ * the TUN, the UDP socket, the egress registry — must stay valid until
+ * this returns. */
 MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
 
 MQVPN_API int mqvpn_server_set_socket_fd(mqvpn_server_t *server, int fd,
@@ -822,6 +843,10 @@ MQVPN_API void mqvpn_server_on_egress_fd_ready(mqvpn_server_t *server, int fd,
  * "treat tcp_egress as disabled — do not allocate a registry". */
 MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 
+/* Feed data from platform into the engine. Same accepted-not-sent contract
+ * as mqvpn_client_on_tun_packet: with the batched send path engaged the
+ * datagram may wait for the caller's next mqvpn_server_tick() — feed, then
+ * tick promptly. */
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,
                                          size_t len);
 

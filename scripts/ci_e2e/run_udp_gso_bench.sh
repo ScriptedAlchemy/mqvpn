@@ -35,8 +35,8 @@
 #      <ini> — the true pre-#167 baseline (neither offload wired at all).
 # All four arms pass -C to BOTH endpoints (empty extra_flags for arm A).
 # Per run we also grep both endpoints' logs for the "udp-gso: " AND
-# "udp-gro: " markers (pinned wording, see mqvpn_client.c:2843 /
-# mqvpn_server.c:1880, platform_linux.c's mqvpn_udp_gro_enable() call
+# "udp-gro: " markers (pinned wording: the MQVPN_UDP_GSO_MARKER_* strings
+# in mqvpn_conn_settings.h, platform_linux.c's mqvpn_udp_gro_enable() call
 # sites, and run_udp_gso_config_test.sh's header comment) so the printed
 # table proves which code path actually ran in each row for BOTH knobs,
 # not just which flags were passed.
@@ -677,8 +677,8 @@ run_one() {
         return 1
     fi
 
-    # udp-gso: / udp-gro: marker checks. Wording pinned by
-    # mqvpn_client.c:2843 / mqvpn_server.c:1880 (udp-gso) and
+    # udp-gso: / udp-gro: marker checks. Wording pinned by the
+    # MQVPN_UDP_GSO_MARKER_* strings in mqvpn_conn_settings.h (udp-gso) and
     # platform_linux.c's mqvpn_udp_gro_enable() call sites (udp-gro), and
     # by run_udp_gso_config_test.sh; keep all in sync if either ever
     # changes. check_offload_marker is called directly (not via `x=$(...)`)
