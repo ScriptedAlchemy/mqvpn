@@ -95,6 +95,17 @@ struct svr_conn_s {
     char username[64];
     uint64_t connected_at_us;
 
+    /* Runtime sticky GSO fallback, PER CONNECTION — not on the shared
+     * server socket. The GSO-class errno set includes EMSGSIZE, which
+     * reflects the ROUTE to one peer (segment + headers exceed that path's
+     * PMTU), so a socket-wide flag would let a single narrow-PMTU client
+     * permanently disable GSO for every other client. Scope therefore
+     * matches the client side's per-path-fd flag: one destination, one
+     * flag. Capability-class errnos (EIO/EINVAL/ENOTSUP) re-discover per
+     * conn — one extra failed syscall per connection lifetime, bounded by
+     * max_clients. Zero on accept (calloc). */
+    int gso_disabled;
+
     /* Flow-aware reorder shim (§5). Created on accept when cfg.reorder.mode
      * != OFF, freed on conn teardown. peer_reorder_supported is set when the
      * client advertised mqvpn-reorder in its CONNECT-IP request (§19.3). */
@@ -159,8 +170,8 @@ struct mqvpn_server_s {
 
     /* UDP socket (provided by platform via set_socket_fd) */
     int udp_fd;
-    int gso_available; /* engine-create probe result */
-    int gso_disabled;  /* runtime sticky; reset on fd assignment */
+    int gso_available; /* engine-create probe result (kernel capability;
+                        * the runtime sticky flag is per-conn — svr_conn_s) */
     /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
      * drives conn_settings.defer_send_flush, so the two can never disagree — see
      * mqvpn_conn_settings.h. Independent of gso_available: a failed UDP_SEGMENT probe
@@ -512,12 +523,11 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
  * exactly as cb_write_socket does (conn_user_data reinterpreted as
  * svr_conn_t*, see the comment in cb_accept), and the burst always targets
  * s->udp_fd with the peer sockaddr xquic hands in. path_id is unused for the
- * same reason cb_write_socket_ex ignores it above. gso_available/gso_disabled
- * are server-wide (one fd => one sticky flag): gso_available is probed once
- * in mqvpn_server_new() at engine-create time and never re-probed, while
- * only gso_disabled resets, on every mqvpn_server_set_socket_fd() call (fd
- * numbers are kernel-recycled, so a fresh fd deserves a fresh GSO attempt).
- */
+ * same reason cb_write_socket_ex ignores it above. gso_available is
+ * server-wide (a kernel property, probed once in mqvpn_server_new() at
+ * engine-create time and never re-probed); gso_disabled is PER CONNECTION —
+ * see its field doc on svr_conn_s for why destination-scoped stickiness is
+ * required on the shared socket. */
 static ssize_t
 cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vlen,
                  const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
@@ -529,21 +539,21 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     if (s->udp_fd < 0) return XQC_SOCKET_ERROR; /* same check as svr_do_send */
 
     mqvpn_tx_counters_t tx = {0};
-    int was_gso = !s->gso_disabled;
+    int was_gso = !conn->gso_disabled;
     ssize_t r = mqvpn_udp_send_batch(s->udp_fd, msg_iov, vlen, peer, peerlen,
-                                     s->gso_available, &s->gso_disabled, &tx);
+                                     s->gso_available, &conn->gso_disabled, &tx);
     /* Captured before any LOG_* call: the log write path can clobber errno,
      * and the hard-error branch below is the only diagnostic that reports
      * it. Meaningful only when r == MQVPN_SEND_ERR (udp_offload.h). */
     int send_errno = errno;
-    if (was_gso && s->gso_disabled) {
-        /* One-shot transition: gso_disabled only resets on
-         * mqvpn_server_set_socket_fd(), so this fires at most once per
-         * server socket lifetime — no spam guard needed. errno
-         * intentionally omitted — see the matching comment in the client's
-         * cb_write_mmsg_ex for why it isn't trustworthy at this point. */
-        LOG_W(s, "udp-gso: runtime GSO failure, sticky fallback to sendmmsg on the "
-                 "server socket");
+    if (was_gso && conn->gso_disabled) {
+        /* One-shot per connection (the flag never resets within one) — at
+         * most max_clients lines per server lifetime, no spam guard
+         * needed. errno intentionally omitted — see the matching comment
+         * in the client's cb_write_mmsg_ex for why it isn't trustworthy at
+         * this point. */
+        LOG_W(s, "udp-gso: runtime GSO failure, sticky fallback to sendmmsg for "
+                 "this client");
     }
     /* single aggregate counter — the server has no per-path bytes_tx (that's
      * a client-only concept) — matching svr_do_send's s->bytes_tx accounting.
@@ -2081,8 +2091,6 @@ mqvpn_server_set_socket_fd(mqvpn_server_t *s, int fd, const struct sockaddr *loc
 {
     if (!s || fd < 0) return MQVPN_ERR_INVALID_ARG;
     s->udp_fd = fd;
-    /* fd numbers are kernel-recycled; reset on every assignment */
-    s->gso_disabled = 0;
     if (local_addr && local_addrlen > 0) {
         if (local_addrlen > sizeof(s->local_addr)) local_addrlen = sizeof(s->local_addr);
         memcpy(&s->local_addr, local_addr, local_addrlen);
