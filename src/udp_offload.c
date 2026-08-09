@@ -207,8 +207,14 @@ mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
              * send actually carried the UDP_SEGMENT cmsg (run > 1); a plain
              * single-datagram sendmsg EINVAL/EIO must not sticky-disable. */
             if (run > 1 && gso_class_error(errno)) {
-                *gso_disabled = 1; /* sticky, any burst position */
-                if (sent == 0)     /* in-call retry only at 0 sent */
+                /* Sticky, any burst position. The stored value IS the
+                 * classifying errno (always nonzero), so callers can log
+                 * WHY this socket fell back — errno itself is not
+                 * trustworthy by the time they observe the transition (the
+                 * in-call retry below may have succeeded and overwritten
+                 * it). Truthiness is all the gating logic ever reads. */
+                *gso_disabled = errno;
+                if (sent == 0) /* in-call retry only at 0 sent */
                     return mqvpn_udp_send_batch(fd, iov, cnt, peer, peerlen, 0,
                                                 gso_disabled, tx);
             }

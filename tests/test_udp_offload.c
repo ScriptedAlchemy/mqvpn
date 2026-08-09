@@ -288,7 +288,7 @@ test_gso_error_zero_sent_resends(void)
     ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
                                      &sticky, &tx);
     assert(r == 4);
-    assert(sticky == 1);
+    assert(sticky == EIO);
     assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
     assert(seam_calls == 2);
     assert(tx.bytes == 4 * 1400u);
@@ -316,7 +316,7 @@ test_gso_error_einval_resends(void)
     ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
                                      &sticky, &tx);
     assert(r == 4);
-    assert(sticky == 1);
+    assert(sticky == EINVAL);
     assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
     assert(tx.sends == 1);
     assert(tx.datagrams == 4);
@@ -342,7 +342,7 @@ test_gso_error_enotsup_resends(void)
     ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
                                      &sticky, &tx);
     assert(r == 4);
-    assert(sticky == 1);
+    assert(sticky == ENOTSUP);
     assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
     assert(tx.bytes == 4 * 1400u);
     assert(tx.sends == 1);
@@ -372,7 +372,7 @@ test_gso_error_emsgsize_resends(void)
     ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
                                      &sticky, &tx);
     assert(r == 4);
-    assert(sticky == 1);
+    assert(sticky == EMSGSIZE);
     assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
     assert(tx.sends == 1);
     assert(tx.datagrams == 4);
@@ -395,7 +395,7 @@ test_gso_error_after_progress_stops(void)
     ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
                                      &sticky, &tx);
     assert(r == 2);
-    assert(sticky == 1);
+    assert(sticky == EIO);
     assert(seam_calls == 2);
     assert(tx.bytes == 2 * 1400u);
     assert(tx.sends == 1); /* only the first run's sendmsg landed */
@@ -582,24 +582,26 @@ test_run1_gso_errno_no_sticky(void)
 static void
 test_sticky_short_circuit(void)
 {
-    /* *gso_disabled already set from a prior call: the `|| *gso_disabled`
-     * term in mqvpn_udp_send_batch must take the sendmmsg fallback even
-     * though use_gso == 1 and this run would otherwise qualify for GSO
-     * (deleting that term passes every other case in this suite). */
+    /* *gso_disabled already set from a prior call (holding the errno that
+     * classified it, per the storage contract): the `|| *gso_disabled` term
+     * in mqvpn_udp_send_batch must take the sendmmsg fallback even though
+     * use_gso == 1 and this run would otherwise qualify for GSO (deleting
+     * that term passes every other case in this suite). The stored value
+     * must also survive the call untouched. */
     seam_reset();
     struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
     struct sockaddr_in peer;
     memset(&peer, 0, sizeof peer);
     peer.sin_family = AF_INET;
     peer.sin_port = htons(4433);
-    int sticky = 1;
+    int sticky = EINVAL;
     mqvpn_tx_counters_t tx = {0};
     ssize_t r = mqvpn_udp_send_batch(3, iov, 4, (struct sockaddr *)&peer, sizeof peer, 1,
                                      &sticky, &tx);
     assert(r == 4);
     assert(seam_calls == 1);
     assert(seam_ops[0] == 'M');
-    assert(sticky == 1);
+    assert(sticky == EINVAL);
     assert(tx.sends == 1);
     assert(tx.datagrams == 4);
     printf("test_sticky_short_circuit OK\n");

@@ -72,8 +72,9 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  *     per run (single-datagram runs skip the cmsg); GSO-class errors
  *     (EIO/EINVAL/ENOTSUP/EMSGSIZE — the last because GSO segments must fit
  *     the route PMTU while plain sends fragment locally, see udp_offload.c)
- *     set *gso_disabled = 1 and, iff nothing was sent
- *     yet, the whole batch is retried via sendmmsg within this call.
+ *     set *gso_disabled to the classifying errno (nonzero — the caller's
+ *     one-shot fallback log reads it for the reason) and, iff nothing was
+ *     sent yet, the whole batch is retried via sendmmsg within this call.
  *     Sticky-disable fires ONLY when the failed send carried the
  *     UDP_SEGMENT cmsg (run > 1) — a cmsg-less single-datagram (run == 1)
  *     error is a plain hard error and never sticky-disables GSO.

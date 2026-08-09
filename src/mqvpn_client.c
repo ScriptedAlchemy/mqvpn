@@ -1172,20 +1172,20 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     if (was_gso && p->gso_disabled) {
         /* One-shot transition: gso_disabled only resets on fd (re)assignment
          * (mqvpn_client_add_path_fd), so this fires at most once per fd
-         * lifetime — no spam guard needed. errno is intentionally omitted:
-         * this transition is also reachable when the call overall SUCCEEDED
-         * (r >= 0, via mqvpn_udp_send_batch's zero-sent retry-as-sendmmsg
-         * path), and errno is only meaningful right after a call reports
-         * failure — trusting it here would depend on an unenforced detail
-         * of udp_offload.c's internals (that nothing between the failed
-         * GSO send and a later successful retry touches errno) surviving
-         * future refactors. */
-        /* The handle names WHICH path fell back — on a mixed-MTU multipath
-         * bond (e.g. fiber + LTE) only the narrow path degrades, and the
-         * operator needs to see which one. Same identifier as the
-         * "path %lld -> %s" event log. */
-        LOG_W(c, "udp-gso: runtime GSO failure, sticky fallback to sendmmsg on path %lld",
-              (long long)p->handle);
+         * lifetime — no spam guard needed. The reason comes from the flag
+         * itself (mqvpn_udp_send_batch stores the classifying errno there),
+         * NOT from errno: this transition is also reachable when the call
+         * overall SUCCEEDED (zero-sent retry-as-sendmmsg path), where errno
+         * belongs to the successful retry. The handle names WHICH path fell
+         * back — on a mixed-MTU multipath bond (e.g. fiber + LTE) only the
+         * narrow path degrades, and the operator needs to see which one
+         * (same identifier as the "path %lld -> %s" event log). EMSGSIZE
+         * here reads as "this route's PMTU cannot carry our segment size"
+         * (see gso_class_error in udp_offload.c). */
+        LOG_W(c,
+              "udp-gso: runtime GSO failure (%s), sticky fallback to sendmmsg on "
+              "path %lld",
+              strerror(p->gso_disabled), (long long)p->handle);
     }
     c->bytes_tx += tx.bytes;
     /* bytes attributed to the slot owning the fd actually used — deliberately

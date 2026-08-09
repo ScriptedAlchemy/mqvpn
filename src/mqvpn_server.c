@@ -549,11 +549,12 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     if (was_gso && conn->gso_disabled) {
         /* One-shot per connection (the flag never resets within one) — at
          * most max_clients lines per server lifetime, no spam guard
-         * needed. errno intentionally omitted — see the matching comment
-         * in the client's cb_write_mmsg_ex for why it isn't trustworthy at
-         * this point. */
-        LOG_W(s, "udp-gso: runtime GSO failure, sticky fallback to sendmmsg for "
-                 "this client");
+         * needed. The reason comes from the flag itself, not errno — see
+         * the matching comment in the client's cb_write_mmsg_ex. */
+        LOG_W(s,
+              "udp-gso: runtime GSO failure (%s), sticky fallback to sendmmsg for "
+              "this client",
+              strerror(conn->gso_disabled));
     }
     /* single aggregate counter — the server has no per-path bytes_tx (that's
      * a client-only concept) — matching svr_do_send's s->bytes_tx accounting.
