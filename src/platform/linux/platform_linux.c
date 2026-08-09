@@ -847,7 +847,8 @@ typedef struct server_platform_ctx_s {
      * written by svr_on_socket_read and read once at teardown. No udp_gro flag
      * here: the listen socket is created exactly once, so the sockopt hook
      * takes the flag as a parameter and teardown reads cfg->udp_gro. */
-    uint64_t gro_receives;  /* recvmsg calls that returned data */
+    uint64_t gro_receives;  /* recvmsg calls whose data was delivered —
+                             * same exclusions as platform_ctx_t's pair */
     uint64_t gro_datagrams; /* datagrams delivered to the library */
 
     /* Egress fd registry (hybrid TCP lane, D1). Sized once at server start
