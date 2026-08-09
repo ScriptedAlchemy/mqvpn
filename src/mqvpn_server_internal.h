@@ -164,7 +164,10 @@ uint64_t svr_now_us(void);
  * (tx_batch); a no-op otherwise, and a no-op when called from inside an
  * engine callback (xquic's XQC_ENG_FLAG_RUNNING re-entrancy guard). Lets
  * tcp_egress.c push already-accepted stream data onto the wire before an
- * abort would drop it. May run timers and close/destroy connections and
+ * abort would drop it; mqvpn_server_destroy calls it too, so the definition
+ * is compiled on every platform (not under MQVPN_HYBRID_TCP_EGRESS_ENABLED
+ * — the deferred flush is a UDP-GSO concern, independent of TCP egress).
+ * May run timers and close/destroy connections and
  * flows — callers must re-validate every flow pointer they held across the
  * call (pointer-identity scan of the flow list; do NOT dereference first). */
 void svr_flush_deferred_sends(mqvpn_server_t *s);

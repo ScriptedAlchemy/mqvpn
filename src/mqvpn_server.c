@@ -1361,16 +1361,6 @@ svr_now_us(void)
     return now_us();
 }
 
-void
-svr_flush_deferred_sends(mqvpn_server_t *s)
-{
-    /* Gated on tx_batch so pre-deferral behavior is untouched: without the
-     * batch callback every send already flushed at accept time and there is
-     * nothing to push out. Contract (re-entrancy no-op, may destroy flows)
-     * documented at the declaration in mqvpn_server_internal.h. */
-    if (s->tx_batch && s->engine) xqc_engine_main_logic(s->engine);
-}
-
 /* Formats once locally, then hands the finished string to server_log as a
  * literal "%s" argument — reuses server_log's null/level-gate and cbs.log
  * dispatch instead of duplicating them here (server_log can't take a
@@ -1387,6 +1377,20 @@ svr_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
     server_log(s, level, "%s", buf);
 }
 #endif /* MQVPN_HYBRID_TCP_EGRESS_ENABLED */
+
+/* Compiled unconditionally — NOT part of the egress helper block above:
+ * mqvpn_server_destroy calls this on every platform (the deferred-flush
+ * batching is a UDP-GSO concern, independent of the Linux-only TCP egress;
+ * defining it under MQVPN_HYBRID_TCP_EGRESS_ENABLED broke the Darwin link). */
+void
+svr_flush_deferred_sends(mqvpn_server_t *s)
+{
+    /* Gated on tx_batch so pre-deferral behavior is untouched: without the
+     * batch callback every send already flushed at accept time and there is
+     * nothing to push out. Contract (re-entrancy no-op, may destroy flows)
+     * documented at the declaration in mqvpn_server_internal.h. */
+    if (s->tx_batch && s->engine) xqc_engine_main_logic(s->engine);
+}
 
 /* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST handling. */
 static int
