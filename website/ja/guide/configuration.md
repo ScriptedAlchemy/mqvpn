@@ -314,8 +314,8 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | 判定タイミング | **lwIP が SYN を見る前** | CONNECT-TCP 要求の到着時 |
 | 内側 TCP の終端 | lwIP (レーン内) | しない (通常のカーネルソケットで中継) |
 | **上限超過時** | **RAW レーンに降格** — 接続は成立する (失敗ではない) | **HTTP `503`** → client はその内側コネクションを **RST**。この時点で RAW 降格はない |
-| per-flow メモリ | **~0.75 MiB** (uplink キューの上限) | **~8 KiB** (遅延確保の 4 KiB 中継バッファ × 2) + fd 1 本 |
-| 先に尽きる資源 | RAM — worst case は `TcpMaxFlows` × 0.75 MiB (既定 256 で約 192 MiB、4096 で約 3.0 GiB) | **fd 予算** — 全体上限の `TcpMaxGlobalFlows` が先に判定される |
+| per-flow メモリ | **~0.75 MiB** (uplink キューの上限) | **~32 KiB** (遅延確保の 16 KiB 中継バッファ × 2) + fd 1 本 |
+| 先に尽きる資源 | RAM — worst case は `TcpMaxFlows` × 0.75 MiB (既定 256 で約 192 MiB、4096 で約 3.0 GiB) | **fd 予算** — 全体上限の `TcpMaxGlobalFlows` が先に判定される。ただし RAM も見積もっておくこと: worst case は `TcpMaxGlobalFlows` × 32 KiB (4096 で約 128 MiB、全フローが両方向で一度ずつ pause した場合) |
 | 実効値の clamp | lwIP TCP pcb プールの**半分**まで (下記) | なし (lwIP を使わないため) |
 
 **client の clamp:** 実効値は lwIP TCP pcb プールの半分に制限されます。

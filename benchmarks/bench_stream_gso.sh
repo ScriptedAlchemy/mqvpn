@@ -42,7 +42,8 @@
 #             already measures on this tree (project memory, 2026-08-08).
 #
 # Metric: the "udp-tx: sends=N datagrams=M gso_config=X" teardown line
-# (mqvpn_client.c:2994 / mqvpn_server.c:2027 — pinned wording) from BOTH
+# (pinned wording — grep "udp-tx: sends=" in mqvpn_client_destroy /
+# mqvpn_server_destroy) from BOTH
 # endpoints, read only AFTER the process is reaped (it is written during
 # destroy, so it does not exist while the process is alive). datagrams/sends
 # is the achieved batching factor.

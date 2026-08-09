@@ -751,7 +751,16 @@ MQVPN_API int mqvpn_client_reactivate_path(mqvpn_client_t *client,
 
 MQVPN_API int mqvpn_client_set_tun_active(mqvpn_client_t *client, int active, int tun_fd);
 
-/* Feed data from platform into the engine */
+/* Feed data from platform into the engine.
+ *
+ * MQVPN_OK means accepted, not sent: when the batched send path is engaged
+ * (Linux, UdpGso enabled — the default), the datagram may sit in the send
+ * queue until the caller's next mqvpn_client_tick(), which is what lets a
+ * run of packets leave as one sendmmsg/GSO batch. Feed-then-tick promptly;
+ * a consumer that ticks on a coarse timer adds up to one tick period of
+ * latency to every packet accepted here. (Before the deferred flush every
+ * call flushed synchronously, so this obligation is new as of UdpGso
+ * batching — same contract as mqvpn_server_on_egress_fd_ready.) */
 MQVPN_API int mqvpn_client_on_tun_packet(mqvpn_client_t *client, const uint8_t *pkt,
                                          size_t len);
 
@@ -822,6 +831,10 @@ MQVPN_API void mqvpn_server_on_egress_fd_ready(mqvpn_server_t *server, int fd,
  * "treat tcp_egress as disabled — do not allocate a registry". */
 MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 
+/* Feed data from platform into the engine. Same accepted-not-sent contract
+ * as mqvpn_client_on_tun_packet: with the batched send path engaged the
+ * datagram may wait for the caller's next mqvpn_server_tick() — feed, then
+ * tick promptly. */
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,
                                          size_t len);
 
