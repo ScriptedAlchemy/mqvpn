@@ -400,33 +400,36 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     schedule_next_tick(p);
 }
 
-void
-on_socket_read(evutil_socket_t fd, short what, void *arg)
+/* ─── Shared GRO drain loop (client + server read callbacks) ───
+ *
+ * ONE definition of the budget/truncation/split/counter semantics so the
+ * client and server RX paths cannot drift (this project already lost the TX
+ * half of a telemetry pair to exactly that kind of hand-synced copy).
+ *
+ * Budget counts receive work — datagrams delivered, plus one unit per
+ * dropped or undeliverable receive — not recvmsg calls: one GRO receive can
+ * carry dozens of datagrams, and counting syscalls would let a single
+ * callback do far more work than before GRO and starve the tick/timer path.
+ * It is a soft threshold: the current aggregate is always finished, so a
+ * full one can overshoot it. Nothing is ever discarded for it.
+ *
+ * One coalesced buffer, N QUIC datagrams: segments are handed to `deliver`
+ * one at a time, exactly as the pre-GRO loops did (seg == 0 degenerates to
+ * a single iteration), so recv_rate_limit accounting and every layer above
+ * stay per-packet. deliver == NULL drains without delivering (the client's
+ * no-handle case): the recvmsg has already consumed the data — which is
+ * what keeps the level-triggered event from refiring forever — so it
+ * charges one unit and moves on, exactly like a dropped receive. */
+typedef void (*udp_rx_deliver_fn)(void *ctx, const uint8_t *pkt, size_t len,
+                                  const struct sockaddr *peer, socklen_t peer_len);
+
+static void
+drain_udp_rx(int fd, const char *tag, udp_rx_deliver_fn deliver, void *ctx,
+             uint64_t *receives, uint64_t *datagrams)
 {
-    (void)what;
-    platform_ctx_t *p = (platform_ctx_t *)arg;
     uint8_t buf[SOCK_BUF_SIZE];
     struct sockaddr_storage peer;
 
-    /* fd is constant for this callback, so resolve the path handle once.
-     * Safe to hoist: nothing on the receive path mutates path_mgr —
-     * cb_path_event is log-only, and the netlink re-add runs from its own
-     * libevent event, never reentrantly inside this one. */
-    mqvpn_path_handle_t handle = -1;
-    for (int j = 0; j < p->path_mgr.n_paths; j++) {
-        if (p->path_mgr.paths[j].fd == fd) {
-            handle = p->lib_path_handles[j];
-            break;
-        }
-    }
-    if (handle < 0) LOG_DBG("path rx: no handle for fd=%d, draining", (int)fd);
-
-    /* Budget counts receive work — datagrams delivered, plus one unit per
-     * dropped receive — not recvmsg calls: one GRO receive can
-     * carry dozens of datagrams, and counting syscalls would let a single
-     * callback do far more work than before GRO and starve the tick/timer
-     * path. It is a soft threshold: the current aggregate is always finished,
-     * so a full one can overshoot it. Nothing is ever discarded for it. */
     int budget = BULK_READ_COUNT;
     while (budget > 0) {
         socklen_t peer_len = sizeof(peer); /* value-result, reset per call */
@@ -436,36 +439,66 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
         ssize_t n = mqvpn_udp_recv_segmented(fd, buf, sizeof(buf),
                                              (struct sockaddr *)&peer, &peer_len, &seg);
         if (n == MQVPN_RECV_DROP) {
-            LOG_DBG("path rx: truncated datagram dropped");
+            LOG_DBG("%s: truncated datagram dropped", tag);
             budget--;
             continue;
         }
         if (n <= 0) break;
-        p->gro_receives++;
+        (*receives)++;
 
-        /* handle < 0 is defensive — events are registered only after the
-         * library accepted the path. The recvmsg above already consumed the
-         * data, which is what keeps the level-triggered event from refiring
-         * forever; charge one unit and move on, exactly like a dropped
-         * receive. */
-        if (handle < 0) {
+        if (!deliver) {
             budget--;
             continue;
         }
 
-        /* One coalesced buffer, N QUIC datagrams: hand them to the library one
-         * at a time, exactly as the pre-GRO loop did (seg == 0 degenerates to a
-         * single iteration), so recv_rate_limit accounting and every layer
-         * above stay per-packet. */
         size_t sl;
         for (size_t off = 0; (sl = mqvpn_gro_seg_len((size_t)n, seg, off)) > 0;
              off += sl) {
-            mqvpn_client_on_socket_recv(p->client, handle, buf + off, sl,
-                                        (struct sockaddr *)&peer, peer_len);
-            p->gro_datagrams++;
+            deliver(ctx, buf + off, sl, (const struct sockaddr *)&peer, peer_len);
+            (*datagrams)++;
             budget--;
         }
     }
+}
+
+/* drain_udp_rx deliver thunk: client needs the resolved path handle. */
+typedef struct {
+    mqvpn_client_t *client;
+    mqvpn_path_handle_t handle;
+} client_rx_ctx_t;
+
+static void
+client_rx_deliver(void *arg, const uint8_t *pkt, size_t len, const struct sockaddr *peer,
+                  socklen_t peer_len)
+{
+    client_rx_ctx_t *rc = (client_rx_ctx_t *)arg;
+    mqvpn_client_on_socket_recv(rc->client, rc->handle, pkt, len, peer, peer_len);
+}
+
+void
+on_socket_read(evutil_socket_t fd, short what, void *arg)
+{
+    (void)what;
+    platform_ctx_t *p = (platform_ctx_t *)arg;
+
+    /* fd is constant for this callback, so resolve the path handle once.
+     * Safe to hoist: nothing on the receive path mutates path_mgr —
+     * cb_path_event is log-only, and the netlink re-add runs from its own
+     * libevent event, never reentrantly inside this one. handle < 0 is
+     * defensive — events are registered only after the library accepted the
+     * path — and downgrades to a delivery-less drain. */
+    client_rx_ctx_t rc = {.client = p->client, .handle = -1};
+    for (int j = 0; j < p->path_mgr.n_paths; j++) {
+        if (p->path_mgr.paths[j].fd == fd) {
+            rc.handle = p->lib_path_handles[j];
+            break;
+        }
+    }
+    if (rc.handle < 0) LOG_DBG("path rx: no handle for fd=%d, draining", (int)fd);
+
+    drain_udp_rx(fd, "path rx", rc.handle >= 0 ? client_rx_deliver : NULL, &rc,
+                 &p->gro_receives, &p->gro_datagrams);
+
     /* Drive engine after receiving packets */
     mqvpn_client_tick(p->client);
     schedule_next_tick(p);
@@ -749,8 +782,13 @@ cleanup:
         event_free(ctx.ev_recover);
     }
 
-    mqvpn_path_mgr_destroy(&ctx.path_mgr);
+    /* Library first, sockets second: mqvpn_client_destroy's deferred-flush
+     * pass (tx_batch) sends on the path fds, so closing them before the
+     * destroy would turn that flush into EBADF noise — or worse, a write to
+     * a recycled fd number. The library never closes path fds itself (fd
+     * ownership stays with the platform), so the swap is otherwise inert. */
     mqvpn_client_destroy(ctx.client);
+    mqvpn_path_mgr_destroy(&ctx.path_mgr);
 
     if (ctx.eb) event_base_free(ctx.eb);
 
@@ -920,41 +958,25 @@ svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
     svr_schedule_next_tick(sp);
 }
 
+/* drain_udp_rx deliver thunk: the server has one socket, no path handle. */
+static void
+svr_rx_deliver(void *arg, const uint8_t *pkt, size_t len, const struct sockaddr *peer,
+               socklen_t peer_len)
+{
+    mqvpn_server_on_socket_recv((mqvpn_server_t *)arg, pkt, len, peer, peer_len);
+}
+
 static void
 svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
-    uint8_t buf[SOCK_BUF_SIZE];
-    struct sockaddr_in6 peer;
 
-    /* Budget counts receive work, not recvmsg calls — rationale in
-     * on_socket_read() above; keep the two loops in the same shape. */
-    int budget = BULK_READ_COUNT;
-    while (budget > 0) {
-        socklen_t peer_len = sizeof(peer); /* value-result, reset per call */
-        size_t seg = 0;
-        // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
-        // sizeof(buf); xquic validates internally
-        ssize_t n = mqvpn_udp_recv_segmented(fd, buf, sizeof(buf),
-                                             (struct sockaddr *)&peer, &peer_len, &seg);
-        if (n == MQVPN_RECV_DROP) {
-            LOG_DBG("svr rx: truncated datagram dropped");
-            budget--;
-            continue;
-        }
-        if (n <= 0) break;
-        sp->gro_receives++;
+    /* Semantics (budget, truncation, GRO split, counters) live in
+     * drain_udp_rx — shared with the client's on_socket_read. */
+    drain_udp_rx(fd, "svr rx", svr_rx_deliver, sp->server, &sp->gro_receives,
+                 &sp->gro_datagrams);
 
-        size_t sl;
-        for (size_t off = 0; (sl = mqvpn_gro_seg_len((size_t)n, seg, off)) > 0;
-             off += sl) {
-            mqvpn_server_on_socket_recv(sp->server, buf + off, sl,
-                                        (struct sockaddr *)&peer, peer_len);
-            sp->gro_datagrams++;
-            budget--;
-        }
-    }
     mqvpn_server_tick(sp->server);
     svr_schedule_next_tick(sp);
 }
@@ -1322,8 +1344,12 @@ cleanup:
         event_del(sp.ev_sigterm);
         event_free(sp.ev_sigterm);
     }
-    if (sp.udp_fd >= 0) close(sp.udp_fd);
+    /* Library first, socket second: mqvpn_server_destroy's deferred-flush
+     * pass (tx_batch) sends on udp_fd, so closing it before the destroy
+     * would turn that flush into EBADF noise — or worse, a write to a
+     * recycled fd number. */
     mqvpn_server_destroy(sp.server);
+    if (sp.udp_fd >= 0) close(sp.udp_fd);
     /* After server destroy: teardown may call egress_fd_unregister for any
      * still-open egress fds, which scans this registry — free it only once
      * the server is gone (but before the event base the events belong to). */

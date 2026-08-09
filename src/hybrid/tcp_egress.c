@@ -540,6 +540,30 @@ static void
 svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef, int err)
 {
     TLOG_W(server, "connect-tcp: relay I/O error (errno=%d) — closing stream", err);
+
+    /* Flush BEFORE the close when the deferred send flush is engaged:
+     * xqc_h3_request_close drops still-queued STREAM packets before
+     * RESET_STREAM (the write-then-abort KNOWN LIMITATION documented on
+     * defer_send_flush in xquic.h), so chunks send_body() accepted earlier
+     * in this same relay invocation — up to TCP_EGRESS_RELAY_CHUNK of data
+     * the upstream really delivered — would otherwise be truncated. From
+     * event-loop contexts this pushes them out; from inside an engine
+     * callback it is a no-op (xquic's re-entrancy guard) and the bounded
+     * truncation remains, same as the xquic-side limitation.
+     *
+     * The flush may run timers and teardown paths that destroy flows —
+     * including this one (e.g. a send hard error killing the whole conn).
+     * Re-validate `ef` by pointer identity against the live-flow list
+     * before touching it again; if it is gone, the teardown that removed it
+     * already closed the stream and the close below must be skipped. */
+    svr_flush_deferred_sends(server);
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(server, &ctx);
+    svr_tcp_egress_flow_t *live = *ctx.flow_list_head;
+    while (live && live != ef)
+        live = live->next;
+    if (!live) return; /* flushed teardown already destroyed the flow */
+
     xqc_h3_request_close(ef->h3_request);
     /* Do NOT touch ef again — see the destroy-ownership note above. */
 }

@@ -532,6 +532,10 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     int was_gso = !s->gso_disabled;
     ssize_t r = mqvpn_udp_send_batch(s->udp_fd, msg_iov, vlen, peer, peerlen,
                                      s->gso_available, &s->gso_disabled, &tx);
+    /* Captured before any LOG_* call: the log write path can clobber errno,
+     * and the hard-error branch below is the only diagnostic that reports
+     * it. Meaningful only when r == MQVPN_SEND_ERR (udp_offload.h). */
+    int send_errno = errno;
     if (was_gso && s->gso_disabled) {
         /* One-shot transition: gso_disabled only resets on
          * mqvpn_server_set_socket_fd(), so this fires at most once per
@@ -553,7 +557,7 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
      * from this callback can escalate to connection close; GSO-class errors
      * are absorbed by the sticky fallback in mqvpn_udp_send_batch, so this
      * branch is rare — no spam risk. */
-    LOG_E(s, "batch send: %s", strerror(errno));
+    LOG_E(s, "batch send: %s", strerror(send_errno));
     return XQC_SOCKET_ERROR; /* same convention as svr_do_send's hard-error path */
 }
 #endif
@@ -1346,6 +1350,16 @@ svr_now_us(void)
     return now_us();
 }
 
+void
+svr_flush_deferred_sends(mqvpn_server_t *s)
+{
+    /* Gated on tx_batch so pre-deferral behavior is untouched: without the
+     * batch callback every send already flushed at accept time and there is
+     * nothing to push out. Contract (re-entrancy no-op, may destroy flows)
+     * documented at the declaration in mqvpn_server_internal.h. */
+    if (s->tx_batch && s->engine) xqc_engine_main_logic(s->engine);
+}
+
 /* Formats once locally, then hands the finished string to server_log as a
  * literal "%s" argument — reuses server_log's null/level-gate and cbs.log
  * dispatch instead of duplicating them here (server_log can't take a
@@ -1889,30 +1903,23 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
 
 #if defined(__linux__)
-    _Static_assert(XQC_MAX_SEND_MSG_ONCE <= MQVPN_OFFLOAD_MAX_BATCH,
-                   "fallback mmsghdr array must cover xquic's burst size");
     /* `cfg` is mqvpn_server_new's own parameter, holding the same udp_gso
      * value as s->config.udp_gso (memcpy'd above; never touched by the
-     * [Hybrid]-only sanitize pass). MQVPN_MAX_PKT_OUT_SIZE <= 1500 guards
-     * mqvpn_udp_send_batch()'s single-run/no-splitting contract
-     * (udp_offload.h) — mirrors the client-side registration in
-     * mqvpn_client.c's init_xquic_engine(). xquic requires
+     * [Hybrid]-only sanitize pass). tx_batch is recorded rather than
+     * re-derived: the cs_input below feeds this same flag to
+     * conn_settings.defer_send_flush, so the deferred flush cannot outlive
+     * the batch callback it exists to fill. Registration mechanics and the
+     * e2e-pinned marker strings are shared with the client via
+     * mqvpn_tx_batch_register (mqvpn_conn_settings.h). xquic requires
      * XQC_CONN_FLAG_SERVER_ACCEPT for batch sends on server conns, so
      * pre-accept traffic (cb_write_before_accept) keeps using
      * conn_send_packet_before_accept unaffected by this registration. */
-    if (mqvpn_tx_batch_enabled(cfg->udp_gso)) {
-        /* Recorded rather than re-derived: the cs_input below feeds this same
-         * flag to conn_settings.defer_send_flush, so the deferred flush
-         * cannot outlive the batch callback it exists to fill. */
+    if (mqvpn_tx_batch_register(cfg->udp_gso, cb_write_mmsg_ex, &tcbs, &xconfig,
+                                &s->gso_available)) {
         s->tx_batch = 1;
-        s->gso_available = mqvpn_udp_gso_probe();
-        tcbs.write_mmsg_ex = cb_write_mmsg_ex;
-        xconfig.sendmmsg_on = 1;
-        /* The "udp-gso: " wording is grepped by
-         * scripts/ci_e2e/run_udp_gso_config_test.sh as a presence/absence
-         * invariant — rewording it silently breaks that test. */
-        LOG_I(s, "udp-gso: %s",
-              s->gso_available ? "GSO enabled" : "GSO unavailable, using sendmmsg");
+        LOG_I(s, "%s",
+              s->gso_available ? MQVPN_UDP_GSO_MARKER_ENABLED
+                               : MQVPN_UDP_GSO_MARKER_UNAVAILABLE);
     }
 #endif
 
@@ -2021,18 +2028,21 @@ mqvpn_server_destroy(mqvpn_server_t *s)
 {
     if (!s) return;
 
+    /* Flush before the engine teardown when the deferred flush is engaged:
+     * xqc_engine_destroy tears down queued connections without processing
+     * them, so datagrams mqvpn_server_on_tun_packet already accepted would
+     * be dropped. Best-effort, like the client side (see the comment in
+     * mqvpn_client_disconnect): EAGAIN residue is still dropped below. */
+    svr_flush_deferred_sends(s);
+
     /* Transmit-side offload summary; see the matching comment in
-     * mqvpn_client_destroy, including why sends made during the engine
-     * teardown below fall outside this count. */
+     * mqvpn_client_destroy — emitted after the flush above so a short run's
+     * final deferred burst is counted, before the engine teardown whose few
+     * close-frame sends fall outside the count. */
     LOG_I(s, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d", s->tx_sends,
           s->tx_datagrams, s->config.udp_gso);
 
-    /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free.
-     * Flush first when the deferred flush is engaged: xqc_engine_destroy
-     * tears down queued connections without processing them, so datagrams
-     * mqvpn_server_on_tun_packet already accepted would be dropped. Same
-     * guarantee the client side restores in mqvpn_client_disconnect. */
-    if (s->tx_batch && s->engine) xqc_engine_main_logic(s->engine);
+    /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free */
     if (s->engine) {
         xqc_engine_destroy(s->engine);
         s->engine = NULL;
