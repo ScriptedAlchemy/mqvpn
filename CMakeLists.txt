@@ -4,6 +4,20 @@ project(mqvpn VERSION 0.15.1 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Shared-library ABI version, consumed by BOTH the Darwin and the Linux
+# mqvpn_shared blocks far below. One definition on purpose: the platform
+# blocks are ~120 lines apart and only the Linux one used to carry the
+# rationale, so a bump applied to that copy alone would ship a macOS dylib
+# whose struct layout no longer matches its soname.
+#
+# Bump whenever mqvpn_stats_t (or any struct the public API fills in place)
+# grows: the getters write sizeof(*out) without consulting the caller's
+# struct_size, so a binary built against an older header must not resolve to
+# the newer library.
+#   1 -> 2  hybrid lane/flow counters
+#   2 -> 3  udp_tx_sends / udp_tx_datagrams
+set(MQVPN_SOVERSION 3)
+
 # ---------- Options ----------
 option(XQUIC_BUILD_DIR "Path to pre-built xquic build directory" "")
 option(ENABLE_SANITIZERS "Enable ASan + UBSan" OFF)
@@ -213,6 +227,7 @@ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 set(MQVPN_LIB_SOURCES
     src/mqvpn_config.c
     src/mqvpn_client.c
+    src/udp_offload.c
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
     src/mqvpn_util.c
@@ -550,7 +565,7 @@ target_include_directories(mqvpn_darwin_platform PRIVATE
 add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
-    SOVERSION 2
+    SOVERSION ${MQVPN_SOVERSION}
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
 )
@@ -666,10 +681,9 @@ else() # NOT WIN32, NOT APPLE — Linux
 add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
-    # Bumped 1 -> 2: mqvpn_stats_t grew (hybrid lane/flow counters). Producers
-    # write sizeof(mqvpn_stats_t) with no caller-size negotiation, so a binary
-    # built against the old header must not resolve to the new .so.
-    SOVERSION 2
+    # Defined once at the top of this file, with the bump history — both this
+    # block and the Darwin twin above read it, so they cannot drift.
+    SOVERSION ${MQVPN_SOVERSION}
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
 )
@@ -797,6 +811,26 @@ if(BUILD_TESTING)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+
+    # UDP GSO TX offload (issue #167): pure syscall/mechanics layer, no xquic
+    # dependency. MQVPN_OFFLOAD_TEST_SEAM is wired: it swaps sendmsg/sendmmsg
+    # for mqvpn_seam_sendmsg/mqvpn_seam_sendmmsg (defined in
+    # tests/test_udp_offload.c), which the fault-injection tests use to force
+    # error/short-write/EAGAIN paths deterministically.
+    add_executable(test_udp_offload tests/test_udp_offload.c src/udp_offload.c)
+    target_compile_definitions(test_udp_offload PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
+    target_include_directories(test_udp_offload PRIVATE src include)
+    set_target_properties(test_udp_offload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_udp_offload COMMAND test_udp_offload)
+
+    # Kernel-backed UDP GSO/GRO round trip (issue #167): built WITHOUT
+    # MQVPN_OFFLOAD_TEST_SEAM, so every syscall is the real one — this pins
+    # the wrapper against the actual kernel rather than the fabricated seam
+    # kernel above.
+    add_executable(test_udp_gro_kernel tests/test_udp_gro_kernel.c src/udp_offload.c)
+    target_include_directories(test_udp_gro_kernel PRIVATE src include)
+    set_target_properties(test_udp_gro_kernel PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_udp_gro_kernel COMMAND test_udp_gro_kernel)
 
     # Darwin platform-twin PATH-stub state machine tests (Task 10), also
     # registered here on Linux: the twins (darwin/dns.c, darwin/routing.c,

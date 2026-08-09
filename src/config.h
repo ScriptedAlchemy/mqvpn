@@ -97,6 +97,18 @@ typedef struct mqvpn_file_config_s {
      * CLIENT-ONLY by policy — see mqvpn_conn_settings.c. */
     uint64_t recv_rate_limit;
 
+    /* [Advanced] UdpGso — Linux TX UDP GSO/batched send; 1 (default) =
+     * engage when the kernel supports it, 0 = per-packet send path. Applies
+     * to both client and server (unlike recv_rate_limit). */
+    int udp_gso;
+
+    /* [Advanced] UdpGro — Linux RX UDP GRO (kernel-coalesced receive);
+     * 1 (default) = set SOL_UDP/UDP_GRO on every path/listen socket when the
+     * kernel supports it, 0 = one datagram per recvmsg. Applies to both
+     * client and server. Platform-side only: unlike udp_gso it never crosses
+     * the library ABI. */
+    int udp_gro;
+
     /* Inferred mode: 1=server, 0=client */
     int is_server;
 } mqvpn_file_config_t;

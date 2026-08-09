@@ -9,6 +9,7 @@
 #include "mqvpn_conn_settings.h"
 
 #include "libmqvpn.h"
+#include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h"
 
@@ -122,11 +123,16 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->max_datagram_frame_size = 65535;
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
-    out->max_pkt_out_size = 1400;
+    out->max_pkt_out_size = MQVPN_MAX_PKT_OUT_SIZE;
     out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     out->so_sndbuf = 8 * 1024 * 1024;
     out->idle_time_out = 120000;
     out->init_idle_time_out = 10000;
+
+    /* Caller-gated, never derived here: see the field comment in
+     * mqvpn_conn_settings.h for why this must equal the batched-send
+     * registration decision rather than any locally recomputed condition. */
+    out->defer_send_flush = in->defer_send_flush ? 1 : 0;
 
     /* --- congestion control ---
      * Invalid/out-of-range values fall back to BBR2, matching the old
@@ -194,3 +200,32 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
         out->init_max_path_id = in->init_max_path_id;
     }
 }
+
+#if defined(__linux__)
+
+#  include "udp_offload.h"
+
+/* The fallback sendmmsg path hands xquic's whole burst to one
+ * mqvpn_udp_send_batch() call; its mmsghdr array must cover it. Pinned here,
+ * next to the one registration site, rather than per caller. */
+_Static_assert(XQC_MAX_SEND_MSG_ONCE <= MQVPN_OFFLOAD_MAX_BATCH,
+               "fallback mmsghdr array must cover xquic's burst size");
+
+int
+mqvpn_tx_batch_register(int udp_gso, xqc_send_mmsg_ex_pt cb,
+                        xqc_transport_callbacks_t *tcbs, xqc_config_t *xconfig,
+                        int *gso_available)
+{
+    /* mqvpn_tx_batch_enabled's MQVPN_MAX_PKT_OUT_SIZE <= 1500 term guards
+     * mqvpn_udp_send_batch()'s single-run/no-splitting contract
+     * (udp_offload.h) — a future raise of the constant above ~2KB must
+     * revisit run-splitting before this registration can stay
+     * unconditional. */
+    if (!mqvpn_tx_batch_enabled(udp_gso)) return 0;
+    *gso_available = mqvpn_udp_gso_probe();
+    tcbs->write_mmsg_ex = cb;
+    xconfig->sendmmsg_on = 1;
+    return 1;
+}
+
+#endif /* __linux__ */

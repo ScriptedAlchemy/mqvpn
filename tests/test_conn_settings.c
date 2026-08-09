@@ -305,11 +305,90 @@ test_reinjection_mapping(void)
     return 0;
 }
 
+/* The escape hatch: with UdpGso=false no batched send callback is
+ * registered, so xquic emits one syscall per packet no matter when the flush
+ * happens — deferring would only move the flush, for zero benefit. The
+ * builder must therefore carry a false input through as 0, which is what
+ * keeps "UdpGso=false behaves exactly as it did before the deferral patches"
+ * true for both the datagram and the hybrid TCP lane.
+ *
+ * SCOPE — this pins the BUILDER, not the gating. The builder is handed the
+ * flag directly here, so nothing below exercises the registration decision
+ * itself; that the callers pass the same stored tx_batch they gated
+ * cb_write_mmsg_ex registration on is asserted by neither this test nor the
+ * e2e, and stays a review-time invariant (see the field comment in
+ * mqvpn_conn_settings.h). What this test does buy is that the builder cannot
+ * quietly become the thing that decides: no local condition may widen or
+ * narrow the caller's answer. */
+static int
+test_defer_flush_tracks_batch_registration(void)
+{
+    xqc_conn_settings_t cs;
+
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+        .defer_send_flush = false,
+    };
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_send_flush, 0);
+
+    in.defer_send_flush = true;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_send_flush, 1);
+
+    /* Server path shares the builder but is reached by its own call site. */
+    in.is_server = true;
+    in.defer_send_flush = false;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_send_flush, 0);
+
+    in.defer_send_flush = true;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_send_flush, 1);
+
+    /* Carried, not synthesised: the builder must not AND the caller's flag
+     * with any condition of its own.
+     *
+     * The input stays TRUE across these permutations deliberately. Asserting 0
+     * while flipping unrelated inputs would prove nothing — an implementation
+     * like `in->defer_send_flush && in->enable_multipath` satisfies that just
+     * as well. Only a true input that survives every permutation rules it
+     * out. */
+    in.defer_send_flush = true;
+    in.enable_multipath = false;
+    in.scheduler = MQVPN_SCHED_MINRTT;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_send_flush, 1);
+
+    in.is_server = false;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_send_flush, 1);
+
+    in.cc = MQVPN_CC_CUBIC;
+    in.reinjection = MQVPN_REINJ_DEADLINE;
+    in.recv_rate_bytes_per_sec = 125000000ULL;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.defer_send_flush, 1);
+
+    /* Absent from a designated initializer = 0: a future call site that
+     * forgets the field gets the pre-patch behavior, never deferral. */
+    mqvpn_conn_settings_input_t unset = {
+        .is_server = false,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+    mqvpn_build_conn_settings(&unset, &cs);
+    ASSERT_EQ(cs.defer_send_flush, 0);
+    return 0;
+}
+
 int
 main(void)
 {
     int failed = 0;
     failed += test_asymmetry_server_vs_client();
+    failed += test_defer_flush_tracks_batch_registration();
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();

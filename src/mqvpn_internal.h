@@ -34,10 +34,46 @@
 #define MQVPN_XQC_PATH_STATE_CLOSING    3
 #define MQVPN_XQC_PATH_STATE_CLOSED     4
 
+/* Outer QUIC/UDP payload bound handed to xquic (single source of truth —
+ * also the TX-batch registration guard; the fork's batch enc buffer is
+ * 1500B, xqc_defs.h XQC_CONN_MAX_UDP_PAYLOAD_SIZE). */
+#define MQVPN_MAX_PKT_OUT_SIZE 1400
+
+/* Is the Linux batched-send path engaged for this config?
+ *
+ * ONE definition, used by both the client and the server for two decisions
+ * that must never disagree: registering the write_mmsg_ex callback (with
+ * xconfig.sendmmsg_on), and setting conn_settings.defer_send_flush. With no
+ * batch callback registered xquic sends one packet per syscall regardless, so
+ * deferring the flush there would move it for no benefit at all. Spelling the
+ * condition out per call site is what would let the two drift — notably if
+ * MQVPN_MAX_PKT_OUT_SIZE is ever raised past the single-run/no-splitting
+ * bound that mqvpn_udp_send_batch() documents in udp_offload.h.
+ *
+ * Callers still record the result on the client/server struct (tx_batch) and
+ * read THAT when building conn settings: the stored flag also carries the
+ * platform guard, since the registration block is Linux-only. */
+static inline int
+mqvpn_tx_batch_enabled(int udp_gso)
+{
+    return udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500;
+}
+
+/* Teardown TX-offload telemetry line, emitted by mqvpn_client_destroy and
+ * mqvpn_server_destroy. ONE format definition so the two endpoints'
+ * script-parsed wording (benchmarks/bench_stream_gso.sh,
+ * scripts/ci_e2e/run_udp_gso_bench.sh, run_udp_gso_config_test.sh's
+ * check_teardown_line) cannot drift — same hazard class the
+ * MQVPN_UDP_GSO_MARKER_* strings solve for the enablement marker.
+ * Callers pass (sends, datagrams, gso_config) as PRIu64/PRIu64/int and
+ * must include <inttypes.h>. */
+#define MQVPN_UDP_TX_LINE_FMT \
+    "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d"
+
 /* Server "auto" TUN MTU.  The true MASQUE datagram MSS is per-connection
  * (peer TPs, CID length, FEC headroom, PMTUD) and unknowable at server
  * startup, so "auto" uses the typical negotiated value on a 1500-MTU path
- * with default engine settings (max_pkt_out_size 1400 − QUIC short header
+ * with default engine settings (MQVPN_MAX_PKT_OUT_SIZE − QUIC short header
  * − DATAGRAM/MASQUE headers = 1382).  Clients that negotiated less are
  * handled per-client via ICMP PTB in mqvpn_server_on_tun_packet(), so a
  * high default is safe. */
@@ -104,6 +140,8 @@ struct mqvpn_config_s {
     mqvpn_hybrid_config_t hybrid;
 
     uint64_t recv_rate_limit; /* 0 = off; client-only, see libmqvpn.h */
+
+    int udp_gso; /* TX GSO/batch enable; default 1 */
 };
 
 /* ─── State transition validation (M0-5) ─── */
