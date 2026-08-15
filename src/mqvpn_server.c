@@ -2095,9 +2095,14 @@ mqvpn_server_set_socket_fd(mqvpn_server_t *s, int fd, const struct sockaddr *loc
                            socklen_t local_addrlen)
 {
     if (!s || fd < 0) return MQVPN_ERR_INVALID_ARG;
+    /* Validate before mutating any state. Reject (not clamp) an oversized
+     * addrlen: clamping still lets memcpy over-read the caller's real
+     * sockaddr object, and every legitimate sockaddr fits in
+     * sockaddr_storage, so an oversized length is always a caller bug.
+     * Mirrors mqvpn_client_set_server_addr. */
+    if (local_addr && local_addrlen > sizeof(s->local_addr)) return MQVPN_ERR_INVALID_ARG;
     s->udp_fd = fd;
     if (local_addr && local_addrlen > 0) {
-        if (local_addrlen > sizeof(s->local_addr)) local_addrlen = sizeof(s->local_addr);
         memcpy(&s->local_addr, local_addr, local_addrlen);
         s->local_addrlen = local_addrlen;
     }
