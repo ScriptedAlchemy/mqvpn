@@ -27,7 +27,9 @@ targets:
         excludes: ["*.c"]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.mp0rta.mqvpnpoc
+        CODE_SIGN_STYLE: Manual
+        PRODUCT_BUNDLE_IDENTIFIER: com.zackjackson.mqvpn
+        PROVISIONING_PROFILE_SPECIFIER: mqvpn iPhone Development
     entitlements:
       path: App.entitlements
       properties:
@@ -55,7 +57,9 @@ targets:
         excludes: ["clock_shim_host_test.c"]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.mp0rta.mqvpnpoc.PacketTunnel
+        CODE_SIGN_STYLE: Manual
+        PRODUCT_BUNDLE_IDENTIFIER: com.zackjackson.mqvpn.PacketTunnel
+        PROVISIONING_PROFILE_SPECIFIER: mqvpn PacketTunnel Development
         SWIFT_OBJC_BRIDGING_HEADER: PacketTunnel/BridgingHeader.h
         OTHER_LDFLAGS: "-lmqvpn -llwip_core -lxquic-static -lssl -lcrypto -lc++"
     entitlements:
