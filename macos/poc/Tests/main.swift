@@ -542,6 +542,9 @@ check(state.receive(beforeAttach, nowMs: 104) == .drop(.messageType),
       "DATA_TO_MAC cannot reach the core before logical-path registration")
 check(state.attachLogicalPath(44) && state.snapshot.active && state.snapshot.pathHandle == 44,
       "relay becomes active only after the engine accepts its callback path")
+check(!state.shouldProbeActiveRelay(nowMs: 5_099) &&
+      state.shouldProbeActiveRelay(nowMs: 5_100),
+      "an active relay asks the core for a QUIC path probe every five seconds")
 check(state.encode(type: MQVPN_RELAY_DATA_TO_SERVER,
                    payload: Data(count: 1452),
                    nowMs: 104) != nil &&

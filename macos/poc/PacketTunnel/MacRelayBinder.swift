@@ -153,8 +153,11 @@ final class MacRelayBinder {
                 // the physical socket and immediately negotiate a fresh session.
                 removeEnginePath(expiredHandle)
                 startFreshSession()
-            } else if state.shouldRetryHello(nowMs: now) || state.shouldProbeActiveRelay(nowMs: now) {
+            } else if state.shouldRetryHello(nowMs: now) {
                 _ = sendFrame(type: MQVPN_RELAY_HELLO, payload: Data(), nowMs: now)
+            } else if state.shouldProbeActiveRelay(nowMs: now) {
+                _ = sendFrame(type: MQVPN_RELAY_HELLO, payload: Data(), nowMs: now)
+                _ = engine.perform { [engine] in _ = engine.probePaths() }
             }
         }
         publishSnapshot()

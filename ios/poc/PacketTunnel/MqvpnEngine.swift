@@ -276,6 +276,16 @@ final class MqvpnEngine: NSObject {
         guard let c = client else { return }
         mqvpn_client_remove_path(c, handle)
     }
+
+    /// Tick-thread-only. xquic replicates this PING across all active paths
+    /// when multipath is enabled, keeping a lightly scheduled relay path live.
+    @discardableResult
+    func probePaths() -> Int32 {
+        guard let c = client else { return Int32(MQVPN_ERR_INVALID_STATE.rawValue) }
+        let rc = mqvpn_client_probe_paths(c)
+        scheduleTick(afterMs: 0)
+        return rc
+    }
     func fdClosed(_ handle: mqvpn_path_handle_t) {
         guard let c = client else { return }
         mqvpn_client_on_platform_fd_closed(c, handle)

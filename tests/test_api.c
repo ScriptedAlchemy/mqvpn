@@ -1166,6 +1166,16 @@ TEST(client_remove_path)
     mqvpn_client_destroy(c);
 }
 
+TEST(client_probe_paths_fails_closed)
+{
+    ASSERT_EQ(mqvpn_client_probe_paths(NULL), MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(mqvpn_client_probe_paths(c), MQVPN_ERR_INVALID_STATE);
+    mqvpn_client_destroy(c);
+}
+
 TEST(client_add_path_max)
 {
     mqvpn_client_t *c = make_test_client();
@@ -3236,6 +3246,7 @@ main(void)
     run_path_stats_after_recv();
     run_get_paths_null_safety();
     run_client_remove_path();
+    run_client_probe_paths_fails_closed();
     run_client_add_path_max();
     run_callback_path_without_send_callback_is_rejected();
     run_callback_path_with_result_callback_sends_and_accounts_once();

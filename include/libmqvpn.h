@@ -704,6 +704,13 @@ MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd_with_outcome(
 
 MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
 
+/* Queue one QUIC PING. With multipath enabled, xquic's mp_ping_on setting
+ * replicates it across every active path, preventing a healthy but lightly
+ * scheduled path from expiring. Call from the client's tick thread.
+ * Returns MQVPN_OK, MQVPN_ERR_INVALID_ARG, MQVPN_ERR_INVALID_STATE, or
+ * MQVPN_ERR_ENGINE. */
+MQVPN_API int mqvpn_client_probe_paths(mqvpn_client_t *client);
+
 /*
  * Drop a path slot on platform-detected removal (carrier loss, RTM_DELLINK,
  * address loss). Moves the slot to the CLOSED_DROPPED cleanup state and emits

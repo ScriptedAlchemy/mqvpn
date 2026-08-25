@@ -3393,6 +3393,18 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 }
 
 int
+mqvpn_client_probe_paths(mqvpn_client_t *c)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    ASSERT_TICK_THREAD(c);
+    if (!c->engine || !c->conn || c->state != MQVPN_STATE_ESTABLISHED)
+        return MQVPN_ERR_INVALID_STATE;
+    return xqc_conn_send_ping(c->engine, &c->conn->cid, NULL) == XQC_OK
+               ? MQVPN_OK
+               : MQVPN_ERR_ENGINE;
+}
+
+int
 mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
 {
     /* PR5: thin wrapper of mqvpn_client_on_platform_path_dropped() with
