@@ -9,6 +9,10 @@ struct MacRelayRuntimeSnapshot: Equatable {
     let active: Bool
     let sessionID: UInt64?
     let pathHandle: mqvpn_path_handle_t?
+    let sendAttempts: UInt64
+    let sendAgain: UInt64
+    let sendFailures: UInt64
+    let helloAttempts: UInt64
     let helloSent: UInt64
     let rawReceived: UInt64
     let authAccepted: UInt64
@@ -22,6 +26,7 @@ struct MacRelayRuntimeSnapshot: Equatable {
 
     static let stopped = MacRelayRuntimeSnapshot(
         started: false, active: false, sessionID: nil, pathHandle: nil,
+        sendAttempts: 0, sendAgain: 0, sendFailures: 0, helloAttempts: 0,
         helloSent: 0, rawReceived: 0, authAccepted: 0, authRejected: 0,
         ackReceived: 0, lanTxBytes: 0, lanRxBytes: 0, dataToMacBytes: 0,
         hardFailures: 0, lastError: nil)
@@ -70,6 +75,10 @@ struct MacRelayRuntimeState {
     private var lastProbeMs: UInt64?
     private var lastFailureMs: UInt64?
     private var hardFailure = false
+    private var sendAttempts: UInt64 = 0
+    private var sendAgain: UInt64 = 0
+    private var sendFailures: UInt64 = 0
+    private var helloAttempts: UInt64 = 0
     private var helloSent: UInt64 = 0
     private var rawReceived: UInt64 = 0
     private var authAccepted: UInt64 = 0
@@ -91,7 +100,9 @@ struct MacRelayRuntimeState {
     var snapshot: MacRelayRuntimeSnapshot {
         MacRelayRuntimeSnapshot(
             started: started, active: active, sessionID: sessionID,
-            pathHandle: pathHandle, helloSent: helloSent, rawReceived: rawReceived,
+            pathHandle: pathHandle, sendAttempts: sendAttempts, sendAgain: sendAgain,
+            sendFailures: sendFailures, helloAttempts: helloAttempts,
+            helloSent: helloSent, rawReceived: rawReceived,
             authAccepted: authAccepted, authRejected: authRejected,
             ackReceived: ackReceived, lanTxBytes: lanTxBytes, lanRxBytes: lanRxBytes,
             dataToMacBytes: dataToMacBytes, hardFailures: hardFailures,
@@ -141,13 +152,31 @@ struct MacRelayRuntimeState {
             return nil
         }
         txSequence &+= 1
+        sendAttempts &+= 1
         if type == MQVPN_RELAY_HELLO {
-            helloSent &+= 1
+            helloAttempts &+= 1
             lastHelloMs = nowMs
             lastProbeMs = nowMs
         }
-        lanTxBytes &+= UInt64(datagramLength)
         return Data(datagram.prefix(datagramLength))
+    }
+
+    /// Records the kernel boundary after `send` has written the entire frame.
+    /// Encoding is an attempt only: byte counters must not claim that a packet
+    /// crossed the LAN when the socket returned EAGAIN or a hard error.
+    mutating func recordSuccessfulSend(type: mqvpn_relay_message_type_t,
+                                       datagramLength: Int) {
+        guard datagramLength > 0 else { return }
+        lanTxBytes &+= UInt64(datagramLength)
+        if type == MQVPN_RELAY_HELLO { helloSent &+= 1 }
+    }
+
+    mutating func recordSendAgain() {
+        sendAgain &+= 1
+    }
+
+    mutating func recordSendFailure() {
+        sendFailures &+= 1
     }
 
     mutating func receive(_ datagram: Data, nowMs: UInt64) -> MacRelayInboundAction {

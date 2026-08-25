@@ -18,12 +18,15 @@ final class MacRelayBinder {
     private let serverPeer: ResolvedServerAddress
     private let interfaceName: String
     private let queue = DispatchQueue(label: "mqvpn.mac.relay")
+    private let lifecycleLock = NSLock()
     private var state: MacRelayRuntimeState
     private var fd: Int32 = -1
     private var transportGeneration: UInt64 = 0
     private var readSource: DispatchSourceRead?
     private var timer: DispatchSourceTimer?
     private var stopped = true
+    private var stopCompleted = false
+    private var acceptsCoreSends = false
 
     /// Called on the binder's serial queue. Consumers should copy the value;
     /// snapshots contain counters/errors, never the relay key or payloads.
@@ -58,8 +61,9 @@ final class MacRelayBinder {
 
     func start() {
         queue.async { [weak self] in
-            guard let self, self.stopped else { return }
+            guard let self, self.stopped, !self.stopCompleted else { return }
             self.stopped = false
+            self.setCoreSendsEnabled(true)
             self.startTimer()
             guard self.openTransport() else {
                 self.recordSocketFailure("open relay socket failed: \(self.errnoMessage())")
@@ -70,27 +74,28 @@ final class MacRelayBinder {
         }
     }
 
-    /// Idempotent and transport-first: the callback path is removed before
-    /// the engine may be shut down, then the descriptor and key state vanish.
-    /// Completion runs only after the LAN source/socket are gone and the key
-    /// state is erased. The provider uses this boundary before it destroys
-    /// its engine, so a stale socket event cannot observe a freed client.
+    /// Idempotent and transport-first. Completion runs on a different queue
+    /// only after the LAN source/socket and key state are gone *and* the
+    /// tick thread has executed both path removal and callback clearing.
     func stop(completion: @escaping () -> Void = {}) {
+        // This must happen before queueing the teardown. A tick-thread callback
+        // that races Stop therefore returns immediately instead of blocking the
+        // binder queue while it waits for its own tick-thread cleanup barrier.
+        setCoreSendsEnabled(false)
         queue.async { [weak self] in
-            guard let self else { completion(); return }
-            guard !self.stopped else { completion(); return }
+            guard let self else { Self.finish(completion); return }
+            guard !self.stopCompleted else { Self.finish(completion); return }
+            self.stopCompleted = true
             self.stopped = true
             self.timer?.cancel()
             self.timer = nil
             let handle = self.state.detachLogicalPath()
-            self.removeEnginePath(handle)
-            _ = self.engine.perform { [engine = self.engine] in
-                engine.onLogicalPathSend = nil
-            }
             self.closeTransport()
             self.state.stop()
             self.publishSnapshot()
-            completion()
+            self.clearEngineRelayHooks(pathHandle: handle) {
+                Self.finish(completion)
+            }
         }
     }
 
@@ -240,7 +245,7 @@ final class MacRelayBinder {
                 }
             }
             let (handle, outcome) = engine.addLogicalPath(desc: &desc)
-            guard handle >= 0, outcome != MQVPN_ADD_PATH_PERMANENT_FAIL else {
+            guard handle >= 0, outcome == MQVPN_ADD_PATH_OK else {
                 if handle >= 0 { engine.removePath(handle) }
                 self.queue.async {
                     self.state.hardSocketFailure(nowMs: self.nowMs(),
@@ -276,8 +281,10 @@ final class MacRelayBinder {
     }
 
     private func sendFromCore(path: mqvpn_path_handle_t, packet: Data) -> Int {
+        guard coreSendsEnabled else { return -Int(ENODEV) }
         return queue.sync { () -> Int in
-            guard !stopped, state.snapshot.pathHandle == path, state.snapshot.active else {
+            guard coreSendsEnabled, !stopped, state.snapshot.pathHandle == path,
+                  state.snapshot.active else {
                 return -Int(ENODEV)
             }
             let result = sendFrame(type: MQVPN_RELAY_DATA_TO_SERVER, payload: packet, nowMs: nowMs())
@@ -302,16 +309,29 @@ final class MacRelayBinder {
 
     private func sendFrame(type: mqvpn_relay_message_type_t, payload: Data,
                            nowMs: UInt64) -> SendResult {
-        guard let datagram = state.encode(type: type, payload: payload, nowMs: nowMs), fd >= 0 else {
-            recordSocketFailure("relay encode or socket state failed")
+        guard fd >= 0 else {
+            state.recordSendFailure()
+            recordSocketFailure("relay socket is unavailable")
+            return .failed(Int(EIO))
+        }
+        guard let datagram = state.encode(type: type, payload: payload, nowMs: nowMs) else {
+            state.recordSendFailure()
+            recordSocketFailure("relay frame encoding failed")
             return .failed(Int(EIO))
         }
         let sent = datagram.withUnsafeBytes {
             Darwin.send(fd, $0.baseAddress, datagram.count, 0)
         }
-        if sent == datagram.count { return .sent }
-        if sent < 0, errno == EAGAIN || errno == EWOULDBLOCK { return .again }
+        if sent == datagram.count {
+            state.recordSuccessfulSend(type: type, datagramLength: datagram.count)
+            return .sent
+        }
+        if sent < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+            state.recordSendAgain()
+            return .again
+        }
         let code = sent < 0 ? errno : EIO
+        state.recordSendFailure()
         recordSocketFailure("relay send failed: \(String(cString: strerror(code)))")
         return .failed(Int(code))
     }
@@ -327,6 +347,46 @@ final class MacRelayBinder {
     private func removeEnginePath(_ handle: mqvpn_path_handle_t?) {
         guard let handle else { return }
         _ = engine.perform { [engine] in engine.removePath(handle) }
+    }
+
+    /// Runs on the binder queue. The lifecycle gate above prevents a new
+    /// callback from queue-syncing behind this wait, while any callback that
+    /// was already in the queue completes before this task begins. That makes
+    /// the semaphore a real tick-thread teardown barrier without deadlock.
+    private func clearEngineRelayHooks(pathHandle: mqvpn_path_handle_t?,
+                                       completion: @escaping () -> Void) {
+        let complete = DispatchSemaphore(value: 0)
+        let queued = engine.perform { [engine] in
+            if let pathHandle { engine.removePath(pathHandle) }
+            engine.onLogicalPathSend = nil
+            complete.signal()
+        }
+        guard queued else {
+            // No tick thread exists (for example Stop before engine.start).
+            // The callback has not been observed by a client and can be
+            // cleared directly; no success is fabricated.
+            engine.onLogicalPathSend = nil
+            completion()
+            return
+        }
+        complete.wait()
+        completion()
+    }
+
+    private var coreSendsEnabled: Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return acceptsCoreSends
+    }
+
+    private func setCoreSendsEnabled(_ enabled: Bool) {
+        lifecycleLock.lock()
+        acceptsCoreSends = enabled
+        lifecycleLock.unlock()
+    }
+
+    private static func finish(_ completion: @escaping () -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async(execute: completion)
     }
 
     private func publishSnapshot() {

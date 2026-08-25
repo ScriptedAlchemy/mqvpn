@@ -23,8 +23,21 @@ var state = MacRelayRuntimeState(key: key, idleTimeoutMs: 15_000)
 check(state.beginSession(sessionID: session, nowMs: 100) == .started,
       "a fresh nonzero session starts")
 let hello = state.encode(type: MQVPN_RELAY_HELLO, payload: Data(), nowMs: 100)
-check(hello != nil && state.snapshot.helloSent == 1 && !state.snapshot.active,
-      "initial HELLO uses the shared codec but does not activate the relay")
+check(hello != nil && state.snapshot.helloAttempts == 1 && state.snapshot.helloSent == 0 &&
+      state.snapshot.lanTxBytes == 0 && !state.snapshot.active,
+      "encoding a HELLO records an attempt but never claims a kernel send")
+state.recordSendAgain()
+check(state.snapshot.sendAgain == 1 && state.snapshot.helloSent == 0 &&
+      state.snapshot.lanTxBytes == 0,
+      "EAGAIN is surfaced separately and does not inflate byte counters")
+state.recordSuccessfulSend(type: MQVPN_RELAY_HELLO, datagramLength: hello!.count)
+check(state.snapshot.helloSent == 1 && state.snapshot.lanTxBytes == UInt64(hello!.count),
+      "only a full socket send contributes HELLO and LAN byte counters")
+let attemptedData = state.encode(type: MQVPN_RELAY_DATA_TO_SERVER, payload: Data([1]), nowMs: 101)
+state.recordSendFailure()
+check(attemptedData != nil && state.snapshot.sendAttempts == 2 &&
+      state.snapshot.sendFailures == 1 && state.snapshot.lanTxBytes == UInt64(hello!.count),
+      "hard send failure remains distinct from a successful encoded datagram")
 check(state.shouldRetryHello(nowMs: 1_099) == false &&
       state.shouldRetryHello(nowMs: 1_100),
       "unacknowledged HELLO is retried after one second")
@@ -119,6 +132,141 @@ check(MacRelayTransportGeneration.accepts(capturedGeneration: 7, currentGenerati
 state.stop()
 check(state.snapshot == .stopped && !state.canEncode,
       "Stop clears active/session/replay state and erases the relay key")
+
+// ── Real UDP binder lifecycle ──
+// This is intentionally a real localhost UDP peer, not a socket mock. The
+// production binder binds lo0, sends its C-codec HELLO, receives a separately
+// C-codec-authenticated ACK, registers a real logical core path, and then
+// proves that Stop's completion observes engine-hook removal and key erasure.
+func loopbackListener() -> (fd: Int32, port: Int)? {
+    let fd = socket(AF_INET, SOCK_DGRAM, 0)
+    guard fd >= 0 else { return nil }
+    var address = sockaddr_in()
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = 0
+    guard inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1 else {
+        close(fd); return nil
+    }
+    let bound = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    guard bound == 0 else { close(fd); return nil }
+    var actual = sockaddr_in()
+    var actualLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let named = withUnsafeMutablePointer(to: &actual) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            getsockname(fd, $0, &actualLength)
+        }
+    }
+    guard named == 0 else { close(fd); return nil }
+    return (fd, Int(UInt16(bigEndian: actual.sin_port)))
+}
+
+func waitUntil(_ predicate: @escaping () -> Bool, timeout: TimeInterval = 3) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if predicate() { return true }
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    return predicate()
+}
+
+if let listener = loopbackListener(),
+   let relayAddress = resolveServer("127.0.0.1", listener.port),
+   let serverAddress = resolveServer("127.0.0.1", listener.port) {
+    let peerQueue = DispatchQueue(label: "mqvpn.mac.relay.hosttest.peer")
+    var phoneSequence: UInt64 = 1
+    let peerSource = DispatchSource.makeReadSource(fileDescriptor: listener.fd, queue: peerQueue)
+    peerSource.setEventHandler {
+        var bytes = [UInt8](repeating: 0,
+                             count: Int(MQVPN_RELAY_HEADER_SIZE + MQVPN_RELAY_MAX_PAYLOAD_SIZE +
+                                        MQVPN_RELAY_TAG_SIZE))
+        var peer = sockaddr_storage()
+        var peerLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let count = withUnsafeMutablePointer(to: &peer) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                recvfrom(listener.fd, &bytes, bytes.count, 0, $0, &peerLength)
+            }
+        }
+        guard count > 0 else { return }
+        var frame = mqvpn_relay_frame_t()
+        let decoded = key.withUnsafeBytes { keyBytes in
+            mqvpn_relay_decode(keyBytes.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                                bytes, Int(count), MQVPN_RELAY_MAC_TO_IPHONE,
+                                nil, &frame)
+        }
+        guard decoded == MQVPN_RELAY_OK, frame.type == MQVPN_RELAY_HELLO else { return }
+        var ack = [UInt8](repeating: 0,
+                          count: Int(MQVPN_RELAY_HEADER_SIZE + MQVPN_RELAY_MAX_PAYLOAD_SIZE +
+                                     MQVPN_RELAY_TAG_SIZE))
+        var ackLength = 0
+        let encoded = key.withUnsafeBytes { keyBytes in
+            mqvpn_relay_encode(keyBytes.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                                MQVPN_RELAY_HELLO_ACK, MQVPN_RELAY_IPHONE_TO_MAC,
+                                frame.session_id, phoneSequence, nil, 0,
+                                &ack, ack.count, &ackLength)
+        }
+        guard encoded == MQVPN_RELAY_OK else { return }
+        phoneSequence &+= 1
+        _ = withUnsafePointer(to: &peer) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                sendto(listener.fd, ack, ackLength, 0, $0, peerLength)
+            }
+        }
+    }
+    peerSource.setCancelHandler { close(listener.fd) }
+    peerSource.resume()
+
+    let beforeStartEngine = MqvpnEngine()
+    let beforeStartBinder = MacRelayBinder(engine: beforeStartEngine,
+                                           relayEndpoint: relayAddress,
+                                           serverPeer: serverAddress,
+                                           interfaceName: "lo0", relayKey: key,
+                                           localIPv4Addresses: [])!
+    let beforeStartStop = DispatchSemaphore(value: 0)
+    beforeStartBinder.stop {
+        check(beforeStartBinder.snapshot() == .stopped && beforeStartEngine.onLogicalPathSend == nil,
+              "stop-before-start erases the key state and clears the engine callback")
+        beforeStartStop.signal()
+    }
+    check(beforeStartStop.wait(timeout: .now() + 2) == .success,
+          "stop-before-start supplies a real completion boundary")
+
+    let liveEngine = MqvpnEngine()
+    let liveServer = ServerSettings(host: "127.0.0.1", port: listener.port,
+                                    serverName: "", authKey: "host-test", insecure: true)
+    liveEngine.start(server: liveServer, serverAddr: serverAddress)
+    let liveBinder = MacRelayBinder(engine: liveEngine, relayEndpoint: relayAddress,
+                                    serverPeer: serverAddress, interfaceName: "lo0",
+                                    relayKey: key, localIPv4Addresses: [])!
+    liveBinder.start()
+    check(waitUntil({ liveBinder.snapshot().active }),
+          "real interface-bound UDP HELLO/ACK activates the logical relay path")
+    let activeSnapshot = liveBinder.snapshot()
+    check(activeSnapshot.helloSent >= 1 && activeSnapshot.lanTxBytes > 0 &&
+          activeSnapshot.ackReceived >= 1,
+          "real full UDP send, ACK, and non-secret counters agree")
+    let liveStop = DispatchSemaphore(value: 0)
+    liveBinder.stop {
+        check(liveBinder.snapshot() == .stopped && liveEngine.onLogicalPathSend == nil,
+              "Stop completion runs after state erasure and tick-thread hook cleanup")
+        liveStop.signal()
+    }
+    check(liveStop.wait(timeout: .now() + 3) == .success,
+          "active relay Stop waits for tick-thread teardown completion")
+    let engineStop = DispatchSemaphore(value: 0)
+    _ = liveEngine.perform {
+        liveEngine.shutdown()
+        engineStop.signal()
+    }
+    check(engineStop.wait(timeout: .now() + 2) == .success,
+          "engine remains safe to shut down after relay completion")
+    peerSource.cancel()
+} else {
+    check(false, "real UDP relay lifecycle fixture binds a loopback listener")
+}
 
 if failures != 0 {
     print("macOS relay host tests: \(failures) failure(s)")
