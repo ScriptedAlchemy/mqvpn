@@ -193,6 +193,8 @@ endif()
 if(NOT BORINGSSL_BUILD_DIR)
     set(BORINGSSL_BUILD_DIR "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/build")
 endif()
+set(BORINGSSL_INCLUDE_DIR
+    "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/include")
 if(ANDROID_CROSS_COMPILE)
     # find_library doesn't work for cross-compile targets; set paths directly
     if(EXISTS "${BORINGSSL_BUILD_DIR}/ssl/libssl.a")
@@ -225,6 +227,7 @@ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 
 # ---------- libmqvpn source files (shared between static and shared targets) ----------
 set(MQVPN_LIB_SOURCES
+    src/relay_protocol.c
     src/mqvpn_config.c
     src/mqvpn_client.c
     src/udp_offload.c
@@ -403,6 +406,7 @@ endif()
 target_include_directories(mqvpn_lib
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
+            ${BORINGSSL_INCLUDE_DIR}
 )
 if(ANDROID_CROSS_COMPILE)
     # Android NDK: pthread is in libc, no separate -lpthread
@@ -572,6 +576,7 @@ set_target_properties(mqvpn_shared PROPERTIES
 target_include_directories(mqvpn_shared
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
+            ${BORINGSSL_INCLUDE_DIR}
 )
 # Shared lib links shared xquic, same as Linux (static .a is unusable there
 # for -fPIC reasons; kept symmetric here even though clang on Darwin emits
@@ -690,6 +695,14 @@ if(BUILD_TESTING)
     set_target_properties(test_api PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_api COMMAND test_api)
+
+    add_executable(test_relay_protocol tests/test_relay_protocol.c)
+    target_link_libraries(test_relay_protocol mqvpn_lib ${CRYPTO_LIB} c++)
+    target_include_directories(test_relay_protocol PRIVATE
+        ${CMAKE_SOURCE_DIR}/include)
+    set_target_properties(test_relay_protocol PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_relay_protocol COMMAND test_relay_protocol)
 endif()
 
 else() # NOT WIN32, NOT APPLE — Linux
@@ -707,6 +720,7 @@ set_target_properties(mqvpn_shared PROPERTIES
 target_include_directories(mqvpn_shared
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
+            ${BORINGSSL_INCLUDE_DIR}
 )
 # Shared lib needs shared xquic (static .a lacks -fPIC)
 target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
@@ -931,6 +945,14 @@ if(BUILD_TESTING)
     set_target_properties(test_api PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_api COMMAND test_api)
 
+    add_executable(test_relay_protocol tests/test_relay_protocol.c)
+    target_link_libraries(test_relay_protocol mqvpn_lib ${CRYPTO_LIB} stdc++)
+    target_include_directories(test_relay_protocol PRIVATE
+        ${CMAKE_SOURCE_DIR}/include)
+    set_target_properties(test_relay_protocol PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_relay_protocol COMMAND test_relay_protocol)
+
     # Server API test (links libmqvpn + xquic)
     add_executable(test_server tests/test_server.c)
     target_link_libraries(test_server mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
@@ -1047,6 +1069,7 @@ if(XQUIC_BUILD_DIR)
     install(FILES ${_XQUIC_BUILD_ABS}/libxquic.so DESTINATION lib)
 endif()
 install(FILES include/libmqvpn.h DESTINATION include)
+install(FILES include/mqvpn/relay_protocol.h DESTINATION include/mqvpn)
 configure_file(systemd/mqvpn-server.service.in
     ${CMAKE_BINARY_DIR}/systemd/mqvpn-server.service @ONLY)
 configure_file(systemd/mqvpn-client@.service.in
