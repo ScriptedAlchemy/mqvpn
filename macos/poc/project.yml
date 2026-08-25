@@ -1,0 +1,102 @@
+name: MqvpnMac
+options:
+  deploymentTarget:
+    macOS: "13.0"
+configFiles:
+  Debug: Config.xcconfig
+  Release: Config.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    ARCHS: arm64
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../build"
+    HEADER_SEARCH_PATHS: "$(SRCROOT)/../../include $(SRCROOT)/../../src $(SRCROOT)/../../ios/poc/Shared $(SRCROOT)/Shared"
+schemes:
+  MqvpnMac:
+    build:
+      targets:
+        MqvpnMac: all
+targets:
+  MqvpnMac:
+    type: application
+    platform: macOS
+    sources:
+      - App
+      - path: Shared
+        excludes:
+          - "*.c"
+          - MacRelayRuntimeState.swift
+      - path: ../../ios/poc/Shared
+        includes:
+          - PoCConfig.swift
+          - ServerSettings.swift
+          - ReorderSettings.swift
+          - HybridSettings.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zackjackson.mqvpn.mac
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+        DEVELOPMENT_TEAM: 5NDMQZP6KR
+        ENABLE_APP_SANDBOX: YES
+    entitlements:
+      path: App.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+    dependencies:
+      - target: PacketTunnel
+        embed: true
+      - sdk: NetworkExtension.framework
+    info:
+      path: App/Info.plist
+      properties:
+        LSMinimumSystemVersion: "13.0"
+        NSLocalNetworkUsageDescription: Allow this Mac to send authenticated mqvpn relay datagrams to your iPhone.
+  PacketTunnel:
+    type: app-extension
+    platform: macOS
+    sources:
+      - PacketTunnel
+      - path: Shared
+        excludes: ["*.c"]
+      - path: ../../ios/poc/PacketTunnel
+        includes:
+          - MqvpnEngine.swift
+          - PathBinder.swift
+          - reorder_layout_shim.c
+      - path: ../../ios/poc/Shared
+        includes:
+          - PoCConfig.swift
+          - ServerSettings.swift
+          - ServerResolve.swift
+          - ReorderSettings.swift
+          - HybridSettings.swift
+          - mqvpn_clock_shim.c
+          - mqvpn_clock_shim.h
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zackjackson.mqvpn.mac.PacketTunnel
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+        DEVELOPMENT_TEAM: 5NDMQZP6KR
+        SWIFT_OBJC_BRIDGING_HEADER: PacketTunnel/BridgingHeader.h
+        APPLICATION_EXTENSION_API_ONLY: YES
+        OTHER_LDFLAGS: "-lmqvpn -llwip_core -lxquic-static -lssl -lcrypto -framework Security -framework CoreFoundation -framework Network -framework NetworkExtension -framework SystemConfiguration -lc++"
+    entitlements:
+      path: PacketTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+    info:
+      path: PacketTunnel/Info.plist
+      properties:
+        NSLocalNetworkUsageDescription: Allow this Mac to send authenticated mqvpn relay datagrams to your iPhone.
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider

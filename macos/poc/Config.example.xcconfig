@@ -1,0 +1,3 @@
+// Copy to Config.xcconfig and fill in. Config.xcconfig is gitignored.
+DEVELOPMENT_TEAM = 5NDMQZP6KR
+CODE_SIGN_STYLE = Automatic

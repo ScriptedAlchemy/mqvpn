@@ -1,0 +1,6 @@
+build/
+build-macos/
+poc/*.xcodeproj
+poc/Config.xcconfig
+DerivedData/
+xcuserdata/

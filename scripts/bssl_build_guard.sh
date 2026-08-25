@@ -75,9 +75,10 @@ bssl_hash_cmd() {
 # fail at cmake anyway.
 #
 # Our own build output is excluded, and that exclusion is load-bearing rather
-# than an optimisation: two of the three consumers put the build dir INSIDE the
+# than an optimisation: three of the four consumers put the build dir INSIDE the
 # source dir (build.sh -> boringssl/build, ios/build-ios.sh -> boringssl/
-# build-ios; only scripts/build_android.sh builds out of tree). A digest that
+# build-ios, macos/build-macos.sh -> boringssl/build-macos; only
+# scripts/build_android.sh builds out of tree). A digest that
 # walked into them would be self-invalidating, because the stamp file itself
 # lives in the build dir — bssl_stamp_build_dir would record a digest that
 # stopped being true the instant it was written, so bssl_verify_build_dir
@@ -112,7 +113,7 @@ bssl_source_digest() {
         return 1
     fi
     list="$(cd "$src" && find . -name .git -prune \
-        -o \( -type d \( -path './build' -o -path './build-ios' \) -prune \) \
+        -o \( -type d \( -path './build' -o -path './build-ios' -o -path './build-macos' \) -prune \) \
         -o -type f -print | LC_ALL=C sort)"
     if [ -z "$list" ]; then
         echo "bssl_source_digest: $src has no files (submodule not checked out?)" >&2
