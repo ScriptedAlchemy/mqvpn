@@ -4,8 +4,12 @@
 #include "mqvpn/relay_protocol.h"
 
 #include <errno.h>
+#include <event2/event.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 static int g_pass, g_fail;
 #define CHECK(c, m) do { if (c) g_pass++; else { g_fail++; fprintf(stderr, "FAIL: %s\n", m); } } while (0)
@@ -26,12 +30,32 @@ typedef struct {
     int send_count;
     uint8_t sent[16][MQVPN_RELAY_MAX_DATAGRAM_SIZE];
     size_t sent_length[16];
+    struct event_base *base;
 } fake_t;
 
 static uint64_t fake_now(void *ctx) { return ((fake_t *)ctx)->now_ms; }
 static uint64_t fake_random(void *ctx) { return ((fake_t *)ctx)->next_random++; }
-static int fake_open(void *ctx) { ((fake_t *)ctx)->open_count++; return 7; }
-static void fake_close(void *ctx, int fd) { (void)fd; ((fake_t *)ctx)->close_count++; }
+static int fake_open(void *ctx)
+{
+    fake_t *f = ctx;
+    int raw = socket(AF_INET, SOCK_DGRAM, 0);
+    if (raw < 0) return -1;
+    struct sockaddr_in local = {.sin_family = AF_INET,
+                                .sin_port = 0,
+                                .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    if (bind(raw, (struct sockaddr *)&local, sizeof(local)) < 0) {
+        close(raw);
+        return -1;
+    }
+    int fd = fcntl(raw, F_DUPFD, 100 + f->open_count);
+    close(raw);
+    if (fd >= 0) {
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+        f->open_count++;
+    }
+    return fd;
+}
+static void fake_close(void *ctx, int fd) { close(fd); ((fake_t *)ctx)->close_count++; }
 static ssize_t fake_send(void *ctx, int fd, const uint8_t *data, size_t length)
 {
     (void)fd;
@@ -75,9 +99,11 @@ static darwin_relay_adapter_t *make_adapter(fake_t *f, uint8_t key[32])
 {
     memset(f, 0, sizeof(*f));
     f->next_random = 100;
+    f->base = event_base_new();
     darwin_relay_adapter_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     memcpy(cfg.key, key, 32);
+    cfg.event_base = f->base;
     cfg.endpoint.sin_family = AF_INET;
     cfg.endpoint.sin_port = htons(5443);
     cfg.endpoint.sin_addr.s_addr = htonl(0xc0a801c3u);
@@ -200,12 +226,33 @@ static void test_lifecycle(void)
     f.send_result = -EIO;
     CHECK(darwin_relay_adapter_send_packet(a, 42, quic, sizeof(quic)) == -EIO,
           "hard socket error is preserved");
+    int old_fd = darwin_relay_adapter_fd(a);
     f.send_result = 0;
     darwin_relay_adapter_tick(a);
     CHECK(f.remove_count == 2 && f.removed_handle == 42,
           "hard socket error removes relay path on tick");
+    CHECK(f.open_count == 2 && f.close_count == 1 &&
+              darwin_relay_adapter_fd(a) != old_fd,
+          "hard socket error recreates a fresh connected LAN socket");
 
     darwin_relay_adapter_get_status(a, &status);
+    encode_phone(key, MQVPN_RELAY_HELLO_ACK, status.session_id, 1, NULL, 0, frame,
+                 &frame_len);
+    struct sockaddr_in fresh_addr;
+    socklen_t fresh_len = sizeof(fresh_addr);
+    CHECK(getsockname(darwin_relay_adapter_fd(a), (struct sockaddr *)&fresh_addr,
+                      &fresh_len) == 0,
+          "fresh relay fd has a bound address");
+    int sender = socket(AF_INET, SOCK_DGRAM, 0);
+    CHECK(sendto(sender, frame, frame_len, 0, (struct sockaddr *)&fresh_addr,
+                 fresh_len) == (ssize_t)frame_len,
+          "authenticated ACK sent to recreated socket");
+    event_base_loop(f.base, EVLOOP_ONCE);
+    close(sender);
+    darwin_relay_adapter_get_status(a, &status);
+    CHECK(status.active && f.add_count == 3,
+          "recreated read event authenticates and adds a fresh logical path");
+
     uint64_t failed_session = status.session_id;
     f.now_ms += 16000;
     darwin_relay_adapter_tick(a);
@@ -214,8 +261,9 @@ static void test_lifecycle(void)
           "idle/reconnect creates a fresh authenticated session");
 
     darwin_relay_adapter_stop(a);
-    CHECK(f.close_count == 1, "stop closes LAN socket");
+    CHECK(f.close_count == 2, "stop closes recreated LAN socket");
     darwin_relay_adapter_destroy(a);
+    event_base_free(f.base);
 }
 
 int main(void)

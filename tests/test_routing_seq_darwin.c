@@ -283,6 +283,34 @@ test_relay_route_is_scoped_idempotent_and_owned(fake_cmd_env_t *e)
                 "relay cleanup does not remove server route");
 }
 
+static void
+test_relay_route_add_failure_never_claims_or_deletes_existing_route(fake_cmd_env_t *e)
+{
+    fake_cmd_reset(e);
+    set_route_get_output(e, "   gateway: link#4\n   interface: en0\n");
+    fake_cmd_set_fail_substr("add|-ifscope|en0|192.168.1.195/32");
+
+    platform_ctx_t p;
+    init_ctx(&p);
+    p.relay_enabled = 1;
+    snprintf(p.relay_ip, sizeof(p.relay_ip), "192.168.1.195");
+    snprintf(p.relay_iface, sizeof(p.relay_iface), "en0");
+
+    ASSERT_EQ_INT(darwin_setup_relay_route(&p), -1,
+                  "relay route add failure fails closed");
+    ASSERT_EQ_INT(p.relay_route_configured, 0,
+                  "failed add never claims route ownership");
+    darwin_cleanup_relay_route(&p);
+
+    char log[4096];
+    fake_cmd_read_log(e, log, sizeof(log));
+    ASSERT_TRUE(strstr(log, "change|-ifscope|en0|192.168.1.195/32") == NULL,
+                "relay setup never mutates a pre-existing route");
+    ASSERT_TRUE(strstr(log, "delete|-ifscope|en0|192.168.1.195/32") == NULL,
+                "relay cleanup never deletes an unowned route");
+    fake_cmd_clear_fail();
+}
+
 int
 main(void)
 {
@@ -298,6 +326,7 @@ main(void)
     test_catchall_failure_rollback(&e);
     test_onlink_no_pin(&e);
     test_relay_route_is_scoped_idempotent_and_owned(&e);
+    test_relay_route_add_failure_never_claims_or_deletes_existing_route(&e);
 
     fake_cmd_env_cleanup(&e);
 

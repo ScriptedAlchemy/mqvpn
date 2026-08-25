@@ -681,6 +681,14 @@ if(BUILD_TESTING)
         ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
     add_test(NAME test_config COMMAND test_config)
 
+    add_executable(test_config_relay_nonapple tests/test_config_relay_nonapple.c
+        src/config.c src/log.c)
+    target_compile_definitions(test_config_relay_nonapple PRIVATE
+        MQVPN_CONFIG_FORCE_NONAPPLE)
+    target_include_directories(test_config_relay_nonapple PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+    add_test(NAME test_config_relay_nonapple COMMAND test_config_relay_nonapple)
+
     add_executable(test_conn_settings tests/test_conn_settings.c)
     target_link_libraries(test_conn_settings mqvpn_lib ${XQUIC_LIB} ${SSL_LIB}
                           ${CRYPTO_LIB} c++)

@@ -33,6 +33,7 @@ struct darwin_relay_adapter_s {
     uint64_t tx_sequence;
     uint64_t last_hello_ms;
     uint64_t last_keepalive_ms;
+    uint64_t last_reopen_ms;
     uint64_t last_authenticated_ms;
     uint64_t bytes_to_iphone;
     uint64_t bytes_from_iphone;
@@ -40,6 +41,8 @@ struct darwin_relay_adapter_s {
     struct event *read_event;
     struct event *timer_event;
 };
+
+static void read_cb(evutil_socket_t fd, short events, void *context);
 
 static uint64_t production_now_ms(void *context)
 {
@@ -130,6 +133,7 @@ static uint64_t now_ms(darwin_relay_adapter_t *a)
 static ssize_t send_frame(darwin_relay_adapter_t *a, mqvpn_relay_message_type_t type,
                           const uint8_t *payload, size_t payload_length)
 {
+    if (a->fd < 0) return -ENOTCONN;
     uint8_t datagram[MQVPN_RELAY_MAX_DATAGRAM_SIZE];
     size_t datagram_length = 0;
     if (mqvpn_relay_encode(a->config.key, type, MQVPN_RELAY_MAC_TO_IPHONE,
@@ -152,6 +156,40 @@ static void remove_path(darwin_relay_adapter_t *a)
     a->active = 0;
 }
 
+static void remove_read_event(darwin_relay_adapter_t *a)
+{
+    if (!a->read_event) return;
+    event_del(a->read_event);
+    event_free(a->read_event);
+    a->read_event = NULL;
+}
+
+static void close_transport(darwin_relay_adapter_t *a)
+{
+    remove_read_event(a);
+    if (a->fd >= 0) {
+        a->ops.socket_close(a->ops.context, a->fd);
+        a->fd = -1;
+    }
+}
+
+static int open_transport(darwin_relay_adapter_t *a)
+{
+    int fd = a->ops.socket_open(a->ops.context);
+    if (fd < 0) return -1;
+    a->fd = fd;
+    if (!a->config.event_base) return 0;
+    a->read_event = event_new(a->config.event_base, a->fd, EV_READ | EV_PERSIST,
+                              read_cb, a);
+    if (!a->read_event || event_add(a->read_event, NULL) < 0) {
+        remove_read_event(a);
+        a->ops.socket_close(a->ops.context, a->fd);
+        a->fd = -1;
+        return -1;
+    }
+    return 0;
+}
+
 static void begin_session(darwin_relay_adapter_t *a, uint64_t now)
 {
     remove_path(a);
@@ -163,7 +201,8 @@ static void begin_session(darwin_relay_adapter_t *a, uint64_t now)
     a->last_authenticated_ms = now;
     a->last_keepalive_ms = now;
     a->hard_failure = 0;
-    (void)send_frame(a, MQVPN_RELAY_HELLO, NULL, 0);
+    ssize_t rc = send_frame(a, MQVPN_RELAY_HELLO, NULL, 0);
+    if (rc < 0 && rc != -EAGAIN) a->hard_failure = 1;
     a->last_hello_ms = now;
 }
 
@@ -230,15 +269,15 @@ void darwin_relay_adapter_destroy(darwin_relay_adapter_t *a)
 int darwin_relay_adapter_start(darwin_relay_adapter_t *a)
 {
     if (!a || a->started) return a && a->started ? 0 : -1;
-    a->fd = a->ops.socket_open(a->ops.context);
-    if (a->fd < 0) return -1;
     a->started = 1;
+    if (open_transport(a) < 0) {
+        a->started = 0;
+        return -1;
+    }
     begin_session(a, now_ms(a));
     if (a->config.event_base) {
-        a->read_event = event_new(a->config.event_base, a->fd, EV_READ | EV_PERSIST,
-                                  read_cb, a);
         a->timer_event = evtimer_new(a->config.event_base, timer_cb, a);
-        if (!a->read_event || !a->timer_event || event_add(a->read_event, NULL) < 0) {
+        if (!a->timer_event) {
             darwin_relay_adapter_stop(a);
             return -1;
         }
@@ -252,19 +291,11 @@ void darwin_relay_adapter_stop(darwin_relay_adapter_t *a)
 {
     if (!a) return;
     remove_path(a);
-    if (a->read_event) {
-        event_del(a->read_event);
-        event_free(a->read_event);
-        a->read_event = NULL;
-    }
+    close_transport(a);
     if (a->timer_event) {
         event_del(a->timer_event);
         event_free(a->timer_event);
         a->timer_event = NULL;
-    }
-    if (a->fd >= 0) {
-        a->ops.socket_close(a->ops.context, a->fd);
-        a->fd = -1;
     }
     a->started = 0;
     a->active = 0;
@@ -278,7 +309,16 @@ void darwin_relay_adapter_tick(darwin_relay_adapter_t *a)
 {
     if (!a || !a->started) return;
     uint64_t now = now_ms(a);
-    if (a->hard_failure || now - a->last_authenticated_ms >= RELAY_IDLE_MS) {
+    if (a->hard_failure) {
+        if (a->fd < 0 && now - a->last_reopen_ms < RELAY_HELLO_RETRY_MS) return;
+        remove_path(a);
+        close_transport(a);
+        a->last_reopen_ms = now;
+        if (open_transport(a) < 0) return;
+        begin_session(a, now);
+        return;
+    }
+    if (now - a->last_authenticated_ms >= RELAY_IDLE_MS) {
         begin_session(a, now);
         return;
     }

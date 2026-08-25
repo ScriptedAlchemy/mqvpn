@@ -147,6 +147,7 @@ test_relay_valid_ini(void)
     unlink(cfg_path);
     unlink(key_path);
 
+#ifdef __APPLE__
     ASSERT_EQ_INT(rc, 0, "valid relay config accepted");
     ASSERT_EQ_INT(cfg.relay_enabled, 1, "relay enabled parsed");
     ASSERT_EQ_STR(cfg.relay_endpoint, "192.168.1.195:5443", "relay endpoint parsed");
@@ -154,6 +155,9 @@ test_relay_valid_ini(void)
     ASSERT_EQ_INT(cfg.relay_key_loaded, 1, "relay key loaded");
     for (size_t i = 0; i < sizeof(cfg.relay_key); i++)
         ASSERT_EQ_INT(cfg.relay_key[i], 0, "relay key decoded exactly");
+#else
+    ASSERT_EQ_INT(rc, -1, "enabled relay rejected on non-Apple platform");
+#endif
     free(key_path);
 }
 
@@ -231,11 +235,15 @@ test_relay_valid_json(void)
     unlink(cfg_path);
     unlink(key_path);
 
+#ifdef __APPLE__
     ASSERT_EQ_INT(rc, 0, "valid relay JSON accepted");
     ASSERT_EQ_INT(cfg.relay_enabled, 1, "relay JSON enabled parsed");
     ASSERT_EQ_STR(cfg.relay_endpoint, "10.0.0.4:5443", "relay JSON endpoint parsed");
     ASSERT_EQ_STR(cfg.relay_interface, "en0", "relay JSON interface parsed");
     ASSERT_EQ_INT(cfg.relay_key_loaded, 1, "relay JSON key loaded");
+#else
+    ASSERT_EQ_INT(rc, -1, "enabled relay JSON rejected on non-Apple platform");
+#endif
     free(key_path);
 }
 

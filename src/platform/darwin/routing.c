@@ -382,12 +382,10 @@ darwin_setup_relay_route(platform_ctx_t *p)
     }
     argv[n] = NULL;
 
-    int ok = run_route_cmd(argv) == 0;
-    if (!ok) {
-        argv[2] = "change";
-        ok = run_route_cmd(argv) == 0;
-    }
-    if (!ok) return -1;
+    /* Unlike server pins, never fall back to `change`: add failure may mean
+     * an administrator-owned scoped route already exists. Mutating it and
+     * later deleting it would violate route ownership. Fail closed instead. */
+    if (run_route_cmd(argv) != 0) return -1;
 
     snprintf(p->relay_route_gateway, sizeof(p->relay_route_gateway), "%s", gateway);
     snprintf(p->relay_route_iface, sizeof(p->relay_route_iface), "%s", p->relay_iface);

@@ -1343,7 +1343,7 @@ validate_relay_config(mqvpn_file_config_t *cfg)
         LOG_ERR("config: [Relay] KeyFile is required when relay is enabled");
         return -1;
     }
-#ifdef _WIN32
+#if !defined(__APPLE__) || defined(MQVPN_CONFIG_FORCE_NONAPPLE)
     LOG_ERR("config: [Relay] is supported only by the macOS client");
     return -1;
 #else
