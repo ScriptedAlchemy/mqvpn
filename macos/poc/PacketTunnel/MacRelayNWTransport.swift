@@ -39,6 +39,10 @@ final class MacRelayNWTransport {
     private var onDatagram: ((Data) -> Void)?
     private var onRebind: (() -> Void)?
     private var onFailure: ((String) -> Void)?
+    /// Started at init so its path snapshot is warm by the time a connection
+    /// needs an `NWInterface`. An unstarted monitor's `currentPath` is always
+    /// empty, which is why a synchronous ad-hoc lookup can never work.
+    private let interfaceMonitor = NWPathMonitor()
 
     var isOpen: Bool { connection != nil && !closed }
 
@@ -52,6 +56,7 @@ final class MacRelayNWTransport {
         self.endpoint = endpoint
         self.interfaceName = interfaceName
         self.queue = queue
+        interfaceMonitor.start(queue: queue)
     }
 
     // MARK: - Lifecycle
@@ -72,10 +77,13 @@ final class MacRelayNWTransport {
         // Keeping the same local port across a rebind is a courtesy to the
         // iPhone's peer cache, not a correctness requirement any more.
         parameters.allowLocalEndpointReuse = true
-        if let interface = Self.interface(named: interfaceName) {
+        // The very first start can race the monitor's initial snapshot; the
+        // scoped IPv6 zone and the prohibited-type filter still constrain that
+        // connection, and every rebind after it gets the hard pin.
+        if let interface = interfaceMonitor.currentPath.availableInterfaces
+            .first(where: { $0.name == interfaceName }) {
             parameters.requiredInterface = interface
         } else {
-            // Without an NWInterface the type filter still keeps us off utun.
             nwTransportLog.notice("relay interface \(self.interfaceName, privacy: .public) not yet enumerated")
         }
 
@@ -112,6 +120,7 @@ final class MacRelayNWTransport {
 
     func close() {
         closed = true
+        interfaceMonitor.cancel()
         generation &+= 1
         connection?.cancel()
         connection = nil
@@ -203,12 +212,6 @@ final class MacRelayNWTransport {
     }
 
     // MARK: - Endpoint construction
-
-    static func interface(named name: String) -> NWInterface? {
-        let monitor = NWPathMonitor()
-        defer { monitor.cancel() }
-        return monitor.currentPath.availableInterfaces.first { $0.name == name }
-    }
 
     /// Build a scoped `NWEndpoint` from the resolved sockaddr. IPv6 link-local
     /// relay addresses only route when they carry the LAN interface scope.
