@@ -3,6 +3,7 @@
 
 import Darwin
 import Foundation
+import Network
 
 // The production changes these provider-plan tests catch are: installing a
 // full-tunnel route before server authentication, omitting either physical
@@ -766,6 +767,8 @@ if let listener = loopbackListener(),
     liveBinder.start()
     check(waitUntil({ liveBinder.snapshot().active }),
           "real interface-bound UDP HELLO/ACK activates the logical relay path")
+    check(liveBinder.usesNetworkTransport,
+          "the live relay round trip ran on the Network.framework transport, not the socket fallback")
     let activeSnapshot = liveBinder.snapshot()
     check(activeSnapshot.helloSent >= 1 && activeSnapshot.lanTxBytes > 0 &&
           activeSnapshot.ackReceived >= 1,
@@ -854,6 +857,66 @@ if let listener = loopbackListener(),
 } else {
     check(false, "real UDP relay lifecycle fixture binds a loopback listener")
 }
+
+// --- Network.framework relay transport policy ---
+
+check(MacRelayTransportPolicy.prohibitedInterfaceTypes.contains(.other),
+      "relay transport refuses .other, the interface type Network.framework uses for utun")
+check(MacRelayTransportPolicy.prohibitedInterfaceTypes.contains(.cellular),
+      "relay transport refuses cellular; the Mac hop is the shared LAN")
+check(MacRelayTransportPolicy.isUsableRelayInterface(.wifi) &&
+      MacRelayTransportPolicy.isUsableRelayInterface(.wiredEthernet),
+      "relay transport accepts the two real LAN interface types")
+check(!MacRelayTransportPolicy.isUsableRelayInterface(.other) &&
+      !MacRelayTransportPolicy.isUsableRelayInterface(.loopback),
+      "relay transport rejects virtual and loopback interfaces")
+
+check(!MacRelayTransportPolicy.shouldApplyBackpressure(outstandingBytes: 0, pendingBytes: 1400),
+      "a single datagram never triggers backpressure")
+check(!MacRelayTransportPolicy.shouldApplyBackpressure(
+          outstandingBytes: MacRelayTransportPolicy.sendHighWaterBytes, pendingBytes: 0),
+      "backpressure starts strictly above the high-water mark")
+check(MacRelayTransportPolicy.shouldApplyBackpressure(
+          outstandingBytes: MacRelayTransportPolicy.sendHighWaterBytes, pendingBytes: 1),
+      "one byte past the high-water mark applies backpressure")
+
+check(MacRelayTransportPolicy.errnoValue(for: .posix(.ENETUNREACH)) == ENETUNREACH,
+      "POSIX transport errors keep their errno for the mqvpn core")
+check(MacRelayTransportPolicy.isRecoverableRouteError(.posix(.ENETUNREACH)) &&
+      MacRelayTransportPolicy.isRecoverableRouteError(.posix(.EADDRNOTAVAIL)),
+      "route-scoped errors rebind instead of tearing the session down")
+check(!MacRelayTransportPolicy.isRecoverableRouteError(.posix(.ECONNREFUSED)),
+      "a refused connection is a real failure, not a route refresh")
+
+// The LAN hop may be a scoped IPv6 link-local address; an endpoint that
+// silently dropped the scope would not route.
+var v4 = sockaddr_in()
+v4.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+v4.sin_family = sa_family_t(AF_INET)
+v4.sin_port = UInt16(5443).bigEndian
+v4.sin_addr = in_addr(s_addr: inet_addr("192.168.1.50"))
+var v4Storage = sockaddr_storage()
+withUnsafeMutableBytes(of: &v4Storage) { dst in
+    withUnsafeBytes(of: &v4) { src in
+        dst.copyBytes(from: src.prefix(MemoryLayout<sockaddr_in>.size))
+    }
+}
+let v4Endpoint = MacRelayNWTransport.makeEndpoint(
+    ResolvedServerAddress(storage: v4Storage, len: socklen_t(MemoryLayout<sockaddr_in>.size)),
+    interfaceName: "en1")
+if case let .hostPort(host, port) = v4Endpoint {
+    check(port.rawValue == 5443, "IPv4 relay endpoint keeps its port in host order")
+    check("\(host)".contains("192.168.1.50"), "IPv4 relay endpoint keeps its address")
+} else {
+    check(false, "IPv4 relay endpoint builds a hostPort endpoint")
+}
+
+var unspec = sockaddr_storage()
+unspec.ss_family = sa_family_t(AF_UNSPEC)
+check(MacRelayNWTransport.makeEndpoint(
+          ResolvedServerAddress(storage: unspec, len: socklen_t(MemoryLayout<sockaddr_storage>.size)),
+          interfaceName: "en1") == nil,
+      "an unresolvable address family yields no endpoint instead of a wrong-family connection")
 
 if failures != 0 {
     print("macOS relay host tests: \(failures) failure(s)")

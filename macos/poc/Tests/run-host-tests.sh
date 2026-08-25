@@ -37,12 +37,14 @@ swiftc -o "$OUT" \
     "$IOS/Shared/ProviderMessage.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
+    "$ROOT/macos/poc/Shared/MacRelayTransportPolicy.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
     "$ROOT/macos/poc/Shared/MacRelayDiscovery.swift" \
     "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacLANInterfaceEnumerator.swift" \
+    "$ROOT/macos/poc/PacketTunnel/MacRelayNWTransport.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacRelayBinder.swift" \
     "$TMPD/mqvpn_clock_shim.o" "$TMPD/reorder_layout_shim.o" \
     "$DIR/main.swift" \
@@ -80,6 +82,7 @@ swiftc -typecheck \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$IOS/PacketTunnel/PathBinder.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
+    "$ROOT/macos/poc/Shared/MacRelayTransportPolicy.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
     "$ROOT/macos/poc/Shared/MacRelayDiscovery.swift" \
     "$ROOT/macos/poc/Shared/MacRelayBonjourResolver.swift" \
@@ -87,6 +90,7 @@ swiftc -typecheck \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacLANInterfaceEnumerator.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacRelayLANSession.swift" \
+    "$ROOT/macos/poc/PacketTunnel/MacRelayNWTransport.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacRelayBinder.swift" \
     "$ROOT/macos/poc/PacketTunnel/PacketTunnelProvider.swift" \
     -framework Network -framework NetworkExtension -framework SystemConfiguration \
@@ -108,6 +112,7 @@ swiftc -typecheck \
     "$ROOT/macos/poc/Shared/MacRelayBonjourResolver.swift" \
     "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
+    "$ROOT/macos/poc/Shared/MacRelayTransportPolicy.swift" \
     "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
     "$ROOT/macos/poc/App/TunnelController.swift" \
