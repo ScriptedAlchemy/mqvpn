@@ -3,6 +3,119 @@
 
 import Foundation
 
+// The production changes these provider-plan tests catch are: installing a
+// full-tunnel route before server authentication, omitting either physical
+// endpoint exclusion, applying the wrong address/DNS/MTU, failing to bound an
+// established all-path outage, or reporting Stop before transport teardown.
+let networkPlan = MacProviderNetworkPlan(
+    assignedAddress: "10.77.77.10", assignedPrefix: 24, mtu: 1_382,
+    serverIPv4: "208.69.79.206", relayIPv4: "192.168.1.42")
+check(networkPlan.includedRoutes == [MacIPv4Route(address: "0.0.0.0", prefix: 0)],
+      "the authenticated Mac tunnel includes exactly the IPv4 default route")
+check(networkPlan.excludedRoutes == [
+    MacIPv4Route(address: "208.69.79.206", prefix: 32),
+    MacIPv4Route(address: "192.168.1.42", prefix: 32),
+], "the public server and iPhone LAN peer receive exact /32 exclusions")
+check(networkPlan.assignedAddress == "10.77.77.10" &&
+      networkPlan.subnetMask == "255.255.255.0" && networkPlan.mtu == 1_382 &&
+      networkPlan.dnsServers == ["1.1.1.1", "8.8.8.8"],
+      "the server address, prefix, MTU, and explicit tunnel DNS survive planning")
+let directOnlyPlan = MacProviderNetworkPlan(
+    assignedAddress: "10.77.77.10", assignedPrefix: 24, mtu: 1_382,
+    serverIPv4: "208.69.79.206", relayIPv4: nil)
+check(directOnlyPlan.excludedRoutes == [MacIPv4Route(address: "208.69.79.206", prefix: 32)],
+      "direct-only planning still excludes the public server and never requires a relay")
+let relayKey = Data(repeating: 0x5a, count: 32).base64EncodedString()
+check((try? MacRelaySettings.startConfiguration(from: nil)) == nil &&
+      (try? MacRelaySettings.startConfiguration(from: [:])) == nil,
+      "absent Mac relay keys stay direct-only")
+do {
+    _ = try MacRelaySettings.startConfiguration(from: ["macRelayEnabled": true])
+    check(false, "an enabled but incomplete relay configuration must fail Start")
+} catch {
+    check((error as NSError).code == 20,
+          "an enabled but incomplete relay configuration fails closed")
+}
+let parsedRelay = try? MacRelaySettings.startConfiguration(from: [
+    "macRelayEnabled": true, "macRelayHost": "192.168.1.42",
+    "macRelayPort": 5443, "macRelayKey": relayKey,
+])
+check(parsedRelay?.host == "192.168.1.42" && parsedRelay?.isValid == true,
+      "a complete enabled Mac relay configuration is accepted")
+
+var startupTimeout = MacProviderLifecycle()
+check(startupTimeout.begin(nowMs: 0) == .none && !startupTimeout.settingsRequested,
+      "starting probes does not request Network Extension routes")
+check(startupTimeout.activePathCountChanged(1, nowMs: 100) == .none &&
+      !startupTimeout.settingsRequested,
+      "a locally active path alone cannot install routes before server authentication")
+check(startupTimeout.startupTimerFired(nowMs: 10_000) == .failStart &&
+      !startupTimeout.settingsRequested,
+      "startup expiry fails before any default route was requested")
+
+var lifecycle = MacProviderLifecycle()
+check(lifecycle.begin(nowMs: 0) == .none,
+      "provider startup begins in preflight without applying settings")
+check(lifecycle.tunnelConfigurationReady() == .applyNetworkSettings &&
+      lifecycle.settingsRequested,
+      "real tunnel configuration is the sole settings-install gate")
+check(lifecycle.networkSettingsApplied(error: false) == .completeStart &&
+      lifecycle.isEstablished,
+      "successful Network Extension settings complete Start")
+check(lifecycle.activePathCountChanged(0, nowMs: 1_000) ==
+      .beginRecovery(deadlineMs: 6_000),
+      "all-path loss starts the exact five-second fail-open window")
+check(lifecycle.activePathCountChanged(1, nowMs: 5_999) == .endRecovery &&
+      lifecycle.isEstablished,
+      "a recovered path before the deadline clears reasserting")
+check(lifecycle.activePathCountChanged(0, nowMs: 8_000) ==
+      .beginRecovery(deadlineMs: 13_000) &&
+      lifecycle.recoveryTimerFired(nowMs: 12_999) == .none &&
+      lifecycle.recoveryTimerFired(nowMs: 13_000) == .cancelTunnel,
+      "an unrecovered five-second outage cancels the tunnel")
+
+var failedSettings = MacProviderLifecycle()
+_ = failedSettings.begin(nowMs: 0)
+_ = failedSettings.tunnelConfigurationReady()
+check(failedSettings.networkSettingsApplied(error: true) == .failStart,
+      "a settings failure cannot become a connected VPN")
+
+var stopping = MacProviderLifecycle()
+_ = stopping.begin(nowMs: 0)
+check(stopping.beginStop() == [.relay, .direct, .snapshot, .engine] &&
+      stopping.beginStop().isEmpty,
+      "Stop is idempotent and orders relay before direct, snapshot, and engine")
+
+let snapshotStore = MacProviderSnapshotStore()
+let providerSnapshot = MacProviderSnapshot(
+    timestamp: 123, clientState: 4, connectedSince: 100, footprint: 4_096,
+    reasserting: false, lastError: nil,
+    paths: [MacProviderPathSnapshot(name: "en1", status: 1,
+                                    txBytes: 10, rxBytes: 20)], relay: nil)
+snapshotStore.publish(providerSnapshot)
+check(snapshotStore.read() == providerSnapshot,
+      "the arbitrary app-message thread reads the latest immutable provider snapshot")
+check((try? MacProviderSnapshot.decode(providerSnapshot.encoded())) == providerSnapshot,
+      "the Mac provider snapshot has one round-trippable app-message wire format")
+snapshotStore.clear()
+check(snapshotStore.read() == nil,
+      "Stop clears stale app-facing state instead of presenting a disconnected session as live")
+
+let lanCandidates = [
+    MacLANInterfaceCandidate(name: "en5", kind: .wiredEthernet,
+                             address: "192.168.1.20", netmask: "255.255.255.0"),
+    MacLANInterfaceCandidate(name: "en1", kind: .wifi,
+                             address: "192.168.1.195", netmask: "255.255.255.0"),
+    MacLANInterfaceCandidate(name: "en9", kind: .wifi,
+                             address: "10.0.0.2", netmask: "255.255.255.0"),
+]
+check(MacLANInterfaceSelector.select(relayIPv4: "192.168.1.42",
+                                     candidates: lanCandidates) == "en1",
+      "the live Wi-Fi subnet is preferred over wired Ethernet for iPhone relay LAN traffic")
+check(MacLANInterfaceSelector.select(relayIPv4: "172.16.0.4",
+                                     candidates: lanCandidates) == nil,
+      "relay preflight fails honestly when no live local subnet reaches the iPhone")
+
 var failures = 0
 func check(_ condition: Bool, _ message: String) {
     if !condition {

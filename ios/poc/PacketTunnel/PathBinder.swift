@@ -17,12 +17,19 @@ final class PathBinder {
         var ifname: String
     }
     private let engine: MqvpnEngine
+    private let interfaceTypes: [NWInterface.InterfaceType]
     private var slots: [NWInterface.InterfaceType: PathSlot] = [:]  // tick-thread confined
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
     private var pollTimer: Timer?   // tick-thread confined
     private let monitorQueue = DispatchQueue(label: "mqvpn.poc.pathmon")
 
-    init(engine: MqvpnEngine) { self.engine = engine }
+    init(engine: MqvpnEngine,
+         interfaceTypes: [NWInterface.InterfaceType] = [.wifi, .cellular]) {
+        self.engine = engine
+        self.interfaceTypes = interfaceTypes.reduce(into: []) { ordered, type in
+            if !ordered.contains(type) { ordered.append(type) }
+        }
+    }
 
     func start() {
         // One monitor per interface type: a single default NWPathMonitor only
@@ -40,7 +47,7 @@ final class PathBinder {
         // A handler can fire the instant its monitor starts and hop
         // reconcile() onto the tick thread, which reads `monitors` — the
         // dict must not be concurrently mutated by this loop at that point.
-        for type in [NWInterface.InterfaceType.wifi, .cellular] {
+        for type in interfaceTypes {
             let m = NWPathMonitor(requiredInterfaceType: type)
             m.pathUpdateHandler = { [weak self] _ in
                 guard let self else { return }
@@ -65,19 +72,24 @@ final class PathBinder {
         }
     }
 
-    /// Re-derive add/remove state for the managed interface types, WiFi
-    /// strictly before cellular: probes resolve asynchronously, so the
-    /// cellular probe only starts after the WiFi result was applied. This
-    /// keeps the first registration (and therefore the QUIC primary path)
-    /// deterministically on WiFi at session start. Called on the tick
+    /// Re-derive add/remove state in configured order. Probes resolve
+    /// asynchronously, so each probe only starts after the previous result
+    /// was applied. The iOS default remains WiFi before cellular; macOS passes
+    /// WiFi before wired Ethernet. This keeps first registration (and therefore
+    /// the QUIC primary path) deterministic. Called on the tick
     /// thread from three trigger channels: persistent monitor deliveries,
     /// the provider's NEProvider.defaultPath KVO, and the 1 s poll timer.
     /// Overlapping triggers are safe: results funnel into
     /// addPath/removePath, whose guards make repeats no-ops.
     func reconcile() {
-        guard monitors[.wifi] != nil else { return }   // after stop(): no-op
-        probe(.wifi) { [weak self] in
-            self?.probe(.cellular, then: nil)
+        guard !interfaceTypes.isEmpty, !monitors.isEmpty else { return }
+        reconcile(at: 0)
+    }
+
+    private func reconcile(at index: Int) {
+        guard index < interfaceTypes.count else { return }
+        probe(interfaceTypes[index]) { [weak self] in
+            self?.reconcile(at: index + 1)
         }
     }
 
