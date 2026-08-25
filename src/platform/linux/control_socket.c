@@ -84,7 +84,7 @@
 
 /* ── Per-connection state ────────────────────────────────────────────────── */
 
-typedef struct {
+typedef struct ctrl_conn_s {
     int fd;
     struct event *ev;
     struct event *ev_write;
@@ -95,6 +95,7 @@ typedef struct {
     size_t resp_off;
     uint64_t write_deadline_ms;
     ctrl_socket_t *cs;
+    struct ctrl_conn_s *next;
 } ctrl_conn_t;
 
 /* ── Server handle ───────────────────────────────────────────────────────── */
@@ -109,6 +110,7 @@ struct ctrl_socket_s {
     const uint64_t *gro_receives;
     const uint64_t *gro_datagrams;
     int n_conns; /* active control connections */
+    ctrl_conn_t *conns; /* owned in-flight connections */
 };
 
 /* ── Command dispatch ────────────────────────────────────────────────────── */
@@ -535,9 +537,28 @@ dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
  * count, and free the connection struct. conn->fd is set once in
  * ctrl_on_accept() and never changes, so it always matches the fd the
  * caller's event fired on. */
+static int
+ctrl_conn_unlink(ctrl_socket_t *cs, ctrl_conn_t *conn)
+{
+    ctrl_conn_t **pp = &cs->conns;
+    while (*pp) {
+        if (*pp == conn) {
+            *pp = conn->next;
+            conn->next = NULL;
+            return 1;
+        }
+        pp = &(*pp)->next;
+    }
+    return 0;
+}
+
 static void
 ctrl_conn_close(ctrl_conn_t *conn)
 {
+    ctrl_socket_t *cs = conn->cs;
+    if (cs && ctrl_conn_unlink(cs, conn)) {
+        cs->n_conns--;
+    }
     if (conn->ev) {
         event_del(conn->ev);
         event_free(conn->ev);
@@ -546,8 +567,7 @@ ctrl_conn_close(ctrl_conn_t *conn)
         event_del(conn->ev_write);
         event_free(conn->ev_write);
     }
-    close(conn->fd);
-    conn->cs->n_conns--;
+    if (conn->fd >= 0) close(conn->fd);
     free(conn->resp);
     free(conn);
 }
@@ -752,6 +772,8 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
     }
     struct timeval tv = {.tv_sec = CTRL_READ_TIMEOUT_SEC};
     event_add(conn->ev, &tv);
+    conn->next = cs->conns;
+    cs->conns = conn;
     cs->n_conns++;
 }
 
@@ -786,6 +808,7 @@ ctrl_socket_create(struct event_base *eb, const char *addr, int port,
 
     ctrl_socket_t *cs = calloc(1, sizeof(*cs));
     if (!cs) return NULL;
+    cs->listen_fd = -1;
     cs->eb = eb;
     cs->server = server;
     /* Borrowed, not copied — the platform ctx outlives this socket. */
@@ -866,7 +889,15 @@ ctrl_socket_destroy(ctrl_socket_t *cs)
     if (cs->ev_accept) {
         event_del(cs->ev_accept);
         event_free(cs->ev_accept);
+        cs->ev_accept = NULL;
     }
-    if (cs->listen_fd >= 0) close(cs->listen_fd);
+    if (cs->listen_fd >= 0) {
+        close(cs->listen_fd);
+        cs->listen_fd = -1;
+    }
+    /* Close in-flight clients first so their read/write callbacks cannot
+     * fire against a freed owner. */
+    while (cs->conns)
+        ctrl_conn_close(cs->conns);
     free(cs);
 }

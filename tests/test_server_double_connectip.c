@@ -35,8 +35,8 @@
  * H3 client — built directly on the xquic public API, NOT the mqvpn
  * client, because the mqvpn client API has no way to open a second
  * connect-ip request on an already-tunneled connection. The raw client
- * completes a genuine QUIC+TLS+H3 handshake, then runs four phases on the
- * SAME H3 connection:
+ * completes a genuine QUIC+TLS+H3 handshake, rejects an invalid-PSK preflight,
+ * then runs the tunnel phases on one fresh authenticated H3 connection:
  *
  *   1. Duplicate rejection: request #1 establishes the tunnel, request #2
  *      (a second connect-ip on the same connection) must be rejected.
@@ -71,6 +71,9 @@
  *      id — and asserts the server's tun_output fires exactly ONCE: the
  *      stale-generation datagram must be dropped by cb_dgram_read's qsid
  *      fence, not delivered.
+ *   5. Omitted-header default: after the live re-establishment stream is
+ *      closed, an authenticated CONNECT-IP with no mqvpn-performance
+ *      header must succeed and report throughput.
  *
  * It then routes a TUN packet at the FIRST assigned IP (by now released
  * and not reallocated) through mqvpn_server_on_tun_packet() and destroys
@@ -121,6 +124,7 @@ typedef struct {
 static cli_req_ctx_t g_req0 = {.status = -1}; /* invalid-PSK preflight */
 static cli_req_ctx_t g_req1 = {.status = -1};
 static cli_req_ctx_t g_req2 = {.status = -1};
+static cli_req_ctx_t g_req_omit = {.status = -1}; /* authenticated, header omitted */
 /* Third connect-ip request, sent in the re-establishment phase (§3b) after
  * request #1's stream is closed and its session is eagerly released. */
 static cli_req_ctx_t g_req3 = {.status = -1};
@@ -730,7 +734,7 @@ main(void)
             xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req0);
         if (!req0 ||
             cli_send_connect_ip(req0, ntohs(svr_addr.sin_port), "wrong-test-psk",
-                                MQVPN_PERFORMANCE_THROUGHPUT) != 0) {
+                                MQVPN_PERFORMANCE_LATENCY) != 0) {
             printf("FAIL: send invalid-PSK request\n");
             rc = 1;
         } else {
@@ -744,25 +748,30 @@ main(void)
             };
             pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS,
                        &rejected_auth);
-            int rejected = g_req0.status == 403 ||
-                           (g_req0.status == -1 && g_req0.closed);
-            if (!rejected || mqvpn_server_get_n_clients(svr) != 0 ||
-                g_client_connected_calls != 0) {
-                printf("  invalid PSK: status=%d closed=%d clients=%d "
-                       "connected_calls=%d (expected reject/0/0) FAIL\n",
-                       g_req0.status, g_req0.closed,
-                       mqvpn_server_get_n_clients(svr), g_client_connected_calls);
-                rc = 1;
-            } else {
-                printf("  invalid PSK rejected before tunnel policy (clients=0) PASS\n");
+            {
+                char perf[16] = {0};
+                int n_info = -1;
+                (void)cli_get_live_performance(svr, perf, sizeof(perf), &n_info);
+                if (g_req0.status != 403 || mqvpn_server_get_n_clients(svr) != 0 ||
+                    g_client_connected_calls != 0 || n_info != 0) {
+                    printf("  invalid PSK: status=%d closed=%d clients=%d "
+                           "connected_calls=%d n_info=%d perf=%s "
+                           "(expected 403/0/0/0) FAIL\n",
+                           g_req0.status, g_req0.closed,
+                           mqvpn_server_get_n_clients(svr), g_client_connected_calls,
+                           n_info, perf);
+                    rc = 1;
+                } else {
+                    printf("  invalid PSK 403 before latency policy (clients=0) "
+                           "PASS\n");
+                }
             }
         }
     }
 
     if (rc == 0) {
-        /* The server closes the unauthenticated H3 connection after rejecting
-         * its request. Establish a fresh real connection for the authenticated
-         * duplicate/re-establishment phases below. */
+        /* Use a fresh real connection for the authenticated phases so their
+         * receipts do not depend on the rejected request's stream lifetime. */
         g_handshake_finished = 0;
         const xqc_cid_t *authed_cid =
             xqc_h3_connect(g_cli_engine, &cs, NULL, 0, "mqvpn-test.invalid", 0,
@@ -1140,6 +1149,55 @@ main(void)
                            g_tun_output_calls, g_tun_last_dst[3]);
                     rc = 1;
                 }
+            }
+        }
+    }
+
+    /* 10b. Authenticated CONNECT-IP with the performance header omitted.
+     * Closes the live re-establishment stream first so this is a fresh
+     * success path, not a 409. */
+    if (rc == 0 && req3) {
+        xqc_h3_request_close(req3);
+        pump_cond_ctx_t omit_closed = {
+            .svr = svr,
+            .min_clients = -1,
+            .eq_clients = 0,
+            .req = NULL,
+            .counter = NULL,
+            .counter_target = 0,
+        };
+        pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &omit_closed);
+
+        xqc_h3_request_t *req_omit =
+            xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req_omit);
+        if (!req_omit ||
+            cli_send_connect_ip(req_omit, ntohs(svr_addr.sin_port),
+                                "correct-test-psk", NULL) != 0) {
+            printf("FAIL: send omitted-performance request\n");
+            rc = 1;
+        } else {
+            pump_cond_ctx_t omit_cond = {
+                .svr = svr,
+                .min_clients = 1,
+                .eq_clients = -1,
+                .req = &g_req_omit,
+                .counter = NULL,
+                .counter_target = 0,
+            };
+            pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &omit_cond);
+            char perf[16] = {0};
+            int n_info = -1;
+            int n_omit = mqvpn_server_get_n_clients(svr);
+            if (cli_get_live_performance(svr, perf, sizeof(perf), &n_info) != 0 ||
+                g_req_omit.status != 200 || n_omit != 1 || n_info != 1 ||
+                !perf_is(perf, MQVPN_PERFORMANCE_THROUGHPUT)) {
+                printf("  omitted header: status=%d n=%d n_info=%d perf=%s "
+                       "(expected 200/1/1/throughput) FAIL\n",
+                       g_req_omit.status, n_omit, n_info, perf);
+                rc = 1;
+            } else {
+                printf("  omitted header defaults to throughput                  "
+                       "PASS\n");
             }
         }
     }

@@ -1381,8 +1381,11 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
         if (svr_auth_check(s, hdrs->auth_token, hdrs->auth_token_len, username,
                            sizeof(username)) != 0) {
             LOG_W(s, "authentication failed: invalid or missing PSK");
-            svr_masque_send_403(h3_request);
-            return -1;
+            if (svr_masque_send_403(h3_request) < 0) return -1;
+            /* Deliver the 403 instead of RST-racing the headers. No
+             * session exists yet, so the later CONNECT_IP close is a
+             * release no-op. */
+            return 0;
         }
 
         stream->conn->connected_at_us = now_us();

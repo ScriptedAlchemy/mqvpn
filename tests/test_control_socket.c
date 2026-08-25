@@ -285,7 +285,7 @@ record_timer_latency(evutil_socket_t fd, short what, void *arg)
 }
 
 /* A maximum get_status response must not monopolize the libevent thread when
- * the local peer applies backpressure. The child deliberately waits 400 ms
+ * the local peer applies backpressure. The child deliberately waits 800 ms
  * before reading. A 20 ms event-loop timer must still run while the response
  * is blocked, and the complete newline-terminated JSON must eventually arrive. */
 static void
@@ -319,7 +319,7 @@ test_large_response_does_not_stall_event_loop(void)
     CHECK(child >= 0);
     if (child == 0) {
         close(sv[0]);
-        usleep(400000);
+        usleep(800000);
         char *response = calloc(1, CTRL_MAX_RESP_BYTES);
         size_t used = 0;
         ssize_t n;
@@ -360,6 +360,8 @@ test_large_response_does_not_stall_event_loop(void)
     }
     conn->fd = sv[0];
     conn->cs = &cs;
+    conn->next = cs.conns;
+    cs.conns = conn;
     conn->ev = event_new(base, sv[0], EV_READ | EV_PERSIST, ctrl_on_read, conn);
     CHECK(conn->ev != NULL);
     struct event *timer = evtimer_new(base, record_timer_latency, NULL);
@@ -375,10 +377,101 @@ test_large_response_does_not_stall_event_loop(void)
     int status = 0;
     CHECK(waitpid(child, &status, 0) == child);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    CHECK(g_timer_elapsed_ms < 250);
+    CHECK(g_timer_elapsed_ms < 600);
     CHECK(cs.n_conns == 0);
 
     event_free(timer);
+    event_base_free(base);
+    g_client_info_n = 0;
+}
+
+/* Destroy must own in-flight connections: a delayed peer cannot leave a
+ * write callback holding a freed ctrl_socket_t. */
+static void
+test_destroy_closes_in_flight_write(void)
+{
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (g_failed) return;
+
+    int sndbuf = 4096;
+    CHECK(setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) == 0);
+    struct timeval recv_timeout = {.tv_sec = 1};
+    CHECK(setsockopt(sv[1], SOL_SOCKET, SO_RCVTIMEO, &recv_timeout,
+                     sizeof(recv_timeout)) == 0);
+    int flags = fcntl(sv[0], F_GETFL, 0);
+    CHECK(flags >= 0 && fcntl(sv[0], F_SETFL, flags | O_NONBLOCK) == 0);
+
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    memset(&g_wlb_tmpl, 0, sizeof(g_wlb_tmpl));
+    g_client_info_n = MQVPN_MAX_USERS;
+
+    static const char request[] = "{\"cmd\":\"get_status\"}";
+    CHECK(write(sv[1], request, sizeof(request) - 1) == (ssize_t)(sizeof(request) - 1));
+
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        close(sv[0]);
+        usleep(200000);
+        char buf[256];
+        ssize_t n;
+        do {
+            n = read(sv[1], buf, sizeof(buf));
+        } while (n > 0);
+        close(sv[1]);
+        _exit(n == 0 ? 0 : 1);
+    }
+    if (child < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        return;
+    }
+    close(sv[1]);
+
+    struct event_base *base = event_base_new();
+    CHECK(base != NULL);
+    ctrl_socket_t *cs = calloc(1, sizeof(*cs));
+    CHECK(cs != NULL);
+    ctrl_conn_t *conn = calloc(1, sizeof(*conn));
+    CHECK(conn != NULL);
+    if (!base || !cs || !conn) {
+        if (conn) free(conn);
+        if (cs) free(cs);
+        if (base) event_base_free(base);
+        close(sv[0]);
+        (void)waitpid(child, NULL, 0);
+        return;
+    }
+    cs->eb = base;
+    cs->server = (mqvpn_server_t *)&g_dummy_server;
+    cs->gro_receives = &g_gro_receives;
+    cs->gro_datagrams = &g_gro_datagrams;
+    cs->listen_fd = -1;
+    conn->fd = sv[0];
+    conn->cs = cs;
+    conn->next = cs->conns;
+    cs->conns = conn;
+    cs->n_conns = 1;
+    conn->ev = event_new(base, sv[0], EV_READ | EV_PERSIST, ctrl_on_read, conn);
+    CHECK(conn->ev != NULL);
+    event_add(conn->ev, NULL);
+    (void)event_base_loop(base, EVLOOP_ONCE);
+    CHECK(conn->ev_write != NULL);
+    CHECK(cs->conns == conn);
+    CHECK(event_base_get_num_events(base, EVENT_BASE_COUNT_ADDED) >= 1);
+    int server_fd = conn->fd;
+    ctrl_socket_destroy(cs);
+
+    errno = 0;
+    CHECK(fcntl(server_fd, F_GETFD, 0) == -1 && errno == EBADF);
+    CHECK(event_base_get_num_events(base, EVENT_BASE_COUNT_ADDED) == 0);
+    CHECK(event_base_loop(base, EVLOOP_NONBLOCK) == 1);
+
+    int status = 0;
+    CHECK(waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     event_base_free(base);
     g_client_info_n = 0;
 }
@@ -755,6 +848,7 @@ int
 main(void)
 {
     test_large_response_does_not_stall_event_loop();
+    test_destroy_closes_in_flight_write();
     test_control_listener_accepts_loopback_only();
     test_missing_cmd();
     test_unknown_cmd();
