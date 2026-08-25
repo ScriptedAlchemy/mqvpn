@@ -16,6 +16,15 @@ CONTAINER SECURITY
 - Trusted TLS certificate uses the Proxmox node's Tailscale HTTPS name. Renewal is managed on the host by `mqvpn-ts-cert-renew.timer`.
 - Public UDP 443 still exposes the pre-auth QUIC/TLS parser and a possible DoS surface; private/tunnel access requires the configured authentication key.
 
+RESOURCE PRIORITY
+- Proxmox `cpuunits` is 10000, the cgroup v2 maximum, while the container remains capped at its assigned 2 vCPU.
+- The `pve-container@212.service` systemd unit has persistent `CPUWeight=10000` and `IOWeight=10000` drop-ins under `/etc/systemd/system.control`.
+- Live cgroup values should read `cpu.weight=10000` and `io.weight=default 10000`.
+- These weights give CT 212 the highest relative CPU and storage-I/O preference during contention; they do not reserve extra cores, RAM, disk bandwidth, or network capacity.
+- Verify with:
+  `pct config 212 | grep -E '^(cores|cpuunits|memory|swap):'`
+  `systemctl show pve-container@212.service -p CPUWeight -p IOWeight`
+
 SERVICES AND CHECKS
 - Main service: `mqvpn-server.service`.
 - Expected listener: UDP 0.0.0.0:443.
@@ -50,4 +59,4 @@ FAILURE BOUNDARIES
 - If tunnel connects without internet/private access, check forwarding, MASQUERADE, FORWARD rules, and the CT default route.
 - If the ZeroFS alias fails, verify CT 198 is listening on 10.10.10.55:8080 before changing mqvpn.
 
-Updated 2026-08-24 for Mac-main + iPhone-cellular relay and private ZeroFS routing.
+Updated 2026-08-25 for Mac-main + iPhone-cellular relay, private ZeroFS routing, and maximum relative CPU/I/O priority.
