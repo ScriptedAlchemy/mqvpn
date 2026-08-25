@@ -252,8 +252,30 @@ final class MacRelayBinder {
                 }
             }
             let (handle, outcome) = engine.addLogicalPath(desc: &desc)
-            guard handle >= 0, outcome == MQVPN_ADD_PATH_OK else {
-                if handle >= 0 { engine.removePath(handle) }
+            // TRANSIENT_FAIL means the slot is stored and tick recovery will
+            // retry activation. Removing it here stranded ACK'd sessions
+            // because pathActivationPending then blocked a second add.
+            guard handle >= 0 else {
+                self.queue.async {
+                    self.state.hardSocketFailure(nowMs: self.nowMs(),
+                                                 error: "logical relay path registration failed")
+                    self.publishSnapshot()
+                }
+                return
+            }
+            switch outcome {
+            case MQVPN_ADD_PATH_OK, MQVPN_ADD_PATH_TRANSIENT_FAIL:
+                break
+            case MQVPN_ADD_PATH_PERMANENT_FAIL:
+                engine.removePath(handle)
+                self.queue.async {
+                    self.state.hardSocketFailure(nowMs: self.nowMs(),
+                                                 error: "logical relay path registration failed")
+                    self.publishSnapshot()
+                }
+                return
+            default:
+                engine.removePath(handle)
                 self.queue.async {
                     self.state.hardSocketFailure(nowMs: self.nowMs(),
                                                  error: "logical relay path registration failed")
@@ -323,6 +345,13 @@ final class MacRelayBinder {
         }
         guard let datagram = state.encode(type: type, payload: payload, nowMs: nowMs) else {
             state.recordSendFailure()
+            // A caller contract violation must not erase an otherwise
+            // authenticated relay. Valid xquic output fits the codec ceiling;
+            // report an oversized datagram back to the core as EMSGSIZE.
+            if payload.count > Int(MQVPN_RELAY_MAX_PAYLOAD_SIZE) {
+                publishSnapshot()
+                return .failed(Int(EMSGSIZE))
+            }
             recordSocketFailure("relay frame encoding failed")
             return .failed(Int(EIO))
         }

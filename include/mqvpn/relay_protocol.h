@@ -21,7 +21,12 @@ extern "C" {
 #define MQVPN_RELAY_KEY_SIZE         32u
 #define MQVPN_RELAY_HEADER_SIZE      28u
 #define MQVPN_RELAY_TAG_SIZE         16u
-#define MQVPN_RELAY_MAX_PAYLOAD_SIZE 1400u
+/* Must cover the complete encrypted UDP datagram xquic hands to write_socket_ex,
+ * not only max_pkt_out_size. The current absolute bound is 1452 bytes
+ * (1420-byte packet budget + 16-byte ACK space + 16-byte AEAD overhead).
+ * Keep bounded headroom so the relay envelope rejects genuinely invalid input
+ * without rejecting xquic's own output. */
+#define MQVPN_RELAY_MAX_PAYLOAD_SIZE 2048u
 #define MQVPN_RELAY_MAX_DATAGRAM_SIZE \
     (MQVPN_RELAY_HEADER_SIZE + MQVPN_RELAY_MAX_PAYLOAD_SIZE + MQVPN_RELAY_TAG_SIZE)
 

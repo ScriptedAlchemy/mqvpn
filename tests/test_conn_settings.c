@@ -171,6 +171,23 @@ test_propagation_init_max_path_id(void)
     return 0;
 }
 
+static int
+test_packet_and_probe_ceiling_match_relay_transport(void)
+{
+    xqc_conn_settings_t cs;
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+
+    mqvpn_build_conn_settings(&in, &cs);
+
+    ASSERT_EQ(cs.max_pkt_out_size, MQVPN_MAX_PKT_OUT_SIZE);
+    ASSERT_EQ(cs.probing_pkt_out_size, MQVPN_MAX_PKT_OUT_SIZE);
+    return 0;
+}
+
 /* The server forces multipath ON unconditionally — mqvpn's client is the active
  * path creator, so the server allows MP regardless of its input flag
  * (src/mqvpn_conn_settings.c:88-95). test_asymmetry_server_vs_client only feeds
@@ -392,6 +409,7 @@ main(void)
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();
+    failed += test_packet_and_probe_ceiling_match_relay_transport();
     failed += test_server_forces_multipath_regardless_of_input();
     failed += test_recv_rate_limit_wiring();
     failed += test_reinjection_mapping();

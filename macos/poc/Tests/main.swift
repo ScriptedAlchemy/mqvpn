@@ -417,6 +417,17 @@ check(state.receive(beforeAttach, nowMs: 104) == .drop(.messageType),
       "DATA_TO_MAC cannot reach the core before logical-path registration")
 check(state.attachLogicalPath(44) && state.snapshot.active && state.snapshot.pathHandle == 44,
       "relay becomes active only after the engine accepts its callback path")
+check(state.encode(type: MQVPN_RELAY_DATA_TO_SERVER,
+                   payload: Data(count: 1452),
+                   nowMs: 104) != nil &&
+      state.snapshot.active && state.snapshot.sessionID == session,
+      "xquic's encrypted UDP ceiling must encode after HELLO_ACK")
+check(state.encode(type: MQVPN_RELAY_DATA_TO_SERVER,
+                   payload: Data(count: Int(MQVPN_RELAY_MAX_PAYLOAD_SIZE) + 1),
+                   nowMs: 104) == nil &&
+      state.snapshot.active && state.snapshot.sessionID == session &&
+      state.snapshot.pathHandle == 44 && state.snapshot.hardFailures == 0,
+      "an oversized core datagram fails encoding without erasing the authenticated session")
 
 let toMac = phoneFrame(MQVPN_RELAY_DATA_TO_MAC, sequence: 4, payload: Data([9, 8, 7]))
 check(state.receive(toMac, nowMs: 105) == .deliverToCore(Data([9, 8, 7]), 44) &&
@@ -577,6 +588,17 @@ if let listener = loopbackListener(),
           activeSnapshot.ackReceived >= 1,
           "real full UDP send, ACK, and non-secret counters agree")
     let capturedSend = liveEngine.onLogicalPathSend
+    if let capturedSend, let activeHandle = activeSnapshot.pathHandle {
+        let oversized = Data(count: Int(MQVPN_RELAY_MAX_PAYLOAD_SIZE) + 1)
+        check(capturedSend(activeHandle, oversized) == -Int(EMSGSIZE) &&
+              liveBinder.snapshot().active &&
+              liveBinder.snapshot().sessionID == activeSnapshot.sessionID &&
+              liveBinder.snapshot().pathHandle == activeHandle &&
+              liveBinder.snapshot().hardFailures == activeSnapshot.hardFailures,
+              "an oversized core datagram fails without erasing the authenticated relay")
+    } else {
+        check(false, "active relay exposes its send callback for oversize handling")
+    }
     let raceStarted = DispatchSemaphore(value: 0)
     let raceFinished = DispatchSemaphore(value: 0)
     if let capturedSend, let activeHandle = activeSnapshot.pathHandle {

@@ -124,6 +124,11 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
     out->max_pkt_out_size = MQVPN_MAX_PKT_OUT_SIZE;
+    /* PMTUD probes use a separate ceiling in xquic. Leaving it zero selects
+     * xquic's 1420-byte packet budget instead of mqvpn's 1400-byte budget;
+     * keep both paths on one deliberate ceiling. The relay codec separately
+     * allows xquic's ACK and AEAD expansion around that budget. */
+    out->probing_pkt_out_size = MQVPN_MAX_PKT_OUT_SIZE;
     out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     out->so_sndbuf = 8 * 1024 * 1024;
     out->idle_time_out = 120000;
