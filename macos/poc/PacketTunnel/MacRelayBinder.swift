@@ -349,17 +349,17 @@ final class MacRelayBinder {
         _ = engine.perform { [engine] in engine.removePath(handle) }
     }
 
-    /// Runs on the binder queue. The lifecycle gate above prevents a new
-    /// callback from queue-syncing behind this wait, while any callback that
-    /// was already in the queue completes before this task begins. That makes
-    /// the semaphore a real tick-thread teardown barrier without deadlock.
+    /// Runs on the binder queue but never blocks it. A callback which passed
+    /// the lifecycle gate immediately before Stop can still be waiting in
+    /// `queue.sync`; returning lets that callback drain, then lets the tick
+    /// thread run this cleanup closure. Completion is dispatched only from
+    /// that tick-thread closure, after both teardown operations executed.
     private func clearEngineRelayHooks(pathHandle: mqvpn_path_handle_t?,
                                        completion: @escaping () -> Void) {
-        let complete = DispatchSemaphore(value: 0)
         let queued = engine.perform { [engine] in
             if let pathHandle { engine.removePath(pathHandle) }
             engine.onLogicalPathSend = nil
-            complete.signal()
+            Self.finish(completion)
         }
         guard queued else {
             // No tick thread exists (for example Stop before engine.start).
@@ -369,8 +369,6 @@ final class MacRelayBinder {
             completion()
             return
         }
-        complete.wait()
-        completion()
     }
 
     private var coreSendsEnabled: Bool {

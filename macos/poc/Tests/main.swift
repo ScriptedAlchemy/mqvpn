@@ -248,6 +248,19 @@ if let listener = loopbackListener(),
     check(activeSnapshot.helloSent >= 1 && activeSnapshot.lanTxBytes > 0 &&
           activeSnapshot.ackReceived >= 1,
           "real full UDP send, ACK, and non-secret counters agree")
+    let capturedSend = liveEngine.onLogicalPathSend
+    let raceStarted = DispatchSemaphore(value: 0)
+    let raceFinished = DispatchSemaphore(value: 0)
+    if let capturedSend, let activeHandle = activeSnapshot.pathHandle {
+        DispatchQueue.global(qos: .userInitiated).async {
+            raceStarted.signal()
+            _ = capturedSend(activeHandle, Data([0x42]))
+            raceFinished.signal()
+        }
+        _ = raceStarted.wait(timeout: .now() + 1)
+    } else {
+        check(false, "active relay exposes its production logical-send callback")
+    }
     let liveStop = DispatchSemaphore(value: 0)
     liveBinder.stop {
         check(liveBinder.snapshot() == .stopped && liveEngine.onLogicalPathSend == nil,
@@ -256,6 +269,12 @@ if let listener = loopbackListener(),
     }
     check(liveStop.wait(timeout: .now() + 3) == .success,
           "active relay Stop waits for tick-thread teardown completion")
+    check(raceFinished.wait(timeout: .now() + 1) == .success,
+          "a concurrent real logical send cannot deadlock Stop teardown")
+    if let capturedSend, let activeHandle = activeSnapshot.pathHandle {
+        check(capturedSend(activeHandle, Data([0x43])) == -Int(ENODEV),
+              "a callback captured before Stop fails closed without queueing behind teardown")
+    }
     let engineStop = DispatchSemaphore(value: 0)
     _ = liveEngine.perform {
         liveEngine.shutdown()
