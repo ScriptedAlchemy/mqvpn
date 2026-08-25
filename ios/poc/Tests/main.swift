@@ -244,6 +244,21 @@ StopLifecycle.performOrFinish(
 check(rejectedCompletions == 1,
       "rejected engine dispatch finishes locally exactly once")
 
+var transportStopEvents: [String] = []
+var finishPathClose: (() -> Void)?
+StopLifecycle.performTransportFirst(
+    stopPaths: { completion in
+        transportStopEvents.append("paths-begin")
+        finishPathClose = completion
+    },
+    shutdownEngine: { transportStopEvents.append("engine-shutdown") },
+    completion: { transportStopEvents.append("complete") })
+check(transportStopEvents == ["paths-begin"],
+      "provider Stop does not destroy the engine while path fd closes are pending")
+finishPathClose?()
+check(transportStopEvents == ["paths-begin", "engine-shutdown", "complete"],
+      "provider Stop destroys the engine only after every path close fence")
+
 // ── Mac Relay settings and provider mode ──
 // These catch silently treating a corrupt relay configuration as VPN mode,
 // accepting a weak/wrong-size key, and enabling Start without all relay

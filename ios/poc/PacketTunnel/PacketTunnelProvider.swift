@@ -254,15 +254,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     // cancelTunnelWithError during a system-initiated stop is
                     // unwanted.
                     engine?.onTunnelClosed = nil
-                    binder?.stop()       // removePath for every slot + cancel monitors
-                    engine?.shutdown()   // client=nil -> disconnect -> destroy -> thread cancel
-                    self?.engine = nil
-                    self?.binder = nil
-                    self?.metrics = nil
-                    self?.snapshot = nil
-                    self?.snapshotReader = nil
-                    providerLog.notice("STOP_FINISHED accepted=true")
-                    cont.resume()
+                    StopLifecycle.performTransportFirst(
+                        stopPaths: { done in binder?.stop(completion: done) ?? done() },
+                        shutdownEngine: { engine?.shutdown() },
+                        completion: {
+                            self?.engine = nil
+                            self?.binder = nil
+                            self?.metrics = nil
+                            self?.snapshot = nil
+                            self?.snapshotReader = nil
+                            providerLog.notice("STOP_FINISHED accepted=true")
+                            cont.resume()
+                        })
                 },
                 rejected: { [weak self] in
                     // A completed/absent tick thread cannot safely run the

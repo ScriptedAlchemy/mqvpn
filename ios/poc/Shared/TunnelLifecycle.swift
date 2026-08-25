@@ -72,4 +72,17 @@ enum StopLifecycle: Equatable {
         if !perform(accepted) { rejected() }
     }
 
+    /// PathBinder owns asynchronous DispatchSource cancellation. Keep the
+    /// mqvpn engine alive until every fd is closed and reported back to it.
+    static func performTransportFirst(
+        stopPaths: (@escaping () -> Void) -> Void,
+        shutdownEngine: @escaping () -> Void,
+        completion: @escaping () -> Void
+    ) {
+        stopPaths {
+            shutdownEngine()
+            completion()
+        }
+    }
+
 }
