@@ -56,3 +56,38 @@ downlink 180.8 ≈ line-rate parity through the tunnel.
   the live relay session, so schedule it between runs.
 - High responsiveness numbers (bufferbloat) under load; not a regression,
   worth a later pass.
+
+## Adaptive throughput scheduler — implementation receipts (2026-08-25)
+
+**Branch / HEAD:** `codex/lan-relay` at `cbb9fc3` (`docs: plan adaptive throughput scheduler`).
+All implementation below is **uncommitted** (`git diff --stat`: 36 files, +393/−23;
+`third_party/xquic` dirty at `06f676f`).
+
+**Official spec:** `docs/superpowers/specs/2026-08-25-adaptive-throughput-scheduler-design.md`
+**Official plan:** `docs/superpowers/plans/2026-08-25-adaptive-throughput-scheduler.md`
+
+**Uncommitted dirty / new (excluding `DerivedData*` build trees):**
+- New: `src/performance_mode.{c,h}`, `ios/poc/Shared/SchedulerSettings.swift`
+- Core: `CMakeLists.txt`, `include/libmqvpn.h`, `src/config.{c,h}`, `src/mqvpn_*`,
+  `src/platform/{darwin,linux,posix,windows}/*`, `tests/test_{api,config,control_response_bound}.c`
+- xquic submodule: dirty WLB/policy/stats work at `06f676f`
+- Apple: iOS + macOS `SettingsView`, `DashboardView`, tunnel providers, `MqvpnEngine.swift`,
+  host tests, `macos/poc/project.yml` (includes shared `SchedulerSettings.swift`)
+
+| Task | Receipt |
+|------|---------|
+| **1** | `mqvpn_performance_mode_t`, `mqvpn_config_set_performance_mode()`, parse/name helpers,
+  `OptimizeFor` config key; `tests/test_api.c` + `tests/test_config.c` extended (previously GREEN). |
+| **2** | xquic WLB: acknowledged-goodput EWMA, warm-up **3 s \| 1 MiB**, floors **20% / 5%**,
+  `xqc_conn_set_wlb_policy()`, `xqc_conn_get_wlb_path_stats()`; standalone CUnit
+  **24/24 GREEN**. |
+| **3** | Client emits `mqvpn-performance: throughput\|latency` on CONNECT-IP after auth path;
+  server applies mode + WLB policy post-PSK; live tunnel duplicate → **409** (cannot mutate). |
+| **4–6** | Shared `SchedulerSettings` (“Optimize For”: Max Throughput / Low Latency); iOS + macOS
+  Settings UI, provider persistence, `mqvpn_config_set_performance_mode()` in tunnel engine;
+  host tests in `ios/poc/Tests/main.swift`, `macos/poc/Tests/main.swift`. |
+| **7** | Loopback **9090** `get_status` JSON: client `"performance"` plus per-path
+  `"goodput_bps"`, `"warmup"`, `"weight_pct"` via `mqvpn_server_get_client_wlb()`;
+  `status.c` CLI prints client `optimize:` plus per-path goodput/warmup/weight;
+  bound test updated in `test_control_response_bound.c`. |
+| **8** | **PENDING** — no signed deploy, no physical throughput matrix, no acceptance gates claimed. |
