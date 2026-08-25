@@ -22,6 +22,7 @@ swiftc -o "$OUT" \
     "$SHARED/OperatingMode.swift" \
     "$SHARED/RelaySettings.swift" \
     "$SHARED/RelayRuntimeState.swift" \
+    "$SHARED/LiveActivityRateSampler.swift" \
     "$APP/ReorderIngest.swift" \
     "$DIR/main.swift"
 "$OUT"

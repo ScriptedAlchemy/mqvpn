@@ -283,6 +283,85 @@ check(RelayDashboard.statusLabel(tunnelStatus: .connected,
                                  snapshot: TunnelSnapshot.relayStopped(timestamp: 11)) == "Relay waiting",
       "relay dashboard never labels a mere listener as ready")
 
+// ── Live Activity production-rate sampling ──
+// These catch displaying cumulative bytes as a speed, carrying a stale rate
+// after an interface disappears, treating a counter reset as a huge burst,
+// and sourcing relay-mode rates from anything except its real socket counters.
+var activityRates = LiveActivityRateSampler(smoothingFactor: 0.5)
+let firstRates = activityRates.sample(
+    timestamp: 100,
+    counters: [
+        InterfaceByteCounter(name: "en0", totalBytes: 1_000, active: true),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 2_000, active: true),
+    ])
+check(firstRates.wifi?.interfaceName == "en0" && firstRates.wifi?.megabitsPerSecond == nil,
+      "first Wi-Fi counter is sampling, never presented as zero throughput")
+check(firstRates.cellular?.interfaceName == "pdp_ip0" &&
+      firstRates.cellular?.megabitsPerSecond == nil,
+      "first cellular counter is sampling, never presented as zero throughput")
+
+let secondRates = activityRates.sample(
+    timestamp: 102,
+    counters: [
+        InterfaceByteCounter(name: "en0", totalBytes: 3_001_000, active: true),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 6_002_000, active: true),
+    ])
+check(abs((secondRates.wifi?.megabitsPerSecond ?? -1) - 12) < 0.0001,
+      "Wi-Fi Mbps derives from the real byte delta and elapsed time")
+check(abs((secondRates.cellular?.megabitsPerSecond ?? -1) - 24) < 0.0001,
+      "cellular Mbps derives independently from its real byte delta")
+
+let smoothedRates = activityRates.sample(
+    timestamp: 104,
+    counters: [
+        InterfaceByteCounter(name: "en0", totalBytes: 9_001_000, active: true),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 6_002_000, active: true),
+    ])
+check(abs((smoothedRates.wifi?.megabitsPerSecond ?? -1) - 18) < 0.0001,
+      "display rate applies bounded exponential smoothing")
+check(abs((smoothedRates.cellular?.megabitsPerSecond ?? -1) - 12) < 0.0001,
+      "an idle live interface decays honestly instead of retaining its peak")
+
+let missingCellular = activityRates.sample(
+    timestamp: 106,
+    counters: [InterfaceByteCounter(name: "en0", totalBytes: 9_001_000, active: true)])
+check(missingCellular.cellular == nil,
+      "a missing cellular interface immediately disappears from the activity")
+
+let resetWiFi = activityRates.sample(
+    timestamp: 108,
+    counters: [InterfaceByteCounter(name: "en0", totalBytes: 10, active: true)])
+check(resetWiFi.wifi?.megabitsPerSecond == nil,
+      "a reset Wi-Fi counter restarts sampling instead of underflowing")
+
+let stalledWiFi = activityRates.sample(
+    timestamp: 140,
+    counters: [InterfaceByteCounter(name: "en0", totalBytes: 4_000_010, active: true)])
+check(stalledWiFi.wifi?.megabitsPerSecond == nil,
+      "a long sampling stall is marked unavailable instead of averaged as live")
+
+let vpnCounters = LiveActivityCounterSource.counters(from: TunnelSnapshot(
+    timestamp: 1, clientState: 4, connectedSince: 0, footprint: 0,
+    paths: [
+        PathSnapshot(name: "en0", status: 1, txBytes: 100, rxBytes: 200),
+        PathSnapshot(name: "pdp_ip0", status: 0, txBytes: 300, rxBytes: 400),
+    ]))
+check(vpnCounters == [InterfaceByteCounter(name: "en0", totalBytes: 300, active: true)],
+      "VPN activity consumes only active production path counters")
+
+let relayCounters = LiveActivityCounterSource.counters(from: relayWire)
+check(relayCounters == [
+    InterfaceByteCounter(name: "en0", totalBytes: 30, active: true),
+    InterfaceByteCounter(name: "pdp_ip0", totalBytes: 70, active: true),
+], "relay activity consumes the actual Wi-Fi LAN and cellular server socket counters")
+
+check(LiveActivityInterfaceKind(interfaceName: "en0") == .wifi,
+      "en0 classifies as Wi-Fi")
+check(LiveActivityInterfaceKind(interfaceName: "pdp_ip0") == .cellular,
+      "pdp_ip0 classifies as cellular")
+check(LiveActivityInterfaceKind(interfaceName: "utun9") == nil,
+      "synthetic tunnel interfaces never appear as physical activity paths")
+
 // ── Mac Relay authenticated session state ──
 // The socket layer only passes frames here after the shared C codec has
 // authenticated them and applied its replay window. These tests catch state
