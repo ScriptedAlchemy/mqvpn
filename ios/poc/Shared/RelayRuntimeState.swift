@@ -63,6 +63,13 @@ struct RelaySocketPlan: Equatable {
     static let fixed = RelaySocketPlan(lanListener: .wifi, fixedServer: .cellular)
 }
 
+enum RelayInterfaceObservation {
+    static func effective(observed: String?, current: String?,
+                          socketReady: Bool) -> String? {
+        observed ?? (socketReady ? current : nil)
+    }
+}
+
 struct RelayPeerIdentity: Equatable {
     let bytes: Data
 

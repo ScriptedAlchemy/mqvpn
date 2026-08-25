@@ -16,8 +16,11 @@ final class TunnelController: ObservableObject {
     @Published var configError: String?
     @Published private(set) var isSaving = false
     @Published var showSettings = false
+    @Published var relayDiscoveryText = "optional — not configured"
+    @Published private(set) var discoveredRelay: MacRelayEndpoint?
 
     private var manager: NETunnelProviderManager?
+    private var relayBrowser: MacRelayBonjourBrowser?
     private var observer: NSObjectProtocol?
     private var pollTimer: Timer?
     private var rateSampler = MacSnapshotRateSampler()
@@ -32,7 +35,8 @@ final class TunnelController: ObservableObject {
         MacConnectGuard.canStart(isEditable: isEditable, isSaving: isSaving,
                                  server: serverSettings, relay: relaySettings,
                                  relayConfigurationIsValid: relayConfigurationIsValid,
-                                 profileIsCurrent: profileIsCurrent)
+                                 profileIsCurrent: profileIsCurrent,
+                                 discoveredRelay: discoveredRelay)
     }
     var isStoppable: Bool {
         StopLifecycle.canStop(hasManager: manager != nil,
@@ -69,6 +73,7 @@ final class TunnelController: ObservableObject {
 
     deinit {
         if let observer { NotificationCenter.default.removeObserver(observer) }
+        relayBrowser?.stop()
     }
 
     func loadOrCreateManager() async {
@@ -94,6 +99,7 @@ final class TunnelController: ObservableObject {
             manager = loaded
             profileIsCurrent = true
             applyStatus(loaded.connection.status)
+            refreshRelayDiscovery()
         } catch {
             profileIsCurrent = false
             statusText = "load error"
@@ -139,6 +145,7 @@ final class TunnelController: ObservableObject {
             try await read(from: manager)
             profileIsCurrent = true
             if relayConfigurationIsValid { configError = nil }
+            refreshRelayDiscovery()
         } catch MacSaveFailure.refresh {
             profileIsCurrent = false
             configError = "VPN profile was saved but could not be reloaded. Reopen mqvpn before starting."
@@ -185,6 +192,27 @@ final class TunnelController: ObservableObject {
             relayConfigurationIsValid = false
             configError = error.localizedDescription
         }
+    }
+
+    private func refreshRelayDiscovery() {
+        relayBrowser?.stop()
+        relayBrowser = nil
+        discoveredRelay = nil
+        let enabled = relaySettings?.enabled == true
+        relayDiscoveryText = MacRelayDiscovery.statusText(enabled: enabled, endpoint: nil)
+        guard enabled else { return }
+        let browser = MacRelayBonjourBrowser()
+        browser.onChange = { [weak self] endpoint in
+            Task { @MainActor in
+                guard let self else { return }
+                let found = MacRelayDiscovery.choose(endpoint.map { [$0] } ?? [])
+                self.discoveredRelay = found
+                self.relayDiscoveryText = MacRelayDiscovery.statusText(
+                    enabled: self.relaySettings?.enabled == true, endpoint: found)
+            }
+        }
+        browser.start()
+        relayBrowser = browser
     }
 
     private func applyStatus(_ status: NEVPNStatus) {

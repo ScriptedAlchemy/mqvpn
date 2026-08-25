@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
+import Darwin
 import Foundation
 
 /// The observable relay state. It intentionally contains no secret material.
@@ -303,6 +304,15 @@ struct MacRelayRuntimeState {
         case MQVPN_RELAY_ERR_AUTH_FAILED: return .authentication
         default: return .malformed
         }
+    }
+}
+
+enum MacRelaySendRecovery {
+    /// After Network Extension installs the default route, a connected UDP
+    /// socket can fail with a cached unreachable route. Refresh that route on
+    /// the same fd; do not treat it as a reason to allocate a new source port.
+    static func shouldRefreshRoute(_ code: Int32) -> Bool {
+        code == ENETUNREACH || code == EHOSTUNREACH || code == EADDRNOTAVAIL
     }
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
+import Darwin
 import Foundation
 
 // The production changes these provider-plan tests catch are: installing a
@@ -12,6 +13,9 @@ let networkPlan = MacProviderNetworkPlan(
     serverIPv4: "208.69.79.206", relayIPv4: "192.168.1.42")
 check(networkPlan.includedRoutes == [MacIPv4Route(address: "0.0.0.0", prefix: 0)],
       "the authenticated Mac tunnel includes exactly the IPv4 default route")
+check(networkPlan.includedIPv6Routes.isEmpty &&
+      networkPlan.excludedIPv6Routes.isEmpty,
+      "the IPv4-only overlay must not claim ::/0; that blackholes the iPhone ULA relay")
 check(networkPlan.excludedRoutes == [
     MacIPv4Route(address: "208.69.79.206", prefix: 32),
     MacIPv4Route(address: "192.168.1.42", prefix: 32),
@@ -42,6 +46,82 @@ let parsedRelay = try? MacRelaySettings.startConfiguration(from: [
 ])
 check(parsedRelay?.host == "192.168.1.42" && parsedRelay?.isValid == true,
       "a complete enabled Mac relay configuration is accepted")
+let discoveredRelay = try? MacRelaySettings.startConfiguration(from: [
+    "macRelayEnabled": true, "macRelayHost": "",
+    "macRelayPort": 5443, "macRelayKey": relayKey,
+])
+check(discoveredRelay?.enabled == true && discoveredRelay?.host == "" &&
+      discoveredRelay?.isValid == true,
+      "an enabled relay without a stored host is valid and waits for discovery")
+check(MacRelayDiscovery.choose([
+    MacRelayEndpoint(host: "fe80::1", port: 5443),
+    MacRelayEndpoint(host: "192.168.1.50", port: 5443),
+    MacRelayEndpoint(host: "10.0.0.8", port: 5443),
+]) == MacRelayEndpoint(host: "fe80::1", port: 5443),
+      "same-LAN relay prefers link-local IPv6 over IPv4")
+check(MacRelayDiscovery.choose([
+    MacRelayEndpoint(host: "fd97:b933:48b8:4fdb::42", port: 5443),
+    MacRelayEndpoint(host: "fe80::1%en1", port: 5443),
+    MacRelayEndpoint(host: "192.168.1.50", port: 5443),
+]) == MacRelayEndpoint(host: "fe80::1%en1", port: 5443),
+      "a scoped link-local beats a ULA that stops answering ND after tunnel start")
+check(MacRelayDiscovery.choose([]) == nil &&
+      MacRelayDiscovery.choose([MacRelayEndpoint(host: "Zack.local", port: 5443)]) == nil,
+      "a hostname without an IP advertisement is a fail-closed Start")
+check(MacRelayDiscovery.choose([MacRelayEndpoint(host: "fe80::1", port: 5443)]) ==
+      MacRelayEndpoint(host: "fe80::1", port: 5443),
+      "link-local IPv6 is accepted when it is the only advertised address")
+check(MacRelayDiscovery.interfaceName(for: MacRelayEndpoint(host: "fe80::1%en1",
+                                                            port: 5443)) == "en1" &&
+      MacRelayDiscovery.interfaceName(for: MacRelayEndpoint(
+          host: "fd97:b933:48b8:4fdb::42", port: 5443)) == nil,
+      "only a scoped IPv6 literal names the LAN interface")
+check(resolveRelayEndpoint("fd97:b933:48b8:4fdb::42", 5443)?.ipString ==
+      "fd97:b933:48b8:4fdb::42" &&
+      resolveServer("fd97:b933:48b8:4fdb::42", 5443) == nil,
+      "the LAN relay may resolve IPv6 while the public server path stays IPv4")
+check(ResolvedServerAddress.fromIPLiteral("fe80::1%en1", port: 5443)?.ipString == "fe80::1%en1" &&
+      ResolvedServerAddress.fromIPLiteral("Zack.local", port: 5443) == nil,
+      "Bonjour numeric peers keep the Wi-Fi zone without getaddrinfo")
+check(MacRelayDiscovery.statusText(enabled: false, endpoint: nil) ==
+      "optional — not configured" &&
+      MacRelayDiscovery.statusText(enabled: true, endpoint: nil) ==
+      "No iPhone relay found on this LAN" &&
+      MacRelayDiscovery.statusText(
+          enabled: true, endpoint: MacRelayEndpoint(host: "192.168.1.50", port: 5443)) ==
+      "iPhone relay detected at 192.168.1.50:5443",
+      "the dashboard reports detected or not-found without a typed IP")
+var advertised = sockaddr_in()
+advertised.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+advertised.sin_family = sa_family_t(AF_INET)
+advertised.sin_port = in_port_t(UInt16(5443).bigEndian)
+_ = "192.168.1.50".withCString { inet_pton(AF_INET, $0, &advertised.sin_addr) }
+let advertisedBytes = withUnsafeBytes(of: advertised) { Data($0) }
+check(MacRelayDiscovery.ipv4(fromSockaddr: advertisedBytes) == "192.168.1.50" &&
+      MacRelayDiscovery.choose(port: 5443, addresses: [advertisedBytes]) ==
+      MacRelayEndpoint(host: "192.168.1.50", port: 5443),
+      "Start uses the IPv4 already attached to a resolved Bonjour service")
+var advertised6 = sockaddr_in6()
+advertised6.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+advertised6.sin6_family = sa_family_t(AF_INET6)
+advertised6.sin6_port = in_port_t(UInt16(5443).bigEndian)
+_ = "fd97:b933:48b8:4fdb::42".withCString { inet_pton(AF_INET6, $0, &advertised6.sin6_addr) }
+let advertised6Bytes = withUnsafeBytes(of: advertised6) { Data($0) }
+check(MacRelayDiscovery.ipv6(fromSockaddr: advertised6Bytes) == "fd97:b933:48b8:4fdb::42",
+      "Start can still read a ULA attached to a resolved Bonjour service")
+var advertisedLL = sockaddr_in6()
+advertisedLL.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+advertisedLL.sin6_family = sa_family_t(AF_INET6)
+advertisedLL.sin6_port = in_port_t(UInt16(5443).bigEndian)
+advertisedLL.sin6_scope_id = if_nametoindex("en1")
+_ = "fe80::1".withCString { inet_pton(AF_INET6, $0, &advertisedLL.sin6_addr) }
+let advertisedLLBytes = withUnsafeBytes(of: advertisedLL) { Data($0) }
+if advertisedLL.sin6_scope_id != 0 {
+    check(MacRelayDiscovery.choose(port: 5443,
+                                   addresses: [advertisedBytes, advertised6Bytes, advertisedLLBytes]) ==
+          MacRelayEndpoint(host: "fe80::1%en1", port: 5443),
+          "Start prefers the scoped link-local already attached to Bonjour")
+}
 
 var startupTimeout = MacProviderLifecycle()
 check(startupTimeout.begin(nowMs: 0) == .none && !startupTimeout.settingsRequested,
@@ -107,10 +187,10 @@ _ = stopping.begin(nowMs: 0)
 check(stopping.beginStop() && stopping.isStopping && !stopping.beginStop(),
       "Stop is idempotent and is owned by the lifecycle stage, not a parallel flag")
 check(MacRelayRebindPolicy.decide(current: "en1", desired: "en1") == .keep &&
-      MacRelayRebindPolicy.decide(current: "en1", desired: nil) == .unbind &&
+      MacRelayRebindPolicy.decide(current: "en1", desired: nil) == .keep &&
       MacRelayRebindPolicy.decide(current: "en1", desired: "en5") == .rebind(to: "en5") &&
       MacRelayRebindPolicy.decide(current: nil, desired: "en1") == .rebind(to: "en1"),
-      "relay LAN rebind is a single decision, not scattered timer-branch state")
+      "a live relay interface survives a probe miss; only a new interface rebinds")
 check(MacPathIdentity.relayName == "iphone-relay",
       "direct and relay path identity share one constant")
 
@@ -143,6 +223,32 @@ check(MacLANInterfaceSelector.select(relayIPv4: "192.168.1.42",
 check(MacLANInterfaceSelector.select(relayIPv4: "172.16.0.4",
                                      candidates: lanCandidates) == nil,
       "relay preflight fails honestly when no live local subnet reaches the iPhone")
+check(MacLANInterfaceSelector.onLinkRoute(relayIPv4: "192.168.1.42",
+                                          candidates: lanCandidates) ==
+      MacIPv4Route(address: "192.168.1.0", prefix: 24),
+      "the live Wi-Fi prefix stays excluded so ARP to the iPhone cannot enter the tunnel")
+check(MacLANInterfaceSelector.interfaceName(reaching: "fd97:b933:48b8:4fdb::42",
+                                            candidates: lanCandidates) == "en1",
+      "an IPv6 relay still binds to the live Wi-Fi interface")
+check(MacLANInterfaceSelector.onLinkRoute(relayIPv4: "fd97:b933:48b8:4fdb::42",
+                                          candidates: lanCandidates) == nil,
+      "an IPv6 relay does not invent an IPv4 LAN exclusion")
+let planWithLAN = MacProviderNetworkPlan(
+    assignedAddress: "10.77.77.10", assignedPrefix: 24, mtu: 1_382,
+    serverIPv4: "208.69.79.206", relayIPv4: "192.168.1.42",
+    relayLAN: MacIPv4Route(address: "192.168.1.0", prefix: 24))
+check(planWithLAN.excludedRoutes == [
+    MacIPv4Route(address: "208.69.79.206", prefix: 32),
+    MacIPv4Route(address: "192.168.1.42", prefix: 32),
+    MacIPv4Route(address: "192.168.1.0", prefix: 24),
+], "settings keep the peer /32 and the on-link LAN after the default route is installed")
+let planWithIPv6Relay = MacProviderNetworkPlan(
+    assignedAddress: "10.77.77.10", assignedPrefix: 24, mtu: 1_382,
+    serverIPv4: "208.69.79.206", relayIPv4: nil,
+    relayIPv6: "fd97:b933:48b8:4fdb::42%en1")
+check(planWithIPv6Relay.includedIPv6Routes.isEmpty &&
+      planWithIPv6Relay.excludedIPv6Routes.isEmpty,
+      "an IPv6 LAN relay does not install IPv6 tunnel routes")
 
 let relayDraft = MacRelaySettings(enabled: true, host: " 192.168.1.42 ", port: 5_443,
                                   keyBase64: Data(repeating: 7, count: 32).base64EncodedString())
@@ -211,6 +317,25 @@ check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                 relay: MacRelaySettings(enabled: true, host: "",
                                                         port: 5443, keyBase64: "")),
       "an enabled but incomplete iPhone relay cannot Start")
+check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
+                                server: validServer,
+                                relay: MacRelaySettings(enabled: true, host: "",
+                                                        port: 5443, keyBase64: relayKey)),
+      "an enabled relay cannot Start until discovery resolves a LAN peer")
+check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
+                               server: validServer,
+                               relay: MacRelaySettings(enabled: true, host: "",
+                                                       port: 5443, keyBase64: relayKey),
+                               discoveredRelay: MacRelayEndpoint(host: "192.168.1.50",
+                                                                 port: 5443)),
+      "Start is allowed after a real IPv4 relay endpoint resolves")
+check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
+                               server: validServer,
+                               relay: MacRelaySettings(enabled: true, host: "",
+                                                       port: 5443, keyBase64: relayKey),
+                               discoveredRelay: MacRelayEndpoint(
+                                   host: "fd97:b933:48b8:4fdb::42", port: 5443)),
+      "Start is allowed after a real IPv6 relay endpoint resolves")
 check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                 server: validServer, relay: nil,
                                 relayConfigurationIsValid: false),
@@ -436,6 +561,11 @@ check(state.receive(toMac, nowMs: 105) == .deliverToCore(Data([9, 8, 7]), 44) &&
 check(state.receive(toMac, nowMs: 106) == .drop(.replay),
       "duplicate authenticated data is rejected by the shared replay window")
 
+check(MacRelaySendRecovery.shouldRefreshRoute(ENETUNREACH) &&
+      MacRelaySendRecovery.shouldRefreshRoute(EHOSTUNREACH) &&
+      MacRelaySendRecovery.shouldRefreshRoute(EADDRNOTAVAIL) &&
+      !MacRelaySendRecovery.shouldRefreshRoute(ECONNRESET),
+      "a stale connected UDP route is refreshed on the same socket; ECONNRESET still reopens")
 state.hardSocketFailure(nowMs: 107, error: "ECONNRESET")
 check(state.snapshot.hardFailures == 1 && !state.snapshot.active &&
       state.shouldReopenSocket(nowMs: 1_106) == false &&

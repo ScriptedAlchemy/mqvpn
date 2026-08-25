@@ -45,9 +45,12 @@ final class RelayEngine {
     private var interfaceProbeInFlight = false
     private var idleTimer: DispatchSourceTimer?
     private var lanFD: Int32 = -1
+    private var lan6FD: Int32 = -1
     private var serverFD: Int32 = -1
     private var lanSource: DispatchSourceRead?
+    private var lan6Source: DispatchSourceRead?
     private var serverSource: DispatchSourceRead?
+    private let bonjourAdvertiser = RelayBonjourAdvertiser()
     private var latest: TunnelSnapshot
     private var snapshotSequence: UInt64 = 0
     private var startedAt: Double?
@@ -176,7 +179,15 @@ final class RelayEngine {
     }
 
     private func reconcileInterfaces(wifi: NWInterface?, cellular: NWInterface?) {
-        let actions = state.updateInterfaces(wifi: wifi?.name, cellular: cellular?.name)
+        let relay = state.snapshot
+        let effectiveWiFi = RelayInterfaceObservation.effective(
+            observed: wifi?.name, current: relay.listenerInterface,
+            socketReady: lanFD >= 0 || lan6FD >= 0)
+        let effectiveCellular = RelayInterfaceObservation.effective(
+            observed: cellular?.name, current: relay.cellularInterface,
+            socketReady: serverFD >= 0)
+        let actions = state.updateInterfaces(wifi: effectiveWiFi,
+                                             cellular: effectiveCellular)
         for action in actions {
             switch action {
             case .openWifi:
@@ -211,7 +222,7 @@ final class RelayEngine {
         idleTimer = timer
     }
 
-    private func configureSocket(_ fd: Int32, interface: NWInterface) -> Bool {
+    private func configureSocket(_ fd: Int32, interface: NWInterface, family: Int32) -> Bool {
         let flags = fcntl(fd, F_GETFL, 0)
         guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
             return false
@@ -222,51 +233,83 @@ final class RelayEngine {
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufferSize,
                        socklen_t(MemoryLayout<Int32>.size))
         var interfaceIndex = UInt32(interface.index)
+        if family == AF_INET6 {
+            return setsockopt(fd, IPPROTO_IPV6, IPV6_BOUND_IF, &interfaceIndex,
+                              socklen_t(MemoryLayout<UInt32>.size)) == 0
+        }
         return setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &interfaceIndex,
                           socklen_t(MemoryLayout<UInt32>.size)) == 0
     }
 
     private func openLANSocket(interface: NWInterface) {
         closeLANSocket()
-        let fd = socket(AF_INET, SOCK_DGRAM, 0)
-        guard fd >= 0, configureSocket(fd, interface: interface) else {
-            if fd >= 0 { close(fd) }
+        let v4 = bindLAN(family: AF_INET, interface: interface)
+        let v6 = bindLAN(family: AF_INET6, interface: interface)
+        guard v4 || v6 else {
             state.recordError("Wi-Fi relay socket unavailable")
             _ = state.updateInterfaces(wifi: nil,
                                        cellular: state.snapshot.cellularInterface)
             publishSnapshot()
             return
         }
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = in_port_t(UInt16(settings.listenPort).bigEndian)
-        address.sin_addr = in_addr(s_addr: INADDR_ANY)
-        let result = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
+        state.recordError(nil)
+        refreshAdvertisement()
+        relayLog.notice("LAN listener ready interface=\(interface.name, privacy: .public) v4=\(v4) v6=\(v6)")
+    }
+
+    private func bindLAN(family: Int32, interface: NWInterface) -> Bool {
+        let fd = socket(family, SOCK_DGRAM, 0)
+        guard fd >= 0, configureSocket(fd, interface: interface, family: family) else {
+            if fd >= 0 { close(fd) }
+            return false
         }
-        guard result == 0 else {
+        let bound: Bool
+        if family == AF_INET6 {
+            var v6only: Int32 = 1
+            _ = setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only,
+                           socklen_t(MemoryLayout<Int32>.size))
+            var address = sockaddr_in6()
+            address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            address.sin6_family = sa_family_t(AF_INET6)
+            address.sin6_port = in_port_t(UInt16(settings.listenPort).bigEndian)
+            bound = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                }
+            } == 0
+        } else {
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = in_port_t(UInt16(settings.listenPort).bigEndian)
+            address.sin_addr = in_addr(s_addr: INADDR_ANY)
+            bound = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            } == 0
+        }
+        guard bound else {
             close(fd)
-            state.recordError("Wi-Fi relay listen failed")
-            _ = state.updateInterfaces(wifi: nil,
-                                       cellular: state.snapshot.cellularInterface)
-            publishSnapshot()
-            return
+            return false
         }
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        source.setEventHandler { [weak self] in self?.drainLANSocket() }
+        source.setEventHandler { [weak self] in self?.drainLANSocket(fd) }
         source.resume()
-        lanFD = fd
-        lanSource = source
-        state.recordError(nil)
-        relayLog.notice("LAN listener ready interface=\(interface.name, privacy: .public)")
+        if family == AF_INET6 {
+            lan6FD = fd
+            lan6Source = source
+        } else {
+            lanFD = fd
+            lanSource = source
+        }
+        return true
     }
 
     private func openServerSocket(interface: NWInterface) {
         closeServerSocket()
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
-        guard fd >= 0, configureSocket(fd, interface: interface) else {
+        guard fd >= 0, configureSocket(fd, interface: interface, family: AF_INET) else {
             if fd >= 0 { close(fd) }
             state.recordError("Cellular relay socket unavailable")
             _ = state.updateInterfaces(wifi: state.snapshot.listenerInterface,
@@ -294,6 +337,7 @@ final class RelayEngine {
         serverFD = fd
         serverSource = source
         state.recordError(nil)
+        refreshAdvertisement()
         relayLog.notice("server socket ready interface=\(interface.name, privacy: .public)")
     }
 
@@ -301,7 +345,12 @@ final class RelayEngine {
         lanSource?.setEventHandler {}
         lanSource?.cancel()
         lanSource = nil
+        lan6Source?.setEventHandler {}
+        lan6Source?.cancel()
+        lan6Source = nil
         if lanFD >= 0 { close(lanFD); lanFD = -1 }
+        if lan6FD >= 0 { close(lan6FD); lan6FD = -1 }
+        refreshAdvertisement()
     }
 
     private func closeServerSocket() {
@@ -309,6 +358,17 @@ final class RelayEngine {
         serverSource?.cancel()
         serverSource = nil
         if serverFD >= 0 { close(serverFD); serverFD = -1 }
+        refreshAdvertisement()
+    }
+
+    private func refreshAdvertisement() {
+        if RelayAdvertisementPolicy.shouldPublish(lanReady: lanFD >= 0 || lan6FD >= 0,
+                                                  cellularReady: serverFD >= 0,
+                                                  stopped: stopped) {
+            bonjourAdvertiser.start(port: settings.listenPort)
+        } else {
+            bonjourAdvertiser.stop()
+        }
     }
 
     private func execute(_ actions: [RelayStateAction]) {
@@ -325,8 +385,8 @@ final class RelayEngine {
         }
     }
 
-    private func drainLANSocket() {
-        guard lanFD >= 0 else { return }
+    private func drainLANSocket(_ socketFD: Int32) {
+        guard socketFD >= 0 else { return }
         // Receive the complete UDP datagram before validation. A max-sized
         // buffer would truncate an oversized packet to a potentially valid
         // authenticated prefix, hiding the forbidden trailing bytes.
@@ -336,7 +396,7 @@ final class RelayEngine {
             var peerLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
             let count = withUnsafeMutablePointer(to: &peerStorage) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    recvfrom(lanFD, &buffer, buffer.count, 0, $0, &peerLength)
+                    recvfrom(socketFD, &buffer, buffer.count, 0, $0, &peerLength)
                 }
             }
             if count < 0 {
@@ -475,9 +535,17 @@ final class RelayEngine {
         publishSnapshot()
     }
 
+    private func lanSocket(for peer: PeerAddress) -> Int32 {
+        var copy = peer.storage
+        let family = withUnsafeBytes(of: &copy) { Int32($0.load(as: sockaddr.self).sa_family) }
+        return family == AF_INET6 ? lan6FD : lanFD
+    }
+
     private func sendToMac(type: mqvpn_relay_message_type_t,
                            sessionID: UInt64, payload: Data) {
-        guard lanFD >= 0, var peer = peerAddress else { return }
+        guard var peer = peerAddress else { return }
+        let socketFD = lanSocket(for: peer)
+        guard socketFD >= 0 else { return }
         var output = [UInt8](repeating: 0, count: Self.maxDatagramSize)
         var outputLength = 0
         let sequence = outboundSequence
@@ -498,7 +566,7 @@ final class RelayEngine {
         let sent = withUnsafePointer(to: &peer.storage) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
                 output.withUnsafeBytes {
-                    sendto(lanFD, $0.baseAddress, outputLength, 0, address, peer.length)
+                    sendto(socketFD, $0.baseAddress, outputLength, 0, address, peer.length)
                 }
             }
         }

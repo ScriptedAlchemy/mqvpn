@@ -8,8 +8,8 @@ import SystemConfiguration
 /// One Darwin scrape for on-link Wi-Fi/Ethernet candidates and local IPv4
 /// addresses. The selector, not this enumerator, chooses the relay interface.
 enum MacLANInterfaceEnumerator {
-    static func onLinkInterface(reaching relayIPv4: String) -> String? {
-        MacLANInterfaceSelector.select(relayIPv4: relayIPv4, candidates: candidates())
+    static func onLinkInterface(reaching relayHost: String) -> String? {
+        MacLANInterfaceSelector.interfaceName(reaching: relayHost, candidates: candidates())
     }
 
     static func localIPv4Addresses() -> [String] {

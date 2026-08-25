@@ -31,12 +31,14 @@ swiftc -o "$OUT" \
     "$IOS/Shared/ServerResolve.swift" \
     "$IOS/Shared/ReorderSettings.swift" \
     "$IOS/Shared/HybridSettings.swift" \
+    "$IOS/Shared/RelayBonjour.swift" \
     "$IOS/Shared/OperatingMode.swift" \
     "$IOS/Shared/RelayRuntimeState.swift" \
     "$IOS/Shared/ProviderMessage.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
+    "$ROOT/macos/poc/Shared/MacRelayDiscovery.swift" \
     "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
@@ -73,11 +75,14 @@ swiftc -typecheck \
     "$IOS/Shared/ServerResolve.swift" \
     "$IOS/Shared/ReorderSettings.swift" \
     "$IOS/Shared/HybridSettings.swift" \
+    "$IOS/Shared/RelayBonjour.swift" \
     "$TMPD/ReorderStatsSnapshot.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$IOS/PacketTunnel/PathBinder.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
+    "$ROOT/macos/poc/Shared/MacRelayDiscovery.swift" \
+    "$ROOT/macos/poc/Shared/MacRelayBonjourResolver.swift" \
     "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacLANInterfaceEnumerator.swift" \
@@ -95,9 +100,12 @@ swiftc -typecheck \
     "$IOS/Shared/ServerResolve.swift" \
     "$IOS/Shared/ReorderSettings.swift" \
     "$IOS/Shared/HybridSettings.swift" \
+    "$IOS/Shared/RelayBonjour.swift" \
     "$TMPD/ReorderStatsSnapshot.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
+    "$ROOT/macos/poc/Shared/MacRelayDiscovery.swift" \
+    "$ROOT/macos/poc/Shared/MacRelayBonjourResolver.swift" \
     "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
     "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
@@ -106,4 +114,4 @@ swiftc -typecheck \
     "$ROOT/macos/poc/App/DashboardView.swift" \
     "$ROOT/macos/poc/App/SettingsView.swift" \
     "$ROOT/macos/poc/App/MqvpnMacApp.swift" \
-    -framework SwiftUI -framework NetworkExtension -framework Security
+    -framework SwiftUI -framework NetworkExtension -framework Network -framework Security

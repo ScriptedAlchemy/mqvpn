@@ -33,6 +33,7 @@ swiftc -o "$OUT" \
     "$SHARED/TunnelLifecycle.swift" \
     "$SHARED/OperatingMode.swift" \
     "$SHARED/RelaySettings.swift" \
+    "$SHARED/RelayBonjour.swift" \
     "$SHARED/RelayRuntimeState.swift" \
     "$SHARED/LiveActivityRateSampler.swift" \
     "$SHARED/LiveActivityContent.swift" \

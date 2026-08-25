@@ -13,8 +13,6 @@ struct SettingsView: View {
     @State private var pskText: String
     @State private var insecure: Bool
     @State private var relayEnabled: Bool
-    @State private var relayHostText: String
-    @State private var relayPortText: String
     @State private var relayKeyText: String
     @State private var hybridEnabled: Bool
     @State private var hybridMode: Int
@@ -30,8 +28,6 @@ struct SettingsView: View {
         let relay = controller.relaySettings ??
             MacRelaySettings(enabled: false, host: "", port: 5443, keyBase64: "")
         _relayEnabled = State(initialValue: relay.enabled)
-        _relayHostText = State(initialValue: relay.host)
-        _relayPortText = State(initialValue: String(relay.port))
         _relayKeyText = State(initialValue: relay.keyBase64)
         _hybridEnabled = State(initialValue: controller.hybridSettings.enabled)
         _hybridMode = State(initialValue: controller.hybridSettings.tcpMode)
@@ -45,8 +41,8 @@ struct SettingsView: View {
 
     private var relayDraft: MacRelaySettings {
         MacRelaySettings(enabled: relayEnabled,
-                         host: relayHostText,
-                         port: Int(relayPortText.trimmingCharacters(in: .whitespaces)) ?? -1,
+                         host: "",
+                         port: 5443,
                          keyBase64: relayKeyText)
     }
 
@@ -68,10 +64,9 @@ struct SettingsView: View {
             Toggle("Skip TLS verification", isOn: $insecure)
             Divider()
             Toggle("Bond iPhone cellular relay", isOn: $relayEnabled)
-            TextField("iPhone host", text: $relayHostText)
-                .disabled(!relayEnabled)
-            TextField("Relay port", text: $relayPortText)
-                .disabled(!relayEnabled)
+            Text(controller.relayDiscoveryText)
+                .font(.caption)
+                .foregroundColor(.secondary)
             SecureField("Relay key (base64, 32 bytes)", text: $relayKeyText)
                 .disabled(!relayEnabled)
             Divider()

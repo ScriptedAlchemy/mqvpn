@@ -45,6 +45,14 @@ final class MacRelayLANSession {
         timer = nil
     }
 
+    func refreshConnectedRoute(completion: @escaping () -> Void) {
+        guard let binder else {
+            completion()
+            return
+        }
+        binder.refreshConnectedRoute(completion: completion)
+    }
+
     func takeBinderForTeardown() -> MacRelayBinder? {
         let old = binder
         binder = nil

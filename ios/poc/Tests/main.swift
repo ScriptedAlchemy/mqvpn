@@ -1,6 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 import Foundation
+
+check(!RelayAdvertisementPolicy.shouldPublish(lanReady: true,
+                                               cellularReady: false,
+                                               stopped: false) &&
+      RelayAdvertisementPolicy.shouldPublish(lanReady: true,
+                                              cellularReady: true,
+                                              stopped: false) &&
+      !RelayAdvertisementPolicy.shouldPublish(lanReady: true,
+                                               cellularReady: true,
+                                               stopped: true),
+      "relay Bonjour advertises only while both forwarding sockets are ready")
+check(RelayInterfaceObservation.effective(observed: nil, current: "en0",
+                                          socketReady: true) == "en0" &&
+      RelayInterfaceObservation.effective(observed: nil, current: "en0",
+                                          socketReady: false) == nil &&
+      RelayInterfaceObservation.effective(observed: "en1", current: "en0",
+                                          socketReady: true) == "en1",
+      "a transient monitor miss cannot close a live interface-bound relay socket")
 import Darwin
 
 var failures = 0

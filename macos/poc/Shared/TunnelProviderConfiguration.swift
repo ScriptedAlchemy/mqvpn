@@ -101,11 +101,16 @@ enum MacConnectGuard {
                          server: ServerSettings?,
                          relay: MacRelaySettings?,
                          relayConfigurationIsValid: Bool = true,
-                         profileIsCurrent: Bool = true) -> Bool {
+                         profileIsCurrent: Bool = true,
+                         discoveredRelay: MacRelayEndpoint? = nil) -> Bool {
         guard isEditable, !isSaving, server?.isValid == true,
               relayConfigurationIsValid, profileIsCurrent else { return false }
         guard let relay else { return true }
-        return !relay.enabled || relay.isValid
+        guard !relay.enabled || relay.isValid else { return false }
+        if relay.enabled {
+            return MacRelayDiscovery.choose(discoveredRelay.map { [$0] } ?? []) != nil
+        }
+        return true
     }
 }
 

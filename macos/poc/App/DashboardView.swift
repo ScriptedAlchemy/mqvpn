@@ -36,7 +36,7 @@ struct DashboardView: View {
                            Self.rate(relay.mbps) +
                            (relay.lastError.map { " · \($0)" } ?? ""))
             } else {
-                labeledRow("iPhone relay", "optional — not configured")
+                labeledRow("iPhone relay", controller.relayDiscoveryText)
             }
             Spacer()
         }

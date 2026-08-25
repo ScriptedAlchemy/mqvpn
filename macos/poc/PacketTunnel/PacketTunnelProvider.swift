@@ -35,7 +35,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private var startCancelled = false
     private lazy var relaySession = MacRelayLANSession(
         queue: lifecycleQueue,
-        pickInterface: { MacLANInterfaceEnumerator.onLinkInterface(reaching: $0) })
+        pickInterface: { endpoint in
+            let discovered = MacRelayEndpoint(host: endpoint, port: 1)
+            if let scoped = MacRelayDiscovery.interfaceName(for: discovered) {
+                return scoped
+            }
+            if MacRelayDiscovery.isIPv6(endpoint) {
+                return MacLANInterfaceEnumerator.candidates()
+                    .sorted { $0.kind.rawValue < $1.kind.rawValue }
+                    .first?.name
+            }
+            return MacLANInterfaceEnumerator.onLinkInterface(reaching: endpoint)
+        })
 
     override func startTunnel(options: [String: NSObject]?) async throws {
         let rawConfig = (protocolConfiguration as? NETunnelProviderProtocol)?
@@ -55,11 +66,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             throw Self.error(11, "server unresolved: \(server.host)")
         }
         let resolvedRelay: ResolvedServerAddress?
-        if let relaySettings {
+        if relaySettings != nil {
+            guard let discovered = await Task.detached(priority: .userInitiated, operation: {
+                MacRelayBonjourResolver.resolve(timeout: 3)
+            }).value else {
+                throw Self.error(12, "No relay found")
+            }
             guard let address = await Task.detached(priority: .userInitiated, operation: {
-                resolveServer(relaySettings.host, relaySettings.port)
-            }).value, address.ipString != nil else {
-                throw Self.error(12, "iPhone relay unresolved: \(relaySettings.host)")
+                resolveRelayEndpoint(discovered.host, discovered.port)
+            }).value, let ip = address.ipString,
+                  MacRelayDiscovery.choose([
+                      MacRelayEndpoint(host: ip, port: discovered.port)
+                  ]) != nil else {
+                throw Self.error(12, "No relay found")
             }
             resolvedRelay = address
         } else {
@@ -137,8 +156,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                      hybrid: HybridSettings(providerConfiguration: providerConfiguration()) ?? .disabled,
                      serverAddr: serverAddress!)
 
-        if relaySettings != nil, let relayIPv4 = resolvedRelay?.ipString {
-            guard relaySession.start(relayIPv4: relayIPv4, makeBinder: { [weak self] name in
+        if relaySettings != nil, let relayEndpoint = resolvedRelay?.ipString {
+            guard relaySession.start(relayIPv4: relayEndpoint, makeBinder: { [weak self] name in
                 self?.makeRelayBinder(interfaceName: name)
             }) else {
                 failStart(Self.error(15, "no live Wi-Fi or Ethernet interface reaches the iPhone relay"))
@@ -149,7 +168,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                 self.snapshotCache?.updateLifecycle(reasserting: self.reasserting,
                                                     error: "iPhone relay interface unavailable")
             }
-            relaySession.armMonitor(relayIPv4: relayIPv4) { [weak self] in
+            relaySession.armMonitor(relayIPv4: relayEndpoint) { [weak self] in
                 self?.lifecycle.isStopping ?? true
             }
         }
@@ -219,12 +238,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                 let action = self.lifecycle.networkSettingsApplied(
                     error: error != nil, activePathCount: self.lastPathCount)
                 if action == .completeStart {
-                    self.completeStart()
+                    self.refreshRelayRouteAfterSettings { [weak self] in
+                        self?.lifecycleQueue.async { self?.completeStart() }
+                    }
                 } else if action == .failStart {
                     self.failStart(error ?? Self.error(16, "failed to apply tunnel settings"))
                 }
             }
         }
+    }
+
+    private func refreshRelayRouteAfterSettings(completion: @escaping () -> Void) {
+        guard relayAddress?.ipString != nil else {
+            completion()
+            return
+        }
+        relaySession.refreshConnectedRoute(completion: completion)
     }
 
     private func completeStart() {
@@ -533,11 +562,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                              serverIPv4: String,
                              relayIPv4: String?) -> NEPacketTunnelNetworkSettings {
         let address = "\(info.assigned_ip.0).\(info.assigned_ip.1).\(info.assigned_ip.2).\(info.assigned_ip.3)"
+        let relayPeer = relayIPv4
+        let relayIPv4 = relayPeer.flatMap {
+            MacRelayDiscovery.isIPv4($0) ? $0 : nil
+        }
+        let relayLAN = relayIPv4.flatMap {
+            MacLANInterfaceSelector.onLinkRoute(relayIPv4: $0,
+                                                candidates: MacLANInterfaceEnumerator.candidates())
+        }
         let plan = MacProviderNetworkPlan(assignedAddress: address,
                                           assignedPrefix: info.assigned_prefix,
                                           mtu: Int(info.mtu),
                                           serverIPv4: serverIPv4,
-                                          relayIPv4: relayIPv4)
+                                          relayIPv4: relayIPv4,
+                                          relayLAN: relayLAN)
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverIPv4)
         let ipv4 = NEIPv4Settings(addresses: [plan.assignedAddress], subnetMasks: [plan.subnetMask])
         ipv4.includedRoutes = plan.includedRoutes.map {

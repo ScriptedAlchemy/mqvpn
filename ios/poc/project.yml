@@ -46,6 +46,8 @@ targets:
         NSSupportsLiveActivities: true
         NSSupportsLiveActivitiesFrequentUpdates: true
         NSLocalNetworkUsageDescription: Allow your Mac to send authenticated mqvpn relay datagrams to this iPhone.
+        NSBonjourServices:
+          - _mqvpn-relay._udp
         MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
         MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
         MqvpnServerName: $(MQVPN_POC_SERVER_NAME)
@@ -83,6 +85,8 @@ targets:
         MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
         MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
         NSLocalNetworkUsageDescription: Allow your Mac to send authenticated mqvpn relay datagrams to this iPhone.
+        NSBonjourServices:
+          - _mqvpn-relay._udp
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider

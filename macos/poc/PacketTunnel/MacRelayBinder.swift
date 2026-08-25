@@ -29,6 +29,9 @@ final class MacRelayBinder {
     private var teardownComplete = false
     private var stopWaiters: [() -> Void] = []
     private var acceptsCoreSends = false
+    /// Network-byte-order local UDP port from the first successful bind.
+    /// Reopen must reuse it so the iPhone's authenticated peer identity still matches.
+    private var pinnedLocalPort: in_port_t = 0
 
     /// Called on the binder's serial queue. Consumers should copy the value;
     /// snapshots contain counters/errors, never the relay key or payloads.
@@ -58,6 +61,21 @@ final class MacRelayBinder {
         // socket and never a root-run adapter.
         engine.onLogicalPathSend = { [weak self] path, packet in
             self?.sendFromCore(path: path, packet: packet) ?? -Int(ENODEV)
+        }
+    }
+
+    /// Refresh the connected UDP route after Network Extension installs the
+    /// default tunnel. Do not close the socket: a new source port would no
+    /// longer match the iPhone's authenticated peer identity.
+    func refreshConnectedRoute(completion: @escaping () -> Void) {
+        queue.async { [weak self] in
+            defer { completion() }
+            guard let self else { return }
+            if self.refreshConnectedRouteLocked() {
+                macRelayLog.notice("relay connect refreshed after tunnel routes")
+            } else if self.fd >= 0 {
+                macRelayLog.error("relay connect refresh after routes failed: \(self.errnoMessage(), privacy: .public)")
+            }
         }
     }
 
@@ -152,8 +170,27 @@ final class MacRelayBinder {
         _ = sendFrame(type: MQVPN_RELAY_HELLO, payload: Data(), nowMs: nowMs())
     }
 
+    private var endpointFamily: Int32 {
+        var storage = relayEndpoint.storage
+        return withUnsafeBytes(of: &storage) { Int32($0.load(as: sockaddr.self).sa_family) }
+    }
+
+    private func scopedEndpoint() -> (sockaddr_storage, socklen_t) {
+        var storage = relayEndpoint.storage
+        let index = if_nametoindex(interfaceName)
+        if endpointFamily == AF_INET6, index != 0 {
+            withUnsafeMutableBytes(of: &storage) { raw in
+                raw.baseAddress!.assumingMemoryBound(to: sockaddr_in6.self)
+                    .pointee.sin6_scope_id = index
+            }
+        }
+        return (storage, relayEndpoint.len)
+    }
+
     private func openTransport() -> Bool {
-        let socketFD = socket(AF_INET, SOCK_DGRAM, 0)
+        let family = endpointFamily
+        guard family == AF_INET || family == AF_INET6 else { return false }
+        let socketFD = socket(family, SOCK_DGRAM, 0)
         guard socketFD >= 0 else { return false }
         let flags = fcntl(socketFD, F_GETFL, 0)
         guard flags >= 0, fcntl(socketFD, F_SETFL, flags | O_NONBLOCK) == 0 else {
@@ -169,18 +206,30 @@ final class MacRelayBinder {
         let index = if_nametoindex(interfaceName)
         guard index != 0 else { close(socketFD); return false }
         var boundIndex = index
-        guard setsockopt(socketFD, IPPROTO_IP, IP_BOUND_IF, &boundIndex,
-                         socklen_t(MemoryLayout<UInt32>.size)) == 0 else {
+        let bound: Int32
+        if family == AF_INET6 {
+            bound = setsockopt(socketFD, IPPROTO_IPV6, IPV6_BOUND_IF, &boundIndex,
+                               socklen_t(MemoryLayout<UInt32>.size))
+        } else {
+            bound = setsockopt(socketFD, IPPROTO_IP, IP_BOUND_IF, &boundIndex,
+                               socklen_t(MemoryLayout<UInt32>.size))
+        }
+        guard bound == 0 else {
             close(socketFD)
             return false
         }
-        var endpoint = relayEndpoint.storage
-        let connected = withUnsafePointer(to: &endpoint) {
+        guard bindPinnedLocalPort(socketFD) else {
+            close(socketFD)
+            return false
+        }
+        var endpoint = scopedEndpoint()
+        let connected = withUnsafePointer(to: &endpoint.0) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(socketFD, $0, relayEndpoint.len)
+                Darwin.connect(socketFD, $0, endpoint.1)
             }
         }
         guard connected == 0 else { close(socketFD); return false }
+        rememberLocalPort(socketFD)
         fd = socketFD
         transportGeneration &+= 1
         let generation = transportGeneration
@@ -189,6 +238,68 @@ final class MacRelayBinder {
         source.resume()
         readSource = source
         return true
+    }
+
+    @discardableResult
+    private func refreshConnectedRouteLocked() -> Bool {
+        guard fd >= 0, !stopped, !teardownStarted else { return false }
+        var endpoint = scopedEndpoint()
+        return withUnsafePointer(to: &endpoint.0) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, endpoint.1)
+            }
+        } == 0
+    }
+
+    private func bindPinnedLocalPort(_ socketFD: Int32) -> Bool {
+        guard pinnedLocalPort != 0 else { return true }
+        var reuse: Int32 = 1
+        _ = setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &reuse,
+                       socklen_t(MemoryLayout<Int32>.size))
+        if endpointFamily == AF_INET6 {
+            var address = sockaddr_in6()
+            address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            address.sin6_family = sa_family_t(AF_INET6)
+            address.sin6_port = pinnedLocalPort
+            return withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(socketFD, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                }
+            } == 0
+        }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = pinnedLocalPort
+        address.sin_addr = in_addr(s_addr: INADDR_ANY)
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(socketFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        } == 0
+    }
+
+    private func rememberLocalPort(_ socketFD: Int32) {
+        var storage = sockaddr_storage()
+        var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let ok = withUnsafeMutablePointer(to: &storage) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(socketFD, $0, &length)
+            }
+        }
+        guard ok == 0 else { return }
+        let family = Int32(storage.ss_family)
+        if family == AF_INET6 {
+            let port = withUnsafeBytes(of: &storage) {
+                $0.load(as: sockaddr_in6.self).sin6_port
+            }
+            if port != 0 { pinnedLocalPort = port }
+        } else if family == AF_INET {
+            let port = withUnsafeBytes(of: &storage) {
+                $0.load(as: sockaddr_in.self).sin_port
+            }
+            if port != 0 { pinnedLocalPort = port }
+        }
     }
 
     private func closeTransport() {
@@ -355,8 +466,14 @@ final class MacRelayBinder {
             recordSocketFailure("relay frame encoding failed")
             return .failed(Int(EIO))
         }
-        let sent = datagram.withUnsafeBytes {
+        var sent = datagram.withUnsafeBytes {
             Darwin.send(fd, $0.baseAddress, datagram.count, 0)
+        }
+        if sent < 0, MacRelaySendRecovery.shouldRefreshRoute(errno),
+           refreshConnectedRouteLocked() {
+            sent = datagram.withUnsafeBytes {
+                Darwin.send(fd, $0.baseAddress, datagram.count, 0)
+            }
         }
         if sent == datagram.count {
             state.recordSuccessfulSend(type: type, datagramLength: datagram.count)

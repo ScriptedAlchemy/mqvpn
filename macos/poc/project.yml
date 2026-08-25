@@ -31,8 +31,10 @@ targets:
         includes:
           - PoCConfig.swift
           - ServerSettings.swift
+          - ServerResolve.swift
           - ReorderSettings.swift
           - HybridSettings.swift
+          - RelayBonjour.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zackjackson.mqvpn.mac
@@ -51,11 +53,14 @@ targets:
       - target: PacketTunnel
         embed: true
       - sdk: NetworkExtension.framework
+      - sdk: Network.framework
     info:
       path: App/Info.plist
       properties:
         LSMinimumSystemVersion: "13.0"
         NSLocalNetworkUsageDescription: Allow this Mac to send authenticated mqvpn relay datagrams to your iPhone.
+        NSBonjourServices:
+          - _mqvpn-relay._udp
   PacketTunnel:
     type: app-extension
     platform: macOS
@@ -75,6 +80,7 @@ targets:
           - ServerResolve.swift
           - ReorderSettings.swift
           - HybridSettings.swift
+          - RelayBonjour.swift
           - mqvpn_clock_shim.c
           - mqvpn_clock_shim.h
     settings:
@@ -97,6 +103,8 @@ targets:
       path: PacketTunnel/Info.plist
       properties:
         NSLocalNetworkUsageDescription: Allow this Mac to send authenticated mqvpn relay datagrams to your iPhone.
+        NSBonjourServices:
+          - _mqvpn-relay._udp
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider

@@ -61,7 +61,7 @@ struct MacRelaySettings: Equatable {
     }
 
     var isValid: Bool {
-        !host.isEmpty && (1...65_535).contains(port) && decodedKey != nil
+        (1...65_535).contains(port) && decodedKey != nil
     }
 
     func toProviderConfiguration() -> [String: Any] {
@@ -99,6 +99,36 @@ enum MacLANInterfaceSelector {
         }?.name
     }
 
+    /// IPv4 stays subnet-matched. IPv6 uses the same live Wi-Fi/Ethernet
+    /// candidate because the Mac IPv4 tunnel does not own IPv6 LAN reachability.
+    static func interfaceName(reaching host: String,
+                              candidates: [MacLANInterfaceCandidate]) -> String? {
+        if let name = select(relayIPv4: host, candidates: candidates) { return name }
+        guard MacRelayDiscovery.isIPv6(host) else { return nil }
+        return candidates.sorted { $0.kind.rawValue < $1.kind.rawValue }
+            .first { !$0.name.isEmpty }?.name
+    }
+
+    static func onLinkRoute(relayIPv4: String,
+                            candidates: [MacLANInterfaceCandidate]) -> MacIPv4Route? {
+        guard let name = select(relayIPv4: relayIPv4, candidates: candidates),
+              let candidate = candidates.first(where: { $0.name == name }),
+              let local = ipv4(candidate.address),
+              let mask = ipv4(candidate.netmask), mask != 0 else { return nil }
+        let network = local & mask
+        var prefix: UInt8 = 0
+        var bit = mask
+        while bit & 0x8000_0000 != 0 {
+            prefix += 1
+            bit <<= 1
+        }
+        return MacIPv4Route(address: dotted(network), prefix: prefix)
+    }
+
+    private static func dotted(_ value: UInt32) -> String {
+        "\((value >> 24) & 255).\((value >> 16) & 255).\((value >> 8) & 255).\(value & 255)"
+    }
+
     private static func ipv4(_ text: String) -> UInt32? {
         let octets = text.split(separator: ".", omittingEmptySubsequences: false)
         guard octets.count == 4 else { return nil }
@@ -116,6 +146,11 @@ struct MacIPv4Route: Equatable {
     let prefix: UInt8
 }
 
+struct MacIPv6Route: Equatable {
+    let address: String
+    let prefix: UInt8
+}
+
 /// Framework-free description of the settings that Network Extension applies
 /// only after libmqvpn has authenticated and delivered tunnel configuration.
 struct MacProviderNetworkPlan: Equatable {
@@ -125,20 +160,34 @@ struct MacProviderNetworkPlan: Equatable {
     let serverIPv4: String
     let includedRoutes: [MacIPv4Route]
     let excludedRoutes: [MacIPv4Route]
+    let assignedIPv6: String
+    let assignedIPv6Prefix: UInt8
+    let includedIPv6Routes: [MacIPv6Route]
+    let excludedIPv6Routes: [MacIPv6Route]
     let dnsServers: [String]
 
     init(assignedAddress: String, assignedPrefix: UInt8, mtu: Int,
-         serverIPv4: String, relayIPv4: String?) {
+         serverIPv4: String, relayIPv4: String?, relayLAN: MacIPv4Route? = nil,
+         relayIPv6: String? = nil) {
         self.assignedAddress = assignedAddress
         self.subnetMask = Self.prefixToMask(assignedPrefix)
         self.mtu = mtu
         self.serverIPv4 = serverIPv4
         self.includedRoutes = [MacIPv4Route(address: "0.0.0.0", prefix: 0)]
-        self.excludedRoutes = [serverIPv4, relayIPv4].compactMap { address in
-            guard let address, !address.isEmpty else { return nil }
-            return MacIPv4Route(address: address, prefix: 32)
+        var excluded = [MacIPv4Route(address: serverIPv4, prefix: 32)]
+        if let relayIPv4, MacRelayDiscovery.isIPv4(relayIPv4) {
+            excluded.append(MacIPv4Route(address: relayIPv4, prefix: 32))
         }
+        if let relayLAN { excluded.append(relayLAN) }
+        self.excludedRoutes = excluded
+        // The overlay is IPv4-only. Claiming ::/0 blackholes AAAA and, worse,
+        // steals the iPhone ULA hop after HELLO/ACK. Leave IPv6 on the LAN.
+        self.assignedIPv6 = "fd77:7777:7777::a"
+        self.assignedIPv6Prefix = 64
+        self.includedIPv6Routes = []
+        self.excludedIPv6Routes = []
         self.dnsServers = ["1.1.1.1", "8.8.8.8"]
+        _ = relayIPv6
     }
 
     static func prefixToMask(_ prefix: UInt8) -> String {
@@ -165,9 +214,12 @@ enum MacRelayRebindDecision: Equatable {
 }
 
 enum MacRelayRebindPolicy {
+    /// A live binder stays until a different interface is observed. A
+    /// transient `getifaddrs` miss after tunnel settings must not unbind:
+    /// that dropped the authenticated IPv6 relay about two seconds after ACK.
     static func decide(current: String?, desired: String?) -> MacRelayRebindDecision {
         if current == desired { return .keep }
-        guard let desired else { return .unbind }
+        guard let desired else { return .keep }
         return .rebind(to: desired)
     }
 }
