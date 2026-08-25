@@ -3,6 +3,7 @@ poc/*.xcodeproj
 poc/Config.xcconfig
 poc/App/Info.plist
 poc/PacketTunnel/Info.plist
+poc/LiveActivity/Info.plist
 poc/*.entitlements
 DerivedData/
 xcuserdata/
