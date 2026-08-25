@@ -82,57 +82,78 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self?.packetFlow.writePackets([data], withProtocols: [proto])
         }
         return try await withCheckedThrowingContinuation { cont in
-            // Two separate latches, both touched ONLY on the tick thread
-            // (the settings completion hops back before touching them):
-            //   configHandled — dedupes tunnel_config_ready refires so a
-            //     second settings apply is never issued;
-            //   startResolved — resume-once for the checked continuation.
-            // Conflating them would let a tunnel_closed that arrives while
-            // the settings apply is still in flight be treated as a
-            // post-establishment close — reporting a successful start for a
-            // dead session.
-            var configHandled = false
+            // All latches below are tick-thread confined. Each core reconnect
+            // emits a new tunnel_config_ready and requires tunActive again.
             var startResolved = false
-            engine.onTunnelConfig = { [weak self] info in
-                // !startResolved: a late config-ready after a close must not
-                // apply NE settings to a dead session.
-                guard let self, !configHandled, !startResolved else { return }
-                configHandled = true
-                // tunnelRemoteAddress must be an IP literal (NE rejects hostnames
-                // there); the engine/TLS side still gets server.host for SNI.
+            var terminal = false
+            var settingsInFlight = false
+            var pendingConfig: mqvpn_tunnel_info_t?
+
+            func applyConfig(_ info: mqvpn_tunnel_info_t) {
+                guard !terminal else { return }
+                if settingsInFlight {
+                    pendingConfig = info
+                    return
+                }
+                settingsInFlight = true
                 let settings = Self.makeSettings(from: info, server: resolvedIP)
                 self.setTunnelNetworkSettings(settings) { err in
-                    engine.perform {   // hop: latch access stays single-threaded
-                        guard !startResolved else { return }
-                        startResolved = true
-                        if let err { cont.resume(throwing: err); return }
-                        engine.tunActive()  // opens TUN + drives state 3->4
-                        self.readLoop()          // one-shot API: re-armed per completion
-                        metrics.start()          // 10s cadence os_log dumps
-                        snapshot.start()         // 1s cadence app-facing cache
-                        if #available(iOS 16.2, *) {
-                            let reporter = MqvpnLiveActivityReporter(mode: .vpn) { [weak snapshot] in
-                                snapshot?.read()
+                    engine.perform {
+                        settingsInFlight = false
+                        guard !terminal else { return }
+                        if let err {
+                            terminal = true
+                            if !startResolved {
+                                startResolved = true
+                                cont.resume(throwing: err)
+                            } else {
+                                self.reasserting = false
+                                self.cancelTunnelWithError(err)
                             }
-                            self.liveActivityReporter = reporter
-                            reporter.start()
+                            return
                         }
-                        cont.resume()
+                        engine.tunActive()
+                        self.reasserting = false
+                        if !startResolved {
+                            startResolved = true
+                            self.readLoop()
+                            metrics.start()
+                            snapshot.start()
+                            if #available(iOS 16.2, *) {
+                                let reporter = MqvpnLiveActivityReporter(mode: .vpn) { [weak snapshot] in
+                                    snapshot?.read()
+                                }
+                                self.liveActivityReporter = reporter
+                                reporter.start()
+                            }
+                            cont.resume()
+                        }
+                        if let pending = pendingConfig {
+                            pendingConfig = nil
+                            applyConfig(pending)
+                        }
                     }
                 }
             }
-            // Before startTunnel resolves, a close (handshake/auth failure,
-            // or death during the settings apply) must fail startTunnel —
-            // otherwise it hangs until the NE watchdog kills the extension.
-            // After resolution, a close is a dead session: tear down.
+
+            engine.onTunnelConfig = { info in applyConfig(info) }
             engine.onTunnelClosed = { [weak self] reason in
                 guard let self else { return }
                 let err = NSError(domain: "mqvpn.poc", code: Int(reason),
                                   userInfo: [NSLocalizedDescriptionKey: "tunnel closed"])
-                if !startResolved {
+                switch ProviderReconnectPolicy.closed(
+                    startResolved: startResolved,
+                    permanent: ProviderCloseReason.isPermanent(reason)) {
+                case .awaitReconnect:
+                    self.reasserting = true
+                    providerLog.notice("mqvpn reconnecting after transient close reason=\(reason)")
+                case .failStart:
+                    terminal = true
                     startResolved = true
                     cont.resume(throwing: err)
-                } else {
+                case .cancelTunnel:
+                    terminal = true
+                    self.reasserting = false
                     self.cancelTunnelWithError(err)
                 }
             }

@@ -209,6 +209,29 @@ check(selectMatchingManager([
     .init(id: "other", providerBundleID: "com.example.other.PacketTunnel", status: .connected),
 ], providerBundleID: TunnelProviderConfiguration.providerBundleID) == nil,
       "no matching provider profile stays unavailable")
+check(selectMatchingManager([
+    .init(id: "old", providerBundleID: TunnelProviderConfiguration.providerBundleID,
+          status: .disconnected),
+    .init(id: "live", providerBundleID: TunnelProviderConfiguration.providerBundleID,
+          status: .connected),
+], providerBundleID: TunnelProviderConfiguration.providerBundleID)?.id == "live",
+      "duplicate profiles prefer the authoritative live connection")
+
+check(ProviderReconnectPolicy.closed(startResolved: false, permanent: false) == .awaitReconnect &&
+      ProviderReconnectPolicy.closed(startResolved: true, permanent: false) == .awaitReconnect,
+      "transient preflight and established closes stay inside core reconnect")
+check(ProviderReconnectPolicy.closed(startResolved: false, permanent: true) == .failStart &&
+      ProviderReconnectPolicy.closed(startResolved: true, permanent: true) == .cancelTunnel,
+      "permanent authentication/protocol closes fail closed")
+check(ProviderCloseReason.isPermanent(-4) && ProviderCloseReason.isPermanent(-5) &&
+      ProviderCloseReason.isPermanent(-6) && ProviderCloseReason.isPermanent(-11) &&
+      !ProviderCloseReason.isPermanent(-10) && !ProviderCloseReason.isPermanent(-12),
+      "TLS/auth/protocol/ABI failures are permanent while close/timeout may reconnect")
+check(PathAddOutcomePolicy.keep(handle: 4, outcomeRaw: 0) &&
+      PathAddOutcomePolicy.keep(handle: 4, outcomeRaw: 1) &&
+      !PathAddOutcomePolicy.keep(handle: 4, outcomeRaw: 2) &&
+      !PathAddOutcomePolicy.keep(handle: -1, outcomeRaw: 0),
+      "permanent path-add rejection never occupies an interface slot")
 
 check(StopLifecycle.request(hasManager: false, status: .connected) == .unavailable,
       "Stop without a manager is unavailable")
@@ -719,6 +742,9 @@ check(LiveActivityUpdateOrder.shouldApply(currentSampledAt: nil, candidateSample
       !LiveActivityUpdateOrder.shouldApply(currentSampledAt: 10, candidateSampledAt: 10) &&
       !LiveActivityUpdateOrder.shouldApply(currentSampledAt: 11, candidateSampledAt: 10),
       "Live Activity updates never let delayed app/provider tasks regress or duplicate state")
+check(LiveActivityReporterPublish.shouldUpdateExisting(currentID: "vpn") &&
+      !LiveActivityReporterPublish.shouldUpdateExisting(currentID: String?.none),
+      "the provider reporter stays silent when no exact-mode activity exists")
 
 let freshRelayDashboardSnapshot = TunnelSnapshot(
     timestamp: 100, clientState: -1, connectedSince: 90, footprint: 0,

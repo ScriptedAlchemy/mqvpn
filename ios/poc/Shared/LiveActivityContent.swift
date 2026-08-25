@@ -79,6 +79,15 @@ enum LiveActivityUpdateOrder {
     }
 }
 
+/// The provider reporter must not sample or call ActivityKit when this
+/// session never created an exact-mode Island. That miss is steady-state,
+/// not an event worth logging every two seconds.
+enum LiveActivityReporterPublish {
+    static func shouldUpdateExisting(currentID: String?) -> Bool {
+        currentID != nil
+    }
+}
+
 /// Deterministic duplicate and mode-switch policy shared by the foreground
 /// requester and provider updater. There is exactly one current activity, and
 /// it must match the running mode.

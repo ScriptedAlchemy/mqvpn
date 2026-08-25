@@ -32,7 +32,39 @@ struct ManagerDescriptor: Equatable {
 /// this app. A persisted profile from another build or app is never adopted.
 func selectMatchingManager(_ managers: [ManagerDescriptor],
                            providerBundleID: String) -> ManagerDescriptor? {
-    managers.first { $0.providerBundleID == providerBundleID }
+    let matching = managers.filter { $0.providerBundleID == providerBundleID }
+    func priority(_ status: TunnelStatus) -> Int {
+        switch status {
+        case .connected: return 5
+        case .reasserting: return 4
+        case .connecting: return 3
+        case .disconnecting: return 2
+        case .disconnected: return 1
+        case .invalid: return 0
+        }
+    }
+    return matching.max { priority($0.status) < priority($1.status) }
+}
+
+enum ProviderReconnectAction: Equatable {
+    case awaitReconnect
+    case failStart
+    case cancelTunnel
+}
+
+enum ProviderReconnectPolicy {
+    static func closed(startResolved: Bool, permanent: Bool) -> ProviderReconnectAction {
+        guard permanent else { return .awaitReconnect }
+        return startResolved ? .cancelTunnel : .failStart
+    }
+}
+
+enum ProviderCloseReason {
+    static func isPermanent(_ reason: Int32) -> Bool {
+        // MQVPN_ERR_TLS, AUTH, PROTOCOL, and ABI_MISMATCH cannot recover
+        // without a configuration or binary change. CLOSED and TIMEOUT can.
+        reason == -4 || reason == -5 || reason == -6 || reason == -11
+    }
 }
 
 /// Pure state and dispatch decisions for a user-initiated tunnel Stop.

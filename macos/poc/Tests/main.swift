@@ -191,6 +191,13 @@ check(MacRelayRebindPolicy.decide(current: "en1", desired: "en1") == .keep &&
       MacRelayRebindPolicy.decide(current: "en1", desired: "en5") == .rebind(to: "en5") &&
       MacRelayRebindPolicy.decide(current: nil, desired: "en1") == .rebind(to: "en1"),
       "a live relay interface survives a probe miss; only a new interface rebinds")
+check(!PathSlotRebind.shouldReplace(existingName: "en0", existingIndex: 14,
+                                    incomingName: "en0", incomingIndex: 14) &&
+      PathSlotRebind.shouldReplace(existingName: "en0", existingIndex: 14,
+                                   incomingName: "en0", incomingIndex: 22) &&
+      PathSlotRebind.shouldReplace(existingName: "en0", existingIndex: 14,
+                                   incomingName: "en1", incomingIndex: 14),
+      "a satisfied NWPath still rebinds when ifindex or ifname churns")
 check(MacPathIdentity.relayName == "iphone-relay",
       "direct and relay path identity share one constant")
 
@@ -626,8 +633,9 @@ check(state.receive(expiredACK, nowMs: 1_108) == .activateLogicalPath && state.a
 check(state.expireIfIdle(nowMs: 16_108) == false &&
       state.expireIfIdle(nowMs: 16_109),
       "relay expires only after the full fifteen-second authenticated idle window")
-check(!state.snapshot.active && state.snapshot.pathHandle == nil,
-      "expiry removes the logical callback path")
+check(!state.snapshot.active && state.snapshot.pathHandle == nil &&
+      state.resumeSessionID() == session + 2,
+      "expiry removes the logical callback path and remembers the lease")
 
 check(MacRelayEndpointSafety.isLocalEndpoint("192.168.1.20",
                                               localIPv4Addresses: ["192.168.1.20"]),

@@ -34,3 +34,18 @@ struct PoCConfig {
                          bulkURL: bulk)
     }
 }
+
+/// Persistent NWPathMonitor slots skip `addPath` while satisfied. ifindex
+/// still churns on roam/sleep, so the bound socket must be replaced.
+enum PathSlotRebind {
+    static func shouldReplace(existingName: String, existingIndex: UInt32,
+                              incomingName: String, incomingIndex: UInt32) -> Bool {
+        existingName != incomingName || existingIndex != incomingIndex
+    }
+}
+
+enum PathAddOutcomePolicy {
+    static func keep(handle: Int64, outcomeRaw: UInt32) -> Bool {
+        handle >= 0 && outcomeRaw != 2
+    }
+}

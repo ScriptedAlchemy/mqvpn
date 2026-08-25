@@ -38,6 +38,7 @@ final class PathBinder {
         var fd: Int32
         var source: DispatchSourceRead
         var ifname: String
+        var ifindex: UInt32
         let cancellationGate: CancellationGate
     }
     private let engine: MqvpnEngine
@@ -161,7 +162,16 @@ final class PathBinder {
 
     /// Socket preparation + registration. Runs on the tick thread.
     private func addPath(type: NWInterface.InterfaceType, iface: NWInterface) {
-        guard slots[type] == nil else { return }   // already bound
+        if let existing = slots[type] {
+            guard PathSlotRebind.shouldReplace(existingName: existing.ifname,
+                                               existingIndex: existing.ifindex,
+                                               incomingName: iface.name,
+                                               incomingIndex: UInt32(iface.index))
+            else { return }
+            // Drop the stale fd first. `slots` is cleared synchronously so
+            // the replacement can bind the new ifindex on this same probe.
+            removePath(type: type)
+        }
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { log.error("socket() errno=\(errno)"); return }
         // 1. non-blocking (Darwin Swift imports fcntl with 3 args)
@@ -207,13 +217,15 @@ final class PathBinder {
         desc.local_addr_len = UInt32(lalen)
         // 6. register with the engine (we are on the tick thread already)
         let (handle, outcome) = engine.addPathFd(fd, desc: &desc)
-        guard handle >= 0 else {
+        guard PathAddOutcomePolicy.keep(handle: handle, outcomeRaw: outcome.rawValue) else {
             // Registration refused (handle slot unavailable; outcome is NOT
             // written in this case). Surface it — this is exactly what the
             // failover-flap gate measures — and release the fd without any
             // engine calls.
             log.error("add_path_fd failed iface=\(iface.name, privacy: .public) handle=\(handle)")
+            if handle >= 0 { engine.removePath(handle) }
             close(fd)
+            if handle >= 0 { engine.fdClosed(handle) }
             return
         }
         log.notice("add_path outcome=\(outcome.rawValue) iface=\(iface.name, privacy: .public)")
@@ -241,7 +253,8 @@ final class PathBinder {
         }
         source.resume()
         slots[type] = PathSlot(handle: handle, fd: fd, source: source,
-                               ifname: iface.name, cancellationGate: cancellationGate)
+                               ifname: iface.name, ifindex: UInt32(iface.index),
+                               cancellationGate: cancellationGate)
         log.notice("path added type=\(String(describing: type), privacy: .public) fd=\(fd) handle=\(handle)")
     }
 

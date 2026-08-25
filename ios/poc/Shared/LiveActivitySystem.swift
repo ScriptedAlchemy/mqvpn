@@ -173,6 +173,13 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
 
     private func publish() {
         guard !stopped, let snapshot = snapshotProvider() else { return }
+        let activities = Activity<MqvpnNetworkActivityAttributes>.activities
+        let plan = LiveActivitySelection.plan(
+            activities: activities.map {
+                LiveActivityDescriptor(id: $0.id, mode: $0.attributes.mode)
+            }, desiredMode: mode.rawValue)
+        guard LiveActivityReporterPublish.shouldUpdateExisting(currentID: plan.currentID)
+        else { return }
         let published = LiveActivityContentFactory.make(snapshot: snapshot, sampler: &sampler)
         Task {
             _ = await MqvpnLiveActivityLifecycle.updateExisting(
