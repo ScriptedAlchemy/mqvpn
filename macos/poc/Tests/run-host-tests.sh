@@ -40,12 +40,13 @@ swiftc -o "$OUT" \
     "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
+    "$ROOT/macos/poc/PacketTunnel/MacLANInterfaceEnumerator.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacRelayBinder.swift" \
     "$TMPD/mqvpn_clock_shim.o" "$TMPD/reorder_layout_shim.o" \
     "$DIR/main.swift" \
     -L"$ROOT/build" -L"$XQUIC_BUILD_DIR" -lmqvpn "$ROOT/build/libmqvpn.a" -lxquic \
     "$BORINGSSL_BUILD_DIR/libssl.a" "$BORINGSSL_BUILD_DIR/libcrypto.a" \
-    -framework Security -framework CoreFoundation -lc++ \
+    -framework Security -framework CoreFoundation -framework SystemConfiguration -lc++ \
     -Xlinker -rpath -Xlinker "$ROOT/build" \
     -Xlinker -rpath -Xlinker "$XQUIC_BUILD_DIR"
 "$OUT"
@@ -79,6 +80,8 @@ swiftc -typecheck \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
     "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
+    "$ROOT/macos/poc/PacketTunnel/MacLANInterfaceEnumerator.swift" \
+    "$ROOT/macos/poc/PacketTunnel/MacRelayLANSession.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacRelayBinder.swift" \
     "$ROOT/macos/poc/PacketTunnel/PacketTunnelProvider.swift" \
     -framework Network -framework NetworkExtension -framework SystemConfiguration \

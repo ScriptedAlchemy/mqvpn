@@ -61,27 +61,49 @@ func saveGuard(isSaving: Bool, isEditable: Bool, hasManager: Bool) -> SaveError?
 
 protocol MacConfigStore: AnyObject {
     var providerConfiguration: [String: Any]? { get set }
+    var localizedName: String? { get set }
+    var isEnabled: Bool { get set }
     func commit() async throws
     func refresh() async throws
 }
 
-func performAtomicSave(_ store: MacConfigStore, merge: [String: Any]) async throws {
-    let backup = store.providerConfiguration
-    var merged = backup ?? [:]
+enum MacSaveFailure: Error {
+    case commit(any Error)
+    case refresh(any Error)
+}
+
+func performAtomicSave(_ store: MacConfigStore, merge: [String: Any],
+                       name: String? = nil, enabled: Bool? = nil) async throws {
+    let backupConfig = store.providerConfiguration
+    let backupName = store.localizedName
+    let backupEnabled = store.isEnabled
+    var merged = backupConfig ?? [:]
     for (k, v) in merge { merged[k] = v }
     store.providerConfiguration = merged
+    if let name { store.localizedName = name }
+    if let enabled { store.isEnabled = enabled }
     do { try await store.commit() }
-    catch { store.providerConfiguration = backup; throw error }
-    try await store.refresh()
+    catch {
+        store.providerConfiguration = backupConfig
+        store.localizedName = backupName
+        store.isEnabled = backupEnabled
+        throw MacSaveFailure.commit(error)
+    }
+    do { try await store.refresh() }
+    catch {
+        do { try await store.refresh() }
+        catch { throw MacSaveFailure.refresh(error) }
+    }
 }
 
 enum MacConnectGuard {
     static func canStart(isEditable: Bool, isSaving: Bool,
                          server: ServerSettings?,
                          relay: MacRelaySettings?,
-                         relayConfigurationIsValid: Bool = true) -> Bool {
+                         relayConfigurationIsValid: Bool = true,
+                         profileIsCurrent: Bool = true) -> Bool {
         guard isEditable, !isSaving, server?.isValid == true,
-              relayConfigurationIsValid else { return false }
+              relayConfigurationIsValid, profileIsCurrent else { return false }
         guard let relay else { return true }
         return !relay.enabled || relay.isValid
     }
@@ -148,9 +170,26 @@ struct MacSnapshotRateSampler {
 
     private var samples: [String: Sample] = [:]
 
+    mutating func ingest(id: String, timestamp: Double, totalBytes: UInt64) -> MacPathRate {
+        let rate: Double?
+        if let previous = samples[id], timestamp > previous.timestamp,
+           totalBytes >= previous.totalBytes {
+            let elapsed = timestamp - previous.timestamp
+            rate = elapsed >= 0.05 && elapsed <= MacSnapshotFreshness.maxAge
+                ? Double(totalBytes - previous.totalBytes) * 8 / elapsed / 1_000_000
+                : nil
+        } else {
+            rate = nil
+        }
+        if samples[id]?.timestamp ?? -.infinity <= timestamp {
+            samples[id] = Sample(timestamp: timestamp, totalBytes: totalBytes)
+        }
+        return MacPathRate(pathID: id, totalBytes: totalBytes, megabitsPerSecond: rate)
+    }
+
     mutating func ingest(_ snapshot: MacProviderSnapshot) -> [MacPathRate] {
         let presentIDs = Set(snapshot.paths.map(\.name))
-        samples = samples.filter { presentIDs.contains($0.key) }
+        samples = samples.filter { presentIDs.contains($0.key) || $0.key == MacPathIdentity.relayLANSampleID }
 
         return snapshot.paths.map { path in
             let pathID = path.name
@@ -158,21 +197,22 @@ struct MacSnapshotRateSampler {
                 samples.removeValue(forKey: pathID)
                 return MacPathRate(pathID: pathID, totalBytes: 0, megabitsPerSecond: nil)
             }
-            let rate: Double?
-            if let previous = samples[pathID], snapshot.timestamp > previous.timestamp,
-               totalBytes >= previous.totalBytes {
-                let elapsed = snapshot.timestamp - previous.timestamp
-                rate = elapsed >= 0.05 && elapsed <= MacSnapshotFreshness.maxAge
-                    ? Double(totalBytes - previous.totalBytes) * 8 / elapsed / 1_000_000
-                    : nil
-            } else {
-                rate = nil
-            }
-            if samples[pathID]?.timestamp ?? -.infinity <= snapshot.timestamp {
-                samples[pathID] = Sample(timestamp: snapshot.timestamp, totalBytes: totalBytes)
-            }
-            return MacPathRate(pathID: pathID, totalBytes: totalBytes, megabitsPerSecond: rate)
+            return ingest(id: pathID, timestamp: snapshot.timestamp, totalBytes: totalBytes)
         }
+    }
+
+    mutating func ingestRelay(from snapshot: MacProviderSnapshot) -> Double? {
+        guard let relay = snapshot.relay else {
+            samples.removeValue(forKey: MacPathIdentity.relayLANSampleID)
+            return nil
+        }
+        let total = relay.lanTxBytes.addingReportingOverflow(relay.lanRxBytes)
+        guard !total.overflow else {
+            samples.removeValue(forKey: MacPathIdentity.relayLANSampleID)
+            return nil
+        }
+        return ingest(id: MacPathIdentity.relayLANSampleID, timestamp: snapshot.timestamp,
+                      totalBytes: total.partialValue).megabitsPerSecond
     }
 
     private func totalBytes(for path: MacProviderPathSnapshot) -> UInt64? {

@@ -52,10 +52,9 @@ check(startupTimeout.activePathCountChanged(1, nowMs: 100) == .none &&
 check(startupTimeout.startupTimerFired(nowMs: 10_000) == .failStart &&
       !startupTimeout.settingsRequested,
       "startup expiry fails before any default route was requested")
-check(!MacProviderStartupSafety.mayApplyNetworkSettings(activePathCount: 0, stopping: false) &&
-      !MacProviderStartupSafety.mayActivatePacketFlow(activePathCount: 0, stopping: false) &&
-      !MacProviderStartupSafety.mayApplyNetworkSettings(activePathCount: 1, stopping: true) &&
-      MacProviderStartupSafety.mayApplyNetworkSettings(activePathCount: 1, stopping: false),
+check(!MacProviderStartupSafety.hasSurvivingPath(activePathCount: 0, stopping: false) &&
+      !MacProviderStartupSafety.hasSurvivingPath(activePathCount: 1, stopping: true) &&
+      MacProviderStartupSafety.hasSurvivingPath(activePathCount: 1, stopping: false),
       "a zero-path or stopping start cannot install or retain default tunnel settings")
 
 var settingsTimeout = MacProviderLifecycle()
@@ -70,7 +69,7 @@ check(lifecycle.begin(nowMs: 0) == .none,
 check(lifecycle.tunnelConfigurationReady() == .applyNetworkSettings &&
       lifecycle.settingsRequested,
       "real tunnel configuration is the sole settings-install gate")
-check(lifecycle.networkSettingsApplied(error: false) == .completeStart &&
+check(lifecycle.networkSettingsApplied(error: false, activePathCount: 1) == .completeStart &&
       lifecycle.isEstablished,
       "successful Network Extension settings complete Start")
 check(lifecycle.activePathCountChanged(0, nowMs: 1_000) ==
@@ -88,7 +87,7 @@ check(lifecycle.activePathCountChanged(0, nowMs: 8_000) ==
 var failedSettings = MacProviderLifecycle()
 _ = failedSettings.begin(nowMs: 0)
 _ = failedSettings.tunnelConfigurationReady()
-check(failedSettings.networkSettingsApplied(error: true) == .failStart,
+check(failedSettings.networkSettingsApplied(error: true, activePathCount: 1) == .failStart,
       "a settings failure cannot become a connected VPN")
 
 var lostDuringApply = MacProviderLifecycle()
@@ -105,9 +104,15 @@ check(zeroAtApply.networkSettingsApplied(error: false, activePathCount: 0) == .f
 
 var stopping = MacProviderLifecycle()
 _ = stopping.begin(nowMs: 0)
-check(stopping.beginStop() == [.relay, .direct, .snapshot, .engine] &&
-      stopping.beginStop().isEmpty,
-      "Stop is idempotent and orders relay before direct, snapshot, and engine")
+check(stopping.beginStop() && stopping.isStopping && !stopping.beginStop(),
+      "Stop is idempotent and is owned by the lifecycle stage, not a parallel flag")
+check(MacRelayRebindPolicy.decide(current: "en1", desired: "en1") == .keep &&
+      MacRelayRebindPolicy.decide(current: "en1", desired: nil) == .unbind &&
+      MacRelayRebindPolicy.decide(current: "en1", desired: "en5") == .rebind(to: "en5") &&
+      MacRelayRebindPolicy.decide(current: nil, desired: "en1") == .rebind(to: "en1"),
+      "relay LAN rebind is a single decision, not scattered timer-branch state")
+check(MacPathIdentity.relayName == "iphone-relay",
+      "direct and relay path identity share one constant")
 
 let snapshotStore = MacProviderSnapshotStore()
 let providerSnapshot = MacProviderSnapshot(
@@ -210,6 +215,10 @@ check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                 server: validServer, relay: nil,
                                 relayConfigurationIsValid: false),
       "a persisted malformed enabled relay cannot silently downgrade to direct-only Start")
+check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
+                                server: validServer, relay: nil,
+                                profileIsCurrent: false),
+      "Start remains disabled when a committed profile could not be reloaded")
 check(StopLifecycle.canStop(hasManager: true, status: .connected) &&
       StopLifecycle.request(hasManager: true, status: .disconnected) == .alreadyStopped &&
       StopLifecycle.request(hasManager: true, status: .connected) == .requested &&
@@ -220,10 +229,18 @@ check(StopLifecycle.canStop(hasManager: true, status: .connected) &&
 enum TestErr: Error { case boom }
 final class FakeStore: MacConfigStore {
     var providerConfiguration: [String: Any]?
+    var localizedName: String?
+    var isEnabled = false
     var commitThrows = false
     var refreshThrows = false
+    var refreshAttempts = 0
+    var refreshFailuresBeforeSuccess = 0
     func commit() async throws { if commitThrows { throw TestErr.boom } }
-    func refresh() async throws { if refreshThrows { throw TestErr.boom } }
+    func refresh() async throws {
+        refreshAttempts += 1
+        if refreshThrows { throw TestErr.boom }
+        if refreshAttempts <= refreshFailuresBeforeSuccess { throw TestErr.boom }
+    }
 }
 func runAsync(_ body: @escaping () async -> Void) {
     let sem = DispatchSemaphore(value: 0)
@@ -233,24 +250,45 @@ func runAsync(_ body: @escaping () async -> Void) {
 runAsync {
     let store = FakeStore()
     store.providerConfiguration = ["macRelayEnabled": NSNumber(value: false)]
+    store.localizedName = "old"
+    store.isEnabled = false
     store.commitThrows = true
-    var threw = false
+    var commitFailed = false
     do {
-        try await performAtomicSave(store, merge: ["macRelayEnabled": NSNumber(value: true)])
-    } catch { threw = true }
+        try await performAtomicSave(store, merge: ["macRelayEnabled": NSNumber(value: true)],
+                                    name: TunnelProviderConfiguration.localizedName,
+                                    enabled: true)
+    } catch MacSaveFailure.commit {
+        commitFailed = true
+    } catch { }
     let rolledBack = (store.providerConfiguration?["macRelayEnabled"] as? NSNumber)?.boolValue == false
-    check(threw && rolledBack, "commit failure rolls the Mac provider configuration back")
+    check(commitFailed && rolledBack && store.localizedName == "old" && store.isEnabled == false,
+          "commit failure rolls configuration, name, and enabled back together")
 }
 runAsync {
     let store = FakeStore()
     store.providerConfiguration = [:]
     store.refreshThrows = true
-    var threw = false
+    var refreshFailed = false
     do {
         try await performAtomicSave(store, merge: ["macRelayHost": "192.168.1.42"])
-    } catch { threw = true }
-    check(threw && store.providerConfiguration?["macRelayHost"] as? String == "192.168.1.42",
+    } catch MacSaveFailure.refresh {
+        refreshFailed = true
+    } catch { }
+    check(refreshFailed && store.providerConfiguration?["macRelayHost"] as? String == "192.168.1.42",
           "a post-commit refresh failure is surfaced instead of claiming the profile reloaded")
+}
+runAsync {
+    let store = FakeStore()
+    store.providerConfiguration = [:]
+    store.refreshFailuresBeforeSuccess = 1
+    var succeeded = false
+    do {
+        try await performAtomicSave(store, merge: ["macRelayHost": "192.168.1.42"])
+        succeeded = true
+    } catch { }
+    check(succeeded && store.refreshAttempts == 2,
+          "a committed profile gets exactly one refresh retry before Start is disabled")
 }
 
 let firstRateSnapshot = MacProviderSnapshot(
@@ -283,6 +321,12 @@ let resetSnapshot = MacProviderSnapshot(
     paths: [MacProviderPathSnapshot(name: "en1", status: 1, txBytes: 1, rxBytes: 1)], relay: nil)
 check(rateSampler.ingest(resetSnapshot).first?.megabitsPerSecond == nil,
       "a path counter reset is unavailable rather than an unsigned-wrap throughput spike")
+var relaySampler = MacSnapshotRateSampler()
+check(relaySampler.ingest(id: MacPathIdentity.relayLANSampleID, timestamp: 10, totalBytes: 100)
+        .megabitsPerSecond == nil &&
+      abs((relaySampler.ingest(id: MacPathIdentity.relayLANSampleID, timestamp: 12,
+                               totalBytes: 100 + 500_000).megabitsPerSecond ?? -1) - 2.0) < 0.001,
+      "relay LAN counters use the same sampler as direct paths")
 check(MacSnapshotFreshness.isFresh(receivedAt: 10, now: 12.9) &&
       !MacSnapshotFreshness.isFresh(receivedAt: 10, now: 13.1),
       "a missing provider response expires displayed rates instead of retaining stale throughput")

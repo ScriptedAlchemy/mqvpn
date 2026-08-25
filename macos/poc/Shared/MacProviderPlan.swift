@@ -70,6 +70,11 @@ struct MacRelaySettings: Equatable {
     }
 }
 
+enum MacPathIdentity {
+    static let relayName = "iphone-relay"
+    static let relayLANSampleID = "iphone-relay.lan"
+}
+
 enum MacLANInterfaceKind: Int, Equatable {
     case wifi = 0
     case wiredEthernet = 1
@@ -153,22 +158,25 @@ enum MacProviderLifecycleAction: Equatable {
     case cancelTunnel
 }
 
-enum MacProviderStopStep: Equatable {
-    case relay
-    case direct
-    case snapshot
-    case engine
+enum MacRelayRebindDecision: Equatable {
+    case keep
+    case unbind
+    case rebind(to: String)
+}
+
+enum MacRelayRebindPolicy {
+    static func decide(current: String?, desired: String?) -> MacRelayRebindDecision {
+        if current == desired { return .keep }
+        guard let desired else { return .unbind }
+        return .rebind(to: desired)
+    }
 }
 
 /// Small, framework-free guard used at both sides of Network Extension's
 /// asynchronous settings apply. A core config callback is not sufficient by
 /// itself: the final active path can vanish before settings complete.
 enum MacProviderStartupSafety {
-    static func mayApplyNetworkSettings(activePathCount: Int, stopping: Bool) -> Bool {
-        !stopping && activePathCount > 0
-    }
-
-    static func mayActivatePacketFlow(activePathCount: Int, stopping: Bool) -> Bool {
+    static func hasSurvivingPath(activePathCount: Int, stopping: Bool) -> Bool {
         !stopping && activePathCount > 0
     }
 }
@@ -199,6 +207,11 @@ struct MacProviderLifecycle {
         }
     }
 
+    var isStopping: Bool {
+        if case .stopping = stage { return true }
+        return false
+    }
+
     mutating func begin(nowMs: UInt64) -> MacProviderLifecycleAction {
         guard case .idle = stage else { return .none }
         stage = .preflight(startedMs: nowMs)
@@ -214,7 +227,7 @@ struct MacProviderLifecycle {
     }
 
     mutating func networkSettingsApplied(error: Bool,
-                                         activePathCount: Int = 1) -> MacProviderLifecycleAction {
+                                         activePathCount: Int) -> MacProviderLifecycleAction {
         guard case .applyingSettings = stage else { return .none }
         if error || activePathCount == 0 {
             stage = .failed
@@ -260,12 +273,12 @@ struct MacProviderLifecycle {
         return .cancelTunnel
     }
 
-    mutating func beginStop() -> [MacProviderStopStep] {
+    mutating func beginStop() -> Bool {
         switch stage {
-        case .stopping: return []
+        case .stopping: return false
         default:
             stage = .stopping
-            return [.relay, .direct, .snapshot, .engine]
+            return true
         }
     }
 }

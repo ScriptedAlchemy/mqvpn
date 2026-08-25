@@ -247,7 +247,7 @@ final class MacRelayBinder {
             desc.struct_size = UInt32(MemoryLayout<mqvpn_path_desc_t>.size)
             desc.fd = -1
             withUnsafeMutableBytes(of: &desc.iface) { destination in
-                "iphone-relay".utf8CString.withUnsafeBytes {
+                MacPathIdentity.relayName.utf8CString.withUnsafeBytes {
                     destination.copyBytes(from: $0.prefix(destination.count - 1))
                 }
             }
@@ -428,23 +428,6 @@ final class MacRelayBinder {
     }
 
     private static func localIPv4Addresses() -> [String] {
-        var list: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&list) == 0, let list else { return [] }
-        defer { freeifaddrs(list) }
-        var addresses: [String] = []
-        for cursor in sequence(first: list, next: { $0.pointee.ifa_next }) {
-            guard let address = cursor.pointee.ifa_addr, address.pointee.sa_family == sa_family_t(AF_INET)
-            else { continue }
-            var storage = sockaddr_storage()
-            memcpy(&storage, address, Int(address.pointee.sa_len))
-            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-            var sin = withUnsafeBytes(of: &storage) {
-                $0.baseAddress!.assumingMemoryBound(to: sockaddr_in.self).pointee
-            }
-            if inet_ntop(AF_INET, &sin.sin_addr, &buffer, socklen_t(buffer.count)) != nil {
-                addresses.append(String(cString: buffer))
-            }
-        }
-        return addresses
+        MacLANInterfaceEnumerator.localIPv4Addresses()
     }
 }
