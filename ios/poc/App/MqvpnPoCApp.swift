@@ -27,7 +27,7 @@ struct MqvpnPoCApp: App {
 /// rates are derived here from consecutive snapshots.
 @MainActor
 final class TunnelController: ObservableObject {
-    static let providerBundleID = "com.zackjackson.mqvpn.PacketTunnel"
+    static let providerBundleID = TunnelProviderConfiguration.providerBundleID
 
     @Published var status: NEVPNStatus = .invalid
     @Published var statusText = "not loaded"

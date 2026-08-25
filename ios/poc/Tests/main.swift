@@ -181,15 +181,14 @@ check(hyParsed.tcpMode == 2, "bool-backed mode clamps to auto")
 // These catch an accidental selection of a stale or another app's profile,
 // a Stop action that leaves a live tunnel visually connected, and a Stop that
 // hangs after the engine tick thread has already exited.
-let tunnelProviderBundleID = "com.zackjackson.mqvpn.PacketTunnel"
 let selectedManager = selectMatchingManager([
     .init(id: "old", providerBundleID: "com.mp0rta.mqvpnpoc.PacketTunnel", status: .connected),
-    .init(id: "current", providerBundleID: tunnelProviderBundleID, status: .disconnected),
-], providerBundleID: tunnelProviderBundleID)
+    .init(id: "current", providerBundleID: TunnelProviderConfiguration.providerBundleID, status: .disconnected),
+], providerBundleID: TunnelProviderConfiguration.providerBundleID)
 check(selectedManager?.id == "current", "select matching provider profile, never a stale first profile")
 check(selectMatchingManager([
     .init(id: "other", providerBundleID: "com.example.other.PacketTunnel", status: .connected),
-], providerBundleID: tunnelProviderBundleID) == nil,
+], providerBundleID: TunnelProviderConfiguration.providerBundleID) == nil,
       "no matching provider profile stays unavailable")
 
 check(StopLifecycle.request(hasManager: false, status: .connected) == .unavailable,

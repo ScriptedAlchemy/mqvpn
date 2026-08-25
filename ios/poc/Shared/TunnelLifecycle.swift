@@ -3,6 +3,12 @@
 
 import Foundation
 
+/// Authoritative identifier for the packet-tunnel provider profile. Kept in
+/// Foundation-only shared code so the app and host tests cannot drift apart.
+enum TunnelProviderConfiguration {
+    static let providerBundleID = "com.zackjackson.mqvpn.PacketTunnel"
+}
+
 /// NetworkExtension-independent connection states used to make app lifecycle
 /// decisions host-testable. The app maps its NEVPNStatus into this value type.
 enum TunnelStatus: Equatable {
