@@ -1239,6 +1239,32 @@ TEST(path_stats_after_recv)
     mqvpn_client_destroy(c);
 }
 
+TEST(recv_fallback_local_addr_matches_peer_family)
+{
+    struct sockaddr_storage local;
+    struct sockaddr_in peer4;
+    memset(&peer4, 0, sizeof(peer4));
+    peer4.sin_family = AF_INET;
+    memset(&local, 0xA5, sizeof(local));
+    ASSERT_EQ(mqvpn_recv_fallback_local_addr(
+                  &local, (const struct sockaddr *)&peer4, sizeof(peer4)),
+              sizeof(struct sockaddr_in));
+    ASSERT_EQ(local.ss_family, AF_INET);
+
+    struct sockaddr_in6 peer6;
+    memset(&peer6, 0, sizeof(peer6));
+    peer6.sin6_family = AF_INET6;
+    memset(&local, 0xA5, sizeof(local));
+    ASSERT_EQ(mqvpn_recv_fallback_local_addr(
+                  &local, (const struct sockaddr *)&peer6, sizeof(peer6)),
+              sizeof(struct sockaddr_in6));
+    ASSERT_EQ(local.ss_family, AF_INET6);
+
+    memset(&local, 0xA5, sizeof(local));
+    ASSERT_EQ(mqvpn_recv_fallback_local_addr(&local, NULL, 0), 0);
+    ASSERT_EQ(local.ss_family, AF_UNSPEC);
+}
+
 TEST(get_paths_null_safety)
 {
     mqvpn_client_t *c = make_test_client();
@@ -3345,6 +3371,7 @@ main(void)
     run_client_add_path();
     run_path_initial_stats_zero();
     run_path_stats_after_recv();
+    run_recv_fallback_local_addr_matches_peer_family();
     run_get_paths_null_safety();
     run_client_remove_path();
     run_client_probe_paths_fails_closed();

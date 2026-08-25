@@ -3901,6 +3901,46 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
     return tun_send_datagram(c, conn, pkt, len, do_stamp, &peek);
 }
 
+static socklen_t
+recv_sockaddr_canonical_len(const struct sockaddr *addr, socklen_t supplied_len)
+{
+    if (!addr) return 0;
+    if (addr->sa_family == AF_INET && supplied_len >= sizeof(struct sockaddr_in)) {
+        return sizeof(struct sockaddr_in);
+    }
+    if (addr->sa_family == AF_INET6 && supplied_len >= sizeof(struct sockaddr_in6)) {
+        return sizeof(struct sockaddr_in6);
+    }
+    return 0;
+}
+
+socklen_t
+mqvpn_recv_fallback_local_addr(struct sockaddr_storage *out,
+                                const struct sockaddr *peer, socklen_t peer_len)
+{
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+
+    socklen_t canonical_len = recv_sockaddr_canonical_len(peer, peer_len);
+    if (canonical_len == sizeof(struct sockaddr_in)) {
+        struct sockaddr_in *local = (struct sockaddr_in *)out;
+#ifdef __APPLE__
+        local->sin_len = (uint8_t)sizeof(*local);
+#endif
+        local->sin_family = AF_INET;
+        return sizeof(*local);
+    }
+    if (canonical_len == sizeof(struct sockaddr_in6)) {
+        struct sockaddr_in6 *local = (struct sockaddr_in6 *)out;
+#ifdef __APPLE__
+        local->sin6_len = (uint8_t)sizeof(*local);
+#endif
+        local->sin6_family = AF_INET6;
+        return sizeof(*local);
+    }
+    return 0;
+}
+
 int
 mqvpn_client_on_socket_recv(mqvpn_client_t *c, mqvpn_path_handle_t path,
                             const uint8_t *pkt, size_t len, const struct sockaddr *peer,
@@ -3912,7 +3952,7 @@ mqvpn_client_on_socket_recv(mqvpn_client_t *c, mqvpn_path_handle_t path,
 
     /* Find local address for this path */
     struct sockaddr_storage local_addr;
-    socklen_t local_len = sizeof(local_addr);
+    socklen_t local_len = 0;
     memset(&local_addr, 0, sizeof(local_addr));
 
     path_entry_t *pe = find_path_by_handle(c, path);
@@ -3920,8 +3960,12 @@ mqvpn_client_on_socket_recv(mqvpn_client_t *c, mqvpn_path_handle_t path,
         pe->bytes_rx += len;
         if (pe->local_addr_len > 0) {
             memcpy(&local_addr, &pe->local_addr, pe->local_addr_len);
-            local_len = pe->local_addr_len;
+            local_len = recv_sockaddr_canonical_len(
+                (const struct sockaddr *)&local_addr, pe->local_addr_len);
         }
+    }
+    if (local_len == 0) {
+        local_len = mqvpn_recv_fallback_local_addr(&local_addr, peer, peer_len);
     }
 
     uint64_t recv_time = client_now_us(c);

@@ -186,6 +186,11 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
 #  define MQVPN_INTERNAL
 #endif
 
+/* Build a canonical unspecified local endpoint for a received datagram when
+ * a callback-backed path has no kernel socket address of its own. */
+MQVPN_INTERNAL socklen_t mqvpn_recv_fallback_local_addr(
+    struct sockaddr_storage *out, const struct sockaddr *peer, socklen_t peer_len);
+
 /* Returns "minrtt" / "wlb" / "wlb_udp_pin" / "backup_fec" / "unknown" —
  * caller-owned static string, do not free.
  * Used by control_socket.c for get_build_info JSON. */
