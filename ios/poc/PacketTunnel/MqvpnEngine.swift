@@ -6,6 +6,23 @@ import os.log
 
 let log = Logger(subsystem: "mqvpn.poc", category: "engine")
 
+/// Shared by the tunnel engine and host tests: both Optimize For values keep
+/// WLB and only change `mqvpn_config_set_performance_mode`.
+enum EnginePerformanceApply {
+    static func scheduler() -> mqvpn_scheduler_t { MQVPN_SCHED_WLB }
+
+    static func mode(for policy: Int) -> mqvpn_performance_mode_t {
+        policy == SchedulerSettings.lowLatency
+            ? MQVPN_PERF_LOW_LATENCY : MQVPN_PERF_MAX_THROUGHPUT
+    }
+
+    static func apply(_ cfg: OpaquePointer?, policy: Int) -> (modeRC: Int32, schedulerRC: Int32) {
+        let modeRC = mqvpn_config_set_performance_mode(cfg, mode(for: policy))
+        let schedulerRC = mqvpn_config_set_scheduler(cfg, scheduler())
+        return (modeRC, schedulerRC)
+    }
+}
+
 /// Owns the libmqvpn client and the dedicated tick thread.
 ///
 /// THREADING CONTRACT: every libmqvpn call happens on `tickThread`. The core
@@ -151,9 +168,8 @@ final class MqvpnEngine: NSObject {
         }
         hybridConfigured = hybridOK
         log.notice("[hybrid] applied enabled=\(hybrid.enabled) mode=\(hybrid.tcpMode) configured=\(hybridOK)")
-        let mode: mqvpn_performance_mode_t = scheduler.policy == SchedulerSettings.lowLatency
-            ? MQVPN_PERF_LOW_LATENCY : MQVPN_PERF_MAX_THROUGHPUT
-        if mqvpn_config_set_performance_mode(cfg, mode) != 0 {
+        let applied = EnginePerformanceApply.apply(cfg, policy: scheduler.policy)
+        if applied.modeRC != 0 {
             log.error("[scheduler] performance mode rejected policy=\(scheduler.policy)")
             mqvpn_config_free(cfg)
             startFailed = true
@@ -162,7 +178,7 @@ final class MqvpnEngine: NSObject {
         }
         // Low Latency is WLB policy XQC_WLB_LOW_LATENCY applied in core after
         // connect via performance mode — always request WLB at config time.
-        if mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_WLB) != 0 {
+        if applied.schedulerRC != 0 {
             log.error("[scheduler] setter failed policy=\(scheduler.policy) — keeping library default")
         }
         log.notice("[scheduler] applied policy=\(scheduler.displayLabel, privacy: .public)")

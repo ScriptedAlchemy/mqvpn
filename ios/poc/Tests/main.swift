@@ -224,10 +224,6 @@ check(SchedulerSettings(providerConfiguration: schedBad).policy == SchedulerSett
 let schedBool: [String: Any] = ["schedulerPolicy": NSNumber(value: true)]
 check(SchedulerSettings(providerConfiguration: schedBool).policy == SchedulerSettings.maxThroughput,
       "bool-backed scheduler clamps to max throughput")
-check(SchedulerSettings.coreScheduler(for: SchedulerSettings.maxThroughput) == 1,
-      "max throughput maps to WLB")
-check(SchedulerSettings.coreScheduler(for: SchedulerSettings.lowLatency) == 0,
-      "low latency maps to minrtt")
 check(SchedulerSettings.headerValue(for: SchedulerSettings.maxThroughput) == "throughput" &&
       SchedulerSettings.headerValue(for: SchedulerSettings.lowLatency) == "latency",
       "CONNECT-IP mqvpn-performance header values")
@@ -235,6 +231,28 @@ check(SchedulerSettings.displayLabel(for: SchedulerSettings.maxThroughput) == "M
       SchedulerSettings.displayLabel(for: SchedulerSettings.lowLatency) == "Low Latency" &&
       SchedulerSettings.pickerTitle == "Optimize For",
       "product labels never expose scheduler names")
+check(SchedulerSettings.`default`.requestedDisplayLabel == "Requested Max Throughput" &&
+      SchedulerSettings(policy: SchedulerSettings.lowLatency).requestedDisplayLabel
+        == "Requested Low Latency",
+      "dashboard caption is requested, not effective")
+check(OperatingMode.vpn.usesOptimizeFor && !OperatingMode.macRelay.usesOptimizeFor,
+      "Optimize For is VPN-only; Mac Relay hides it")
+check(EnginePerformanceApply.scheduler() == MQVPN_SCHED_WLB &&
+      EnginePerformanceApply.mode(for: SchedulerSettings.maxThroughput)
+        == MQVPN_PERF_MAX_THROUGHPUT &&
+      EnginePerformanceApply.mode(for: SchedulerSettings.lowLatency)
+        == MQVPN_PERF_LOW_LATENCY,
+      "engine apply uses C performance constants and always WLB")
+if let cfg = mqvpn_config_new() {
+    let maxRCs = EnginePerformanceApply.apply(cfg, policy: SchedulerSettings.maxThroughput)
+    let lowRCs = EnginePerformanceApply.apply(cfg, policy: SchedulerSettings.lowLatency)
+    mqvpn_config_free(cfg)
+    check(maxRCs.modeRC == 0 && maxRCs.schedulerRC == 0 &&
+          lowRCs.modeRC == 0 && lowRCs.schedulerRC == 0,
+          "both Optimize For values apply WLB + performance mode on a real config")
+} else {
+    check(false, "mqvpn_config_new for engine apply")
+}
 
 // ── Tunnel lifecycle ──
 // These catch an accidental selection of a stale or another app's profile,

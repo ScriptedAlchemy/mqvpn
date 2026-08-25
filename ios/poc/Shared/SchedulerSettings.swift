@@ -14,11 +14,6 @@ struct SchedulerSettings: Equatable {
     static let lowLatency = 1
     static let `default` = SchedulerSettings(policy: maxThroughput)
 
-    /// libmqvpn `MQVPN_SCHED_WLB` — app targets do not import the C enum.
-    static let coreWLB = 1
-    /// libmqvpn `MQVPN_SCHED_MINRTT`.
-    static let coreMinRTT = 0
-
     static let headerThroughput = "throughput"
     static let headerLatency = "latency"
     static let labelThroughput = "Max Throughput"
@@ -46,10 +41,6 @@ struct SchedulerSettings: Equatable {
         self.init(policy: policy)
     }
 
-    static func coreScheduler(for policy: Int) -> Int {
-        policy == lowLatency ? coreMinRTT : coreWLB
-    }
-
     static func headerValue(for policy: Int) -> String {
         policy == lowLatency ? headerLatency : headerThroughput
     }
@@ -60,4 +51,8 @@ struct SchedulerSettings: Equatable {
 
     var headerValue: String { Self.headerValue(for: policy) }
     var displayLabel: String { Self.displayLabel(for: policy) }
+
+    /// Dashboards show the persisted request, not server-effective policy.
+    static let requestedCaption = "Requested"
+    var requestedDisplayLabel: String { "\(Self.requestedCaption) \(displayLabel)" }
 }

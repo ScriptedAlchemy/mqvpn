@@ -121,13 +121,15 @@ struct SettingsView: View {
                         Text("The Mac connects to this iPhone over the shared Wi-Fi LAN; only mqvpn UDP is forwarded over cellular.")
                     }
                 }
-                Section {
-                    Picker(SchedulerSettings.pickerTitle, selection: $optimizeFor) {
-                        Text(SchedulerSettings.labelThroughput).tag(SchedulerSettings.maxThroughput)
-                        Text(SchedulerSettings.labelLatency).tag(SchedulerSettings.lowLatency)
-                    }.disabled(!controller.isEditable)
-                } header: { Text(SchedulerSettings.pickerTitle) } footer: {
-                    Text("Applies on the next Start. Max Throughput learns path capacity from real traffic; Low Latency prefers the fastest path.")
+                if operatingMode.usesOptimizeFor {
+                    Section {
+                        Picker(SchedulerSettings.pickerTitle, selection: $optimizeFor) {
+                            Text(SchedulerSettings.labelThroughput).tag(SchedulerSettings.maxThroughput)
+                            Text(SchedulerSettings.labelLatency).tag(SchedulerSettings.lowLatency)
+                        }.disabled(!controller.isEditable)
+                    } header: { Text(SchedulerSettings.pickerTitle) } footer: {
+                        Text("Applies on the next Start. Max Throughput learns path capacity from real traffic; Low Latency prefers the fastest path.")
+                    }
                 }
                 if operatingMode == .vpn {
                 Section("Reorder Buffer") {

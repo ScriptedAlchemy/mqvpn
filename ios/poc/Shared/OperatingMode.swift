@@ -27,4 +27,8 @@ enum OperatingMode: String, Codable, CaseIterable, Equatable {
     func toProviderConfiguration() -> [String: Any] {
         [Self.key: rawValue]
     }
+
+    /// Optimize For is consumed only by the VPN engine path. Mac Relay
+    /// never constructs `MqvpnEngine`, so the control is hidden there.
+    var usesOptimizeFor: Bool { self == .vpn }
 }

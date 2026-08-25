@@ -49,8 +49,10 @@ struct DashboardView: View {
                     Text("core: \(Self.clientStateName(cs))")
                         .font(.caption).foregroundColor(.secondary)
                 }
-                Text(controller.schedulerSettings.displayLabel)
-                    .font(.caption).foregroundColor(.secondary)
+                if controller.operatingMode.usesOptimizeFor {
+                    Text(controller.schedulerSettings.requestedDisplayLabel)
+                        .font(.caption).foregroundColor(.secondary)
+                }
                 Spacer()
             }
             if let ce = controller.configError {

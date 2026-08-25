@@ -17,7 +17,7 @@ struct DashboardView: View {
             if let error = controller.configError ?? controller.lastError {
                 Text(error).foregroundColor(.red).font(.caption)
             }
-            labeledRow(SchedulerSettings.pickerTitle,
+            labeledRow(SchedulerSettings.requestedCaption,
                        controller.schedulerSettings.displayLabel)
             HStack(spacing: 12) {
                 Button("Start") { controller.start() }
