@@ -164,8 +164,9 @@ final class TunnelController: ObservableObject {
         }
         if #available(iOS 16.2, *) {
             let up = Self.isUp(s)
+            let terminal = s == .disconnected || s == .invalid
             if LiveActivitySessionPolicy.shouldEnd(alreadyStarted: liveActivityStarted,
-                                                   isUp: up) {
+                                                   isTerminal: terminal) {
                 liveActivityStarted = false
                 Task { await MqvpnLiveActivityLifecycle.endImmediately() }
             } else if LiveActivitySessionPolicy.shouldBegin(alreadyStarted: liveActivityStarted,

@@ -564,10 +564,10 @@ check(LiveActivitySessionPolicy.shouldBegin(alreadyStarted: false, isUp: true) &
       !LiveActivitySessionPolicy.shouldBegin(alreadyStarted: true, isUp: true) &&
       !LiveActivitySessionPolicy.shouldBegin(alreadyStarted: false, isUp: false),
       "a connected session with no Island must create one")
-check(LiveActivitySessionPolicy.shouldEnd(alreadyStarted: true, isUp: false) &&
-      !LiveActivitySessionPolicy.shouldEnd(alreadyStarted: false, isUp: false) &&
-      !LiveActivitySessionPolicy.shouldEnd(alreadyStarted: true, isUp: true),
-      "disconnect ends only an activity this session actually started")
+check(!LiveActivitySessionPolicy.shouldEnd(alreadyStarted: true, isTerminal: false) &&
+      LiveActivitySessionPolicy.shouldEnd(alreadyStarted: true, isTerminal: true) &&
+      !LiveActivitySessionPolicy.shouldEnd(alreadyStarted: false, isTerminal: true),
+      "connecting retains the foreground activity and only a terminal state ends it")
 check(RelaySocketPlan.fixed.lanListener == .wifi &&
       RelaySocketPlan.fixed.fixedServer == .cellular,
       "LAN listener is Wi-Fi-only and the fixed server socket is cellular-only")

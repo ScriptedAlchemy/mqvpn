@@ -63,8 +63,8 @@ enum LiveActivitySessionPolicy {
         isUp && !alreadyStarted
     }
 
-    static func shouldEnd(alreadyStarted: Bool, isUp: Bool) -> Bool {
-        alreadyStarted && !isUp
+    static func shouldEnd(alreadyStarted: Bool, isTerminal: Bool) -> Bool {
+        alreadyStarted && isTerminal
     }
 }
 
