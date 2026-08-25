@@ -464,6 +464,27 @@ TEST(server_get_reorder_stats_no_conns)
     mqvpn_server_destroy(s);
 }
 
+TEST(server_get_client_info_no_clients)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+
+    mqvpn_client_info_t info[2];
+    memset(info, 0xAB, sizeof(info));
+    int n_clients = -1;
+    ASSERT_EQ(mqvpn_server_get_client_info(s, info, 2, &n_clients), MQVPN_OK);
+    ASSERT_EQ(n_clients, 0);
+
+    mqvpn_server_destroy(s);
+}
+
 /* on_tun_packet with no sessions */
 
 TEST(server_on_tun_packet_no_sessions)
@@ -949,6 +970,7 @@ main(void)
     /* reorder stats getter (aggregate; empty-sum contract) */
     run_server_get_reorder_stats_null();
     run_server_get_reorder_stats_no_conns();
+    run_server_get_client_info_no_clients();
 
     /* TUN packet with no sessions */
     run_server_on_tun_packet_no_sessions();

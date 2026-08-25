@@ -20,7 +20,9 @@
 #include <inttypes.h>
 #include <ctype.h>
 
-#define STATUS_BUF_SIZE 32768
+/* Must stay ≥ the control-socket get_status producer cap
+ * (CTRL_MAX_RESP_BYTES = 257 * 1024) so a max-size response is not truncated. */
+#define STATUS_BUF_SIZE (257 * 1024)
 
 /* JSON helpers (json_find_key, json_read_string, json_read_int64,
  * json_skip_ws) are provided by json_mini.h */
@@ -125,6 +127,9 @@ print_client(const char *obj)
     uint64_t conn_sec = (uint64_t)json_read_int64(json_find_key(obj, "connected_sec"));
     uint64_t bytes_tx = (uint64_t)json_read_int64(json_find_key(obj, "bytes_tx"));
     uint64_t bytes_rx = (uint64_t)json_read_int64(json_find_key(obj, "bytes_rx"));
+    char performance[16] = {0};
+    v = json_find_key(obj, "performance");
+    if (v) json_read_string(v, performance, sizeof(performance));
 
     char dur[32], tx[32], rx[32];
     format_duration(conn_sec, dur, sizeof(dur));
@@ -134,6 +139,7 @@ print_client(const char *obj)
     printf("\nclient: %s\n", user[0] ? user : "(unknown)");
     printf("  endpoint: %s\n", endpoint[0] ? endpoint : "(unknown)");
     printf("  connected: %s\n", dur);
+    printf("  optimize: %s\n", performance[0] ? performance : "throughput");
     printf("  transfer: %s received, %s sent\n", rx, tx);
 
     /* Print paths */
@@ -148,7 +154,7 @@ print_client(const char *obj)
             if (!end) break;
 
             size_t plen = (size_t)(end - p);
-            char path_obj[512];
+            char path_obj[1024];
             if (plen >= sizeof(path_obj)) {
                 p = end;
                 continue;
@@ -171,8 +177,22 @@ print_client(const char *obj)
             const char *sl = json_find_key(path_obj, "state_label");
             if (sl) json_read_string(sl, state_str, sizeof(state_str));
 
-            printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64 "ms cwnd=%s %s\n",
-                   idx, srtt, min_rtt, cwnd_str, state_str);
+            const char *goodput_v = json_find_key(path_obj, "goodput_bps");
+            const char *warmup_v = json_find_key(path_obj, "warmup");
+            const char *weight_v = json_find_key(path_obj, "weight_pct");
+            if (goodput_v || warmup_v || weight_v) {
+                uint64_t goodput_bps = (uint64_t)json_read_int64(goodput_v);
+                unsigned weight_pct = (unsigned)json_read_int64(weight_v);
+                int warmup = warmup_v && strncmp(warmup_v, "true", 4) == 0;
+
+                printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64
+                       "ms cwnd=%s %s goodput=%" PRIu64 "B/s warmup=%s weight=%u%%\n",
+                       idx, srtt, min_rtt, cwnd_str, state_str, goodput_bps,
+                       warmup ? "true" : "false", weight_pct);
+            } else {
+                printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64 "ms cwnd=%s %s\n",
+                       idx, srtt, min_rtt, cwnd_str, state_str);
+            }
 
             p = end;
             idx++;

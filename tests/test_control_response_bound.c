@@ -27,18 +27,19 @@ per_path_entry_bytes(void)
     /* Mirrors the path-object APPEND in ctrl_cmd_get_status (control_socket.c)
      * with leading "," (separator between paths). The trailing %s is the
      * longest path state label currently returned by mqvpn_path_state_label()
-     * — "validating" (10 chars). "reinject_tx_bytes" mirrors the
-     * reinject-snapshot lookup appended to the same path object. */
+     * — "validating" (10 chars). The trailing reinject / WLB fields mirror
+     * the side-channel snapshots appended to the same path object. */
     return snprintf(
         NULL, 0,
         ",{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64 ",\"min_rtt_ms\":%" PRIu64
         ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
         ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
         ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
-        "\"reinject_tx_bytes\":%" PRIu64 "}",
+        "\"reinject_tx_bytes\":%" PRIu64 ",\"goodput_bps\":%" PRIu64
+        ",\"warmup\":%s,\"weight_pct\":%u}",
         UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
         UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT32_MAX, "validating",
-        UINT64_MAX);
+        UINT64_MAX, UINT64_MAX, "false", UINT8_MAX);
 }
 
 static int
@@ -58,8 +59,10 @@ per_user_envelope_bytes(int paths_inner_bytes)
     int env = snprintf(NULL, 0,
                        ",{\"user\":\"%s\",\"endpoint\":\"%s\","
                        "\"connected_sec\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
-                       ",\"bytes_rx\":%" PRIu64 ",\"n_paths\":%d,\"paths\":[]}",
-                       username, endpoint, UINT64_MAX, UINT64_MAX, UINT64_MAX, INT_MAX);
+                       ",\"bytes_rx\":%" PRIu64 ",\"performance\":\"%s\","
+                       "\"n_paths\":%d,\"paths\":[]}",
+                       username, endpoint, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+                       "throughput", INT_MAX);
     return env + paths_inner_bytes;
 }
 

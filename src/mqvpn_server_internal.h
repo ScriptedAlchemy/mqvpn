@@ -45,6 +45,8 @@ typedef struct {
                           * establishes the CONNECT-IP tunnel — a rejected
                           * duplicate or unrelated request must not mutate the
                           * live tunnel's negotiated stamping. */
+    mqvpn_performance_mode_t performance_mode; /* request-scoped; default throughput */
+    int has_performance_mode;
 } svr_req_headers_t;
 
 /* Whether request-level auth (Bearer PSK) must be checked before granting a

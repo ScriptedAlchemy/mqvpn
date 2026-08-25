@@ -12,6 +12,7 @@
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h"
 #include "mqvpn_server_internal.h"
+#include "performance_mode.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -112,6 +113,7 @@ struct svr_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+    mqvpn_performance_mode_t performance_mode;
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     int tcp_flow_count; /* per-session cap enforcement lands with the
@@ -1278,6 +1280,14 @@ svr_parse_request_headers(mqvpn_server_t *s, xqc_http_headers_t *headers,
             out->has_reorder_hdr = 1;
             LOG_I(s, "client advertised mqvpn-reorder");
         }
+        if (mqvpn_performance_header_match(h->name.iov_base, h->name.iov_len,
+                                           h->value.iov_base, h->value.iov_len,
+                                           &out->performance_mode)) {
+            out->has_performance_mode = 1;
+        }
+    }
+    if (!out->has_performance_mode) {
+        out->performance_mode = MQVPN_PERF_MAX_THROUGHPUT;
     }
 }
 
@@ -1397,7 +1407,28 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
      * tunnel that did not negotiate it. */
     stream->conn->peer_reorder_supported = hdrs->has_reorder_hdr;
 
-    LOG_I(s, "Extended CONNECT for connect-ip received");
+    {
+        xqc_wlb_policy_t pol = hdrs->performance_mode == MQVPN_PERF_LOW_LATENCY
+                                   ? XQC_WLB_LOW_LATENCY
+                                   : XQC_WLB_MAX_THROUGHPUT;
+        int rc = xqc_conn_set_wlb_policy(s->engine, &stream->conn->cid, pol);
+        if (rc == XQC_OK) {
+            stream->conn->performance_mode = hdrs->performance_mode;
+        } else if (rc == -XQC_EPARAM) {
+            LOG_I(s,
+                  "performance mode %s left administrative scheduler unchanged",
+                  mqvpn_performance_mode_name(hdrs->performance_mode)
+                      ? mqvpn_performance_mode_name(hdrs->performance_mode)
+                      : MQVPN_PERFORMANCE_THROUGHPUT);
+        } else {
+            LOG_W(s, "xqc_conn_set_wlb_policy failed rc=%d", rc);
+        }
+    }
+
+    LOG_I(s, "Extended CONNECT for connect-ip received (performance=%s)",
+          mqvpn_performance_mode_name(hdrs->performance_mode)
+              ? mqvpn_performance_mode_name(hdrs->performance_mode)
+              : MQVPN_PERFORMANCE_THROUGHPUT);
     if (svr_masque_send_response(h3_request, stream) < 0) return -1;
     return 0;
 }
@@ -2922,6 +2953,10 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
         memset(ci, 0, sizeof(*ci));
         ci->struct_size = sizeof(*ci);
         snprintf(ci->username, sizeof(ci->username), "%s", conn->username);
+        snprintf(ci->performance, sizeof(ci->performance), "%s",
+                 mqvpn_performance_mode_name(conn->performance_mode)
+                     ? mqvpn_performance_mode_name(conn->performance_mode)
+                     : MQVPN_PERFORMANCE_THROUGHPUT);
 
         /* Format endpoint. peer_addr is sockaddr_storage because xquic may
          * deliver either sockaddr_in (IPv4 socket → 16 B) or sockaddr_in6
@@ -3017,6 +3052,41 @@ mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
             e->n_paths++;
         }
         free(st.paths_info);
+        count++;
+    }
+
+    return count;
+}
+
+int
+mqvpn_server_get_client_wlb(const mqvpn_server_t *s,
+                            mqvpn_internal_client_wlb_t *out, int max)
+{
+    if (!s || !out || max <= 0) return -1;
+
+    mqvpn_server_t *srv = (mqvpn_server_t *)s;
+    int count = 0;
+
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX && count < max; i++) {
+        svr_conn_t *conn = srv->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+
+        mqvpn_internal_client_wlb_t *e = &out[count];
+        memset(e, 0, sizeof(*e));
+
+        xqc_wlb_path_stats_t snap[MQVPN_MAX_PATHS];
+        size_t n = 0;
+        if (xqc_conn_get_wlb_path_stats(srv->engine, &conn->cid, snap,
+                                        MQVPN_MAX_PATHS, &n) == XQC_OK) {
+            if (n > (size_t)MQVPN_MAX_PATHS) n = (size_t)MQVPN_MAX_PATHS;
+            for (size_t p = 0; p < n; p++) {
+                e->paths[e->n_paths].path_id = snap[p].path_id;
+                e->paths[e->n_paths].goodput_bps = snap[p].goodput_Bps;
+                e->paths[e->n_paths].weight_pct = snap[p].weight_pct;
+                e->paths[e->n_paths].warmup = snap[p].warmup;
+                e->n_paths++;
+            }
+        }
         count++;
     }
 

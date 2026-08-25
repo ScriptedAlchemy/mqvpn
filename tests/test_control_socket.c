@@ -41,6 +41,7 @@ static int g_client_info_n = 0;
 static mqvpn_client_info_t g_client_info_tmpl;
 
 static mqvpn_internal_client_reinject_t g_reinject_tmpl; /* configured per test */
+static mqvpn_internal_client_wlb_t g_wlb_tmpl;           /* configured per test */
 
 static int g_fec_rc = 1;
 static mqvpn_internal_fec_stats_t g_fec_tmpl;
@@ -145,6 +146,15 @@ mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
 {
     (void)s;
     if (max > 0) out[0] = g_reinject_tmpl;
+    return max > 0 ? 1 : 0;
+}
+
+int
+mqvpn_server_get_client_wlb(const mqvpn_server_t *s, mqvpn_internal_client_wlb_t *out,
+                            int max)
+{
+    (void)s;
+    if (max > 0) out[0] = g_wlb_tmpl;
     return max > 0 ? 1 : 0;
 }
 
@@ -385,20 +395,26 @@ static void
 test_get_status_one_client_with_path(void)
 {
     memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    memset(&g_wlb_tmpl, 0, sizeof(g_wlb_tmpl));
     strcpy(g_client_info_tmpl.username, "alice");
     strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
     g_client_info_tmpl.n_paths = 1;
     g_client_info_tmpl.paths[0].path_id = 7;
     g_client_info_tmpl.paths[0].state = 2; /* -> "active" */
     g_client_info_n = 1;
-    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
 
     call("{\"cmd\":\"get_status\"}");
     CHECK_HAS("\"n_clients\":1");
     CHECK_HAS("\"user\":\"alice\"");
     CHECK_HAS("\"endpoint\":\"1.2.3.4:443\"");
+    CHECK_HAS("\"performance\":\"throughput\"");
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"state_label\":\"active\"");
+    CHECK_HAS("\"reinject_tx_bytes\":0");
+    CHECK_HAS("\"goodput_bps\":0");
+    CHECK_HAS("\"warmup\":false");
+    CHECK_HAS("\"weight_pct\":0");
 }
 
 /* Alignment semantics (a): a reinject snapshot entry whose path_id matches
@@ -407,14 +423,14 @@ static void
 test_get_status_reinject_matched_path_id(void)
 {
     memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    memset(&g_wlb_tmpl, 0, sizeof(g_wlb_tmpl));
     strcpy(g_client_info_tmpl.username, "alice");
     strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
     g_client_info_tmpl.n_paths = 1;
     g_client_info_tmpl.paths[0].path_id = 7;
     g_client_info_tmpl.paths[0].state = 2;
     g_client_info_n = 1;
-
-    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
     g_reinject_tmpl.n_paths = 1;
     g_reinject_tmpl.paths[0].path_id = 7;
     g_reinject_tmpl.paths[0].reinject_tx_bytes = 99999;
@@ -432,6 +448,8 @@ static void
 test_get_status_reinject_mismatched_path_id(void)
 {
     memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    memset(&g_wlb_tmpl, 0, sizeof(g_wlb_tmpl));
     strcpy(g_client_info_tmpl.username, "alice");
     strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
     g_client_info_tmpl.n_paths = 1;
@@ -440,7 +458,6 @@ test_get_status_reinject_mismatched_path_id(void)
     g_client_info_n = 1;
 
     /* Phase 1: reinject snapshot has an entry, but its path_id mismatches. */
-    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
     g_reinject_tmpl.n_paths = 1;
     g_reinject_tmpl.paths[0].path_id = 42; /* mismatch vs client path_id 7 */
     g_reinject_tmpl.paths[0].reinject_tx_bytes = 99999;
@@ -455,6 +472,32 @@ test_get_status_reinject_mismatched_path_id(void)
     call("{\"cmd\":\"get_status\"}");
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"reinject_tx_bytes\":0");
+}
+
+static void
+test_get_status_wlb_matched_path_id(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    memset(&g_wlb_tmpl, 0, sizeof(g_wlb_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
+    g_client_info_tmpl.n_paths = 1;
+    g_client_info_tmpl.paths[0].path_id = 7;
+    g_client_info_tmpl.paths[0].state = 2;
+    g_client_info_n = 1;
+
+    g_wlb_tmpl.n_paths = 1;
+    g_wlb_tmpl.paths[0].path_id = 7;
+    g_wlb_tmpl.paths[0].goodput_bps = 123456;
+    g_wlb_tmpl.paths[0].warmup = 1;
+    g_wlb_tmpl.paths[0].weight_pct = 20;
+
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"path_id\":7");
+    CHECK_HAS("\"goodput_bps\":123456");
+    CHECK_HAS("\"warmup\":true");
+    CHECK_HAS("\"weight_pct\":20");
 }
 
 /* ── get_build_info ───────────────────────────────────────────────────────── */
@@ -587,6 +630,7 @@ main(void)
     test_get_status_one_client_with_path();
     test_get_status_reinject_matched_path_id();
     test_get_status_reinject_mismatched_path_id();
+    test_get_status_wlb_matched_path_id();
 
     test_get_build_info();
 

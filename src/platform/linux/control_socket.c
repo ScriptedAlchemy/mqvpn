@@ -52,7 +52,9 @@
                                mqvpn_server_get_reorder_stats,
                                mqvpn_reorder_stats_t (via reorder.h),
                                mqvpn_internal_client_reinject_t,
-                               mqvpn_server_get_client_reinject */
+                               mqvpn_server_get_client_reinject,
+                               mqvpn_internal_client_wlb_t,
+                               mqvpn_server_get_client_wlb */
 
 #include <stdlib.h>
 #include <string.h>
@@ -214,6 +216,13 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
     int n_reinj = mqvpn_server_get_client_reinject(server, reinj, MQVPN_MAX_USERS);
     if (n_reinj < 0) n_reinj = 0;
 
+    /* Same index-alignment contract as reinj[] above. The per-path JSON still
+     * matches by path_id so missing/misaligned snapshots degrade to zero/false
+     * fields without changing the response shape. */
+    mqvpn_internal_client_wlb_t wlb[MQVPN_MAX_USERS];
+    int n_wlb = mqvpn_server_get_client_wlb(server, wlb, MQVPN_MAX_USERS);
+    if (n_wlb < 0) n_wlb = 0;
+
     uint64_t now = 0;
     struct timeval tv;
     if (gettimeofday(&tv, NULL) == 0)
@@ -251,8 +260,10 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
         APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\","
                "\"connected_sec\":%" PRIu64 ","
                "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
+               "\"performance\":\"%s\","
                "\"n_paths\":%d,\"paths\":[",
                ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
+               ci->performance[0] ? ci->performance : "throughput",
                ci->n_paths);
 
         for (int p = 0; p < ci->n_paths; p++) {
@@ -274,16 +285,32 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                 }
             }
 
+            uint64_t goodput_bps = 0;
+            int warmup = 0;
+            unsigned weight_pct = 0;
+            if (i < n_wlb) {
+                mqvpn_internal_client_wlb_t *wl = &wlb[i];
+                for (int wp = 0; wp < wl->n_paths; wp++) {
+                    if (wl->paths[wp].path_id == ps->path_id) {
+                        goodput_bps = wl->paths[wp].goodput_bps;
+                        warmup = wl->paths[wp].warmup ? 1 : 0;
+                        weight_pct = wl->paths[wp].weight_pct;
+                        break;
+                    }
+                }
+            }
+
             APPEND(
                 "{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64 ",\"min_rtt_ms\":%" PRIu64
                 ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
                 ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
                 ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
-                "\"reinject_tx_bytes\":%" PRIu64 "}",
+                "\"reinject_tx_bytes\":%" PRIu64 ",\"goodput_bps\":%" PRIu64
+                ",\"warmup\":%s,\"weight_pct\":%u}",
                 ps->path_id, ps->srtt_us / 1000, ps->min_rtt_us / 1000, ps->cwnd,
                 ps->bytes_in_flight, ps->bytes_tx, ps->bytes_rx, ps->pkt_sent,
                 ps->pkt_recv, ps->pkt_lost, ps->state, mqvpn_path_state_label(ps->state),
-                reinject_tx_bytes);
+                reinject_tx_bytes, goodput_bps, warmup ? "true" : "false", weight_pct);
         }
 
         APPEND("]}");
@@ -295,7 +322,7 @@ get_status_done:
 #undef APPEND
     if (truncated) {
         /* The envelope is 41 bytes — well under any plausible resp_len
-         * (callers pass CTRL_MAX_RESP_BYTES - 2 = 256 KB - 2). The same
+         * (callers pass CTRL_MAX_RESP_BYTES - 2). The same
          * guard exists at the connection layer as defence in depth. */
         return snprintf(resp, resp_len,
                         "{\"ok\":false,\"error\":\"response too large\"}");
@@ -509,6 +536,31 @@ ctrl_conn_close(ctrl_conn_t *conn)
     free(conn);
 }
 
+/* Write the full buffer. The control fd is O_NONBLOCK for reads; one
+ * write() can truncate a large get_status body. Drop O_NONBLOCK for the
+ * response (callers close immediately after) and retry EINTR. */
+static void
+ctrl_write_all(int fd, const void *buf, size_t len)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0 && (flags & O_NONBLOCK))
+        (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+
+    const char *p = buf;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, p + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (n == 0)
+            break;
+        off += (size_t)n;
+    }
+}
+
 static void
 ctrl_on_read(evutil_socket_t fd, short what, void *arg)
 {
@@ -579,14 +631,14 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
          * client doesn't see a malformed body, and emit a warning. */
         static const char too_large[] =
             "{\"ok\":false,\"error\":\"response too large\"}\n";
-        (void)write(fd, too_large, sizeof(too_large) - 1);
+        ctrl_write_all(fd, too_large, sizeof(too_large) - 1);
         LOG_WRN(
             "control: dispatch response truncated (would have been %d bytes, max %zu)",
             rlen, sizeof(resp) - 2);
     } else {
         resp[rlen] = '\n';
         resp[rlen + 1] = '\0';
-        (void)write(fd, resp, (size_t)rlen + 1);
+        ctrl_write_all(fd, resp, (size_t)rlen + 1);
     }
 
     ctrl_conn_close(conn);
@@ -604,7 +656,7 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
         int cfd = accept(fd, NULL, NULL);
         if (cfd >= 0) {
             const char *msg = "{\"ok\":false,\"error\":\"too many connections\"}\n";
-            (void)write(cfd, msg, strlen(msg));
+            ctrl_write_all(cfd, msg, strlen(msg));
             close(cfd);
         }
         return;

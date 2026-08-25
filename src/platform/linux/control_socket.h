@@ -27,10 +27,11 @@
 struct event_base;
 
 /* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
- * MQVPN_MAX_PATHS=8 produces ~210 KB; round up to 256 KB. The exact bound is
+ * MQVPN_MAX_PATHS=8 plus the per-path reinject/WLB fields now exceeds 256 KiB
+ * by 47 bytes, so keep a small fixed cushion at 257 KiB. The exact bound is
  * verified by tests/test_control_response_bound.c — bump it if either limit
- * grows. */
-#define CTRL_MAX_RESP_BYTES (256 * 1024)
+ * or the JSON shape grows again. */
+#define CTRL_MAX_RESP_BYTES (257 * 1024)
 
 typedef struct ctrl_socket_s ctrl_socket_t;
 

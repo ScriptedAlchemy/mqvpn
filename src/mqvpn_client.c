@@ -14,6 +14,7 @@
 #endif
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
+#include "performance_mode.h"
 
 #include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
 #include <stdlib.h>
@@ -1496,7 +1497,7 @@ cli_masque_start_tunnel(cli_conn_t *conn)
 
     char auth_value[300];
 
-    xqc_http_header_t hdrs[8] = {
+    xqc_http_header_t hdrs[9] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -1532,7 +1533,18 @@ cli_masque_start_tunnel(cli_conn_t *conn)
         hdrs[hdr_count].flags = 0;
         hdr_count++;
     }
-    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 8};
+    {
+        const char *perf = mqvpn_performance_mode_name(c->config.performance_mode);
+        if (!perf) perf = MQVPN_PERFORMANCE_THROUGHPUT;
+        hdrs[hdr_count].name =
+            (struct iovec){.iov_base = (void *)MQVPN_PERFORMANCE_HDR_NAME,
+                           .iov_len = sizeof(MQVPN_PERFORMANCE_HDR_NAME) - 1};
+        hdrs[hdr_count].value =
+            (struct iovec){.iov_base = (void *)perf, .iov_len = strlen(perf)};
+        hdrs[hdr_count].flags = 0;
+        hdr_count++;
+    }
+    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 9};
 
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0) {
@@ -2867,6 +2879,15 @@ cli_start_connection(mqvpn_client_t *c)
     /* cid may be misaligned inside xquic's internal structures */
     memcpy(&conn->cid, (const void *)cid, sizeof(conn->cid));
     if (conn->h3_conn) xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
+    {
+        xqc_wlb_policy_t pol = c->config.performance_mode == MQVPN_PERF_LOW_LATENCY
+                                   ? XQC_WLB_LOW_LATENCY
+                                   : XQC_WLB_MAX_THROUGHPUT;
+        int rc = xqc_conn_set_wlb_policy(c->engine, &conn->cid, pol);
+        if (rc != XQC_OK) {
+            LOG_I(c, "wlb policy not applied rc=%d (scheduler may not be WLB)", rc);
+        }
+    }
 
     /* Primary path: xquic synchronously creates path_id 0 as part of conn
      * creation. PR4 transitions PENDING -> VALIDATING via direct write
