@@ -56,7 +56,6 @@ static void
 relay_activity_cb(void *context)
 {
     platform_ctx_t *p = context;
-    if (!p || !p->client || !p->ev_tick) return;
     mqvpn_client_tick(p->client);
     schedule_next_tick(p);
 }
@@ -342,7 +341,7 @@ cb_send_packet_ex(mqvpn_path_handle_t path, const uint8_t *packet, size_t length
     (void)peer;
     (void)peer_length;
     platform_ctx_t *p = user_ctx;
-    if (!p || !p->relay_adapter) return -ENODEV;
+    if (!p->relay_adapter) return -ENODEV;
     return darwin_relay_adapter_send_packet(p->relay_adapter, path, packet, length);
 }
 
@@ -625,7 +624,6 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
      * "pass out ... to <host> port = N" is valid pf syntax matching ANY
      * destination, i.e. a silent kill-switch bypass. */
     mqvpn_sa_ntop(&ctx.server_addr, ctx.server_ip_str, sizeof(ctx.server_ip_str));
-
 
     /* Create libmqvpn config */
     mqvpn_config_t *lib_cfg = mqvpn_config_new();

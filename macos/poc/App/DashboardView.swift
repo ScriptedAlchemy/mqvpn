@@ -31,7 +31,7 @@ struct DashboardView: View {
             }
             if let relay = controller.relayRow {
                 labeledRow(relay.active ? "iPhone relay" : "iPhone relay (preflight)",
-                           "\(Self.rate(relay.mbps))" +
+                           Self.rate(relay.mbps) +
                            (relay.lastError.map { " · \($0)" } ?? ""))
             } else {
                 labeledRow("iPhone relay", "optional — not configured")
@@ -53,7 +53,8 @@ struct DashboardView: View {
         }
     }
 
-    private static func rate(_ mbps: Double) -> String {
-        String(format: "%.2f Mbps", mbps)
+    private static func rate(_ mbps: Double?) -> String {
+        guard let mbps else { return "…" }
+        return String(format: "%.2f Mbps", mbps)
     }
 }

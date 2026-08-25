@@ -184,10 +184,7 @@ enum LiveActivityContentFactory {
 
     private static func content(from speed: InterfaceSpeed?) -> LiveActivityInterfaceContent? {
         guard let speed else { return nil }
-        let rate = speed.megabitsPerSecond.flatMap { value in
-            value.isFinite ? max(0, value) : nil
-        }
         return LiveActivityInterfaceContent(interfaceName: speed.interfaceName,
-                                            megabitsPerSecond: rate)
+                                            megabitsPerSecond: speed.megabitsPerSecond)
     }
 }

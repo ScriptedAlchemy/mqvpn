@@ -52,6 +52,17 @@ check(startupTimeout.activePathCountChanged(1, nowMs: 100) == .none &&
 check(startupTimeout.startupTimerFired(nowMs: 10_000) == .failStart &&
       !startupTimeout.settingsRequested,
       "startup expiry fails before any default route was requested")
+check(!MacProviderStartupSafety.mayApplyNetworkSettings(activePathCount: 0, stopping: false) &&
+      !MacProviderStartupSafety.mayActivatePacketFlow(activePathCount: 0, stopping: false) &&
+      !MacProviderStartupSafety.mayApplyNetworkSettings(activePathCount: 1, stopping: true) &&
+      MacProviderStartupSafety.mayApplyNetworkSettings(activePathCount: 1, stopping: false),
+      "a zero-path or stopping start cannot install or retain default tunnel settings")
+
+var settingsTimeout = MacProviderLifecycle()
+_ = settingsTimeout.begin(nowMs: 0)
+_ = settingsTimeout.tunnelConfigurationReady()
+check(settingsTimeout.startupTimerFired(nowMs: 10_000) == .failStart,
+      "startup remains bounded if Network Extension settings application stalls")
 
 var lifecycle = MacProviderLifecycle()
 check(lifecycle.begin(nowMs: 0) == .none,
@@ -79,6 +90,18 @@ _ = failedSettings.begin(nowMs: 0)
 _ = failedSettings.tunnelConfigurationReady()
 check(failedSettings.networkSettingsApplied(error: true) == .failStart,
       "a settings failure cannot become a connected VPN")
+
+var lostDuringApply = MacProviderLifecycle()
+_ = lostDuringApply.begin(nowMs: 0)
+_ = lostDuringApply.tunnelConfigurationReady()
+check(lostDuringApply.activePathCountChanged(0, nowMs: 100) == .failStart &&
+      !lostDuringApply.isEstablished,
+      "all-path loss before Start completes fails instead of installing a default route")
+var zeroAtApply = MacProviderLifecycle()
+_ = zeroAtApply.begin(nowMs: 0)
+_ = zeroAtApply.tunnelConfigurationReady()
+check(zeroAtApply.networkSettingsApplied(error: false, activePathCount: 0) == .failStart,
+      "settings completion with zero active paths cannot become a connected VPN")
 
 var stopping = MacProviderLifecycle()
 _ = stopping.begin(nowMs: 0)
@@ -116,6 +139,14 @@ check(MacLANInterfaceSelector.select(relayIPv4: "172.16.0.4",
                                      candidates: lanCandidates) == nil,
       "relay preflight fails honestly when no live local subnet reaches the iPhone")
 
+let relayDraft = MacRelaySettings(enabled: true, host: " 192.168.1.42 ", port: 5_443,
+                                  keyBase64: Data(repeating: 7, count: 32).base64EncodedString())
+check(relayDraft.isValid &&
+      (try? MacRelaySettings.startConfiguration(from: relayDraft.toProviderConfiguration())) == relayDraft,
+      "enabled Mac relay configuration round-trips only with a real 32-byte key")
+check((try? MacRelaySettings.startConfiguration(from: nil)) == nil,
+      "absent relay keys preserve direct-only startup")
+
 check(TunnelProviderConfiguration.providerBundleID ==
       "com.zackjackson.mqvpn.mac.PacketTunnel",
       "the Mac app owns exactly one packet-tunnel provider identifier")
@@ -150,6 +181,20 @@ check(saveGuard(isSaving: true, isEditable: false, hasManager: false) == .inProg
       "save rejects in-flight, non-editable, and missing-manager states first")
 let validServer = ServerSettings(host: "vpn.example", port: 443, serverName: "",
                                  authKey: "psk", insecure: false)
+let hybrid = HybridSettings(enabled: true, tcpMode: HybridSettings.modeAuto)
+let directOnlyConfiguration = MacProviderConfiguration.make(
+    server: validServer,
+    relay: MacRelaySettings(enabled: false, host: "", port: 5443, keyBase64: ""),
+    hybrid: hybrid)
+check(ServerSettings(providerConfiguration: directOnlyConfiguration) == validServer &&
+      HybridSettings(providerConfiguration: directOnlyConfiguration) == hybrid &&
+      (try? MacRelaySettings.startConfiguration(from: directOnlyConfiguration)) == nil,
+      "one Mac provider configuration persists server, Hybrid, and an explicit direct-only relay state")
+check(MacPollingLifecycle.shouldPoll(status: .connected) &&
+      MacPollingLifecycle.shouldPoll(status: .reasserting) &&
+      !MacPollingLifecycle.shouldPoll(status: .connecting) &&
+      !MacPollingLifecycle.shouldPoll(status: .disconnected),
+      "loading an already-connected Mac profile starts app-message polling while down states stay quiet")
 check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                server: validServer, relay: nil),
       "direct-only Start is allowed with a valid server and no relay")
@@ -161,9 +206,15 @@ check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                 relay: MacRelaySettings(enabled: true, host: "",
                                                         port: 5443, keyBase64: "")),
       "an enabled but incomplete iPhone relay cannot Start")
+check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
+                                server: validServer, relay: nil,
+                                relayConfigurationIsValid: false),
+      "a persisted malformed enabled relay cannot silently downgrade to direct-only Start")
 check(StopLifecycle.canStop(hasManager: true, status: .connected) &&
       StopLifecycle.request(hasManager: true, status: .disconnected) == .alreadyStopped &&
       StopLifecycle.request(hasManager: true, status: .connected) == .requested &&
+      !StopLifecycle.canStop(hasManager: true, status: .disconnecting) &&
+      !StopLifecycle.canStop(hasManager: true, status: .invalid) &&
       StopLifecycle.request(hasManager: false, status: .connected) == .unavailable,
       "Stop is idempotent for an already-disconnected profile and refuses a missing manager")
 enum TestErr: Error { case boom }
@@ -198,9 +249,43 @@ runAsync {
     do {
         try await performAtomicSave(store, merge: ["macRelayHost": "192.168.1.42"])
     } catch { threw = true }
-    check(!threw && store.providerConfiguration?["macRelayHost"] as? String == "192.168.1.42",
-          "a post-commit refresh failure keeps the persisted Mac relay host")
+    check(threw && store.providerConfiguration?["macRelayHost"] as? String == "192.168.1.42",
+          "a post-commit refresh failure is surfaced instead of claiming the profile reloaded")
 }
+
+let firstRateSnapshot = MacProviderSnapshot(
+    timestamp: 10, clientState: 4, connectedSince: 0, footprint: 0,
+    reasserting: false, lastError: nil,
+    paths: [
+        MacProviderPathSnapshot(name: "en1", status: 1, txBytes: 100, rxBytes: 100),
+        MacProviderPathSnapshot(name: "en5", status: 1, txBytes: 200, rxBytes: 200),
+    ], relay: nil)
+let secondRateSnapshot = MacProviderSnapshot(
+    timestamp: 12, clientState: 4, connectedSince: 0, footprint: 0,
+    reasserting: false, lastError: nil,
+    paths: [
+        MacProviderPathSnapshot(name: "en5", status: 1, txBytes: 1_000_200, rxBytes: 200),
+        MacProviderPathSnapshot(name: "en1", status: 1, txBytes: 100, rxBytes: 500_100),
+    ], relay: nil)
+var rateSampler = MacSnapshotRateSampler()
+check(rateSampler.ingest(firstRateSnapshot).allSatisfy { $0.megabitsPerSecond == nil },
+      "the first per-path sample is unavailable rather than a fabricated zero rate")
+let stableRates = Dictionary(uniqueKeysWithValues: rateSampler.ingest(secondRateSnapshot)
+    .map { ($0.pathID, $0.megabitsPerSecond) })
+let en1Rate = stableRates["en1"] ?? nil
+let en5Rate = stableRates["en5"] ?? nil
+check(abs((en1Rate ?? -1) - 2.0) < 0.001 &&
+      abs((en5Rate ?? -1) - 4.0) < 0.001,
+      "per-path rates follow stable interface identity even when provider path order changes")
+let resetSnapshot = MacProviderSnapshot(
+    timestamp: 14, clientState: 4, connectedSince: 0, footprint: 0,
+    reasserting: false, lastError: nil,
+    paths: [MacProviderPathSnapshot(name: "en1", status: 1, txBytes: 1, rxBytes: 1)], relay: nil)
+check(rateSampler.ingest(resetSnapshot).first?.megabitsPerSecond == nil,
+      "a path counter reset is unavailable rather than an unsigned-wrap throughput spike")
+check(MacSnapshotFreshness.isFresh(receivedAt: 10, now: 12.9) &&
+      !MacSnapshotFreshness.isFresh(receivedAt: 10, now: 13.1),
+      "a missing provider response expires displayed rates instead of retaining stale throughput")
 
 var failures = 0
 func check(_ condition: Bool, _ message: String) {

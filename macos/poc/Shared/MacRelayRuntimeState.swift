@@ -128,8 +128,6 @@ struct MacRelayRuntimeState {
         return .started
     }
 
-    /// Builds a real HMAC-authenticated relay datagram with the portable C
-    /// codec. The caller sends it over the connected, interface-bound socket.
     mutating func encode(type: mqvpn_relay_message_type_t, payload: Data,
                          nowMs: UInt64) -> Data? {
         guard let key, let sessionID, started, payload.count <= Int(MQVPN_RELAY_MAX_PAYLOAD_SIZE)

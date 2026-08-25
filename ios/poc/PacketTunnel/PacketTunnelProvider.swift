@@ -38,9 +38,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                           userInfo: [NSLocalizedDescriptionKey: "server unresolved: \(server.host)"])
         }
         if operatingMode == .macRelay {
-            guard let relaySettings = RelaySettings(providerConfiguration: providerConfig),
-                  RelayStartGuard.canStart(mode: operatingMode, server: server,
-                                           relay: relaySettings) else {
+            guard let relaySettings = RelaySettings(providerConfiguration: providerConfig) else {
                 throw NSError(domain: "mqvpn.poc", code: 12,
                               userInfo: [NSLocalizedDescriptionKey: "relay settings invalid"])
             }

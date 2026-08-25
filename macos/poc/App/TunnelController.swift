@@ -12,6 +12,7 @@ final class TunnelController: ObservableObject {
     @Published var snapshot: MacProviderSnapshot?
     @Published var serverSettings: ServerSettings?
     @Published var relaySettings: MacRelaySettings?
+    @Published var hybridSettings: HybridSettings = .disabled
     @Published var configError: String?
     @Published private(set) var isSaving = false
     @Published var showSettings = false
@@ -19,32 +20,38 @@ final class TunnelController: ObservableObject {
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
     private var pollTimer: Timer?
-    private var previous: MacProviderSnapshot?
+    private var rateSampler = MacSnapshotRateSampler()
+    private var pathRates: [MacPathRate] = []
+    private var lastSnapshotReceivedAt: TimeInterval?
+    private var relayConfigurationIsValid = true
 
     var isEditable: Bool { manager != nil && status == .disconnected }
     var isConnectable: Bool {
         MacConnectGuard.canStart(isEditable: isEditable, isSaving: isSaving,
-                                 server: serverSettings, relay: relaySettings)
+                                 server: serverSettings, relay: relaySettings,
+                                 relayConfigurationIsValid: relayConfigurationIsValid)
     }
     var isStoppable: Bool {
         StopLifecycle.canStop(hasManager: manager != nil,
                               status: TunnelStatus.fromNEVPNRawValue(Int(status.rawValue)))
     }
 
-    var directRow: (name: String, mbps: Double, bytes: UInt64)? {
-        snapshot?.paths.first.map { path in
-            (path.name, rateMbps(previous: previous?.paths.first, current: path),
-             path.txBytes &+ path.rxBytes)
-        }
+    var displayedSnapshot: MacProviderSnapshot? {
+        MacSnapshotFreshness.isFresh(receivedAt: lastSnapshotReceivedAt,
+                                     now: Date().timeIntervalSince1970) ? snapshot : nil
     }
 
-    var relayRow: (active: Bool, mbps: Double, lastError: String?)? {
-        guard let relay = snapshot?.relay else { return nil }
-        let prev = previous?.relay
-        let bytes = Double((relay.lanTxBytes &+ relay.lanRxBytes) &-
-                           ((prev?.lanTxBytes ?? 0) &+ (prev?.lanRxBytes ?? 0)))
-        let elapsed = max(snapshot!.timestamp - (previous?.timestamp ?? snapshot!.timestamp), 0.05)
-        return (relay.active, max(0, bytes * 8 / elapsed / 1_000_000), relay.lastError)
+    var directRow: (name: String, mbps: Double?, bytes: UInt64)? {
+        guard let path = displayedSnapshot?.paths.first(where: { $0.name != "iphone-relay" })
+        else { return nil }
+        let rate = pathRates.first { $0.pathID == path.name }
+        return (path.name, rate?.megabitsPerSecond, rate?.totalBytes ?? 0)
+    }
+
+    var relayRow: (active: Bool, mbps: Double?, lastError: String?)? {
+        guard let relay = displayedSnapshot?.relay else { return nil }
+        let rate = pathRates.first { $0.pathID == "iphone-relay" }?.megabitsPerSecond
+        return (relay.active, rate, relay.lastError)
     }
 
     init() {
@@ -54,14 +61,7 @@ final class TunnelController: ObservableObject {
             Task { @MainActor in
                 guard let self, let connection = note.object as? NEVPNConnection,
                       connection === self.manager?.connection else { return }
-                self.status = connection.status
-                self.statusText = Self.label(connection.status)
-                if connection.status == .disconnected {
-                    self.snapshot = nil
-                    self.previous = nil
-                    self.pollTimer?.invalidate()
-                    self.pollTimer = nil
-                }
+                self.applyStatus(connection.status)
             }
         }
     }
@@ -91,8 +91,7 @@ final class TunnelController: ObservableObject {
             }
             try await read(from: loaded)
             manager = loaded
-            status = loaded.connection.status
-            statusText = Self.label(loaded.connection.status)
+            applyStatus(loaded.connection.status)
         } catch {
             statusText = "load error"
             lastError = error.localizedDescription
@@ -102,10 +101,10 @@ final class TunnelController: ObservableObject {
     func start() {
         guard isConnectable, let manager else { return }
         lastError = nil
+        applyStatus(.connecting)
         do {
             try manager.connection.startVPNTunnel()
             statusText = "starting"
-            startPolling()
         } catch {
             lastError = error.localizedDescription
             statusText = "start error"
@@ -117,6 +116,7 @@ final class TunnelController: ObservableObject {
             hasManager: manager != nil,
             status: TunnelStatus.fromNEVPNRawValue(Int(status.rawValue)))
         guard request == .requested else { return }
+        applyStatus(.disconnecting)
         manager?.connection.stopVPNTunnel()
         statusText = "stopping"
     }
@@ -128,11 +128,11 @@ final class TunnelController: ObservableObject {
         isSaving = true
         defer { isSaving = false }
         do {
-            var merged = server.toProviderConfiguration()
-            for (key, value) in relay.toProviderConfiguration() { merged[key] = value }
+            let merged = MacProviderConfiguration.make(server: server, relay: relay,
+                                                       hybrid: hybridSettings)
             try await applyProtocol(to: manager, configuration: merged)
             try await read(from: manager)
-            configError = nil
+            if relayConfigurationIsValid { configError = nil }
         } catch {
             configError = error.localizedDescription
         }
@@ -140,6 +140,9 @@ final class TunnelController: ObservableObject {
 
     private func applyProtocol(to manager: NETunnelProviderManager,
                                configuration: [String: Any]) async throws {
+        let backupProtocol = manager.protocolConfiguration
+        let backupEnabled = manager.isEnabled
+        let backupName = manager.localizedDescription
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol)
             ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = TunnelProviderConfiguration.providerBundleID
@@ -154,8 +157,15 @@ final class TunnelController: ObservableObject {
         manager.protocolConfiguration = proto
         manager.localizedDescription = TunnelProviderConfiguration.localizedName
         manager.isEnabled = true
-        try await manager.saveToPreferences()
-        try await manager.loadFromPreferences()
+        do {
+            try await manager.saveToPreferences()
+            try await manager.loadFromPreferences()
+        } catch {
+            manager.protocolConfiguration = backupProtocol
+            manager.isEnabled = backupEnabled
+            manager.localizedDescription = backupName
+            throw error
+        }
     }
 
     private func read(from manager: NETunnelProviderManager) async throws {
@@ -166,16 +176,61 @@ final class TunnelController: ObservableObject {
         } else if serverSettings == nil {
             configError = "server config invalid — re-enter in Settings"
         }
-        relaySettings = try? MacRelaySettings.startConfiguration(from: config)
-            ?? MacRelaySettings(providerConfiguration: config)
+        hybridSettings = HybridSettings(providerConfiguration: config) ?? .disabled
+        do {
+            relaySettings = try MacRelaySettings.startConfiguration(from: config)
+                ?? MacRelaySettings(providerConfiguration: config)
+            relayConfigurationIsValid = true
+        } catch {
+            relaySettings = nil
+            relayConfigurationIsValid = false
+            configError = error.localizedDescription
+        }
+    }
+
+    private func applyStatus(_ status: NEVPNStatus) {
+        self.status = status
+        statusText = Self.label(status)
+        let tunnelStatus = TunnelStatus.fromNEVPNRawValue(Int(status.rawValue))
+        if MacPollingLifecycle.shouldPoll(status: tunnelStatus) {
+            startPolling()
+        } else {
+            stopPolling()
+            if tunnelStatus == .disconnected || tunnelStatus == .invalid {
+                expireSnapshot()
+            }
+        }
     }
 
     private func startPolling() {
-        pollTimer?.invalidate()
+        guard pollTimer == nil else { return }
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.poll() }
+            Task { @MainActor in
+                self?.expireIfStale()
+                self?.poll()
+            }
         }
         poll()
+    }
+
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    private func expireSnapshot() {
+        snapshot = nil
+        pathRates = []
+        lastSnapshotReceivedAt = nil
+        rateSampler = MacSnapshotRateSampler()
+    }
+
+    private func expireIfStale() {
+        if !MacSnapshotFreshness.isFresh(receivedAt: lastSnapshotReceivedAt,
+                                         now: Date().timeIntervalSince1970) {
+            snapshot = nil
+            pathRates = []
+        }
     }
 
     private func poll() {
@@ -183,26 +238,17 @@ final class TunnelController: ObservableObject {
         do {
             try session.sendProviderMessage(Data([0])) { [weak self] data in
                 Task { @MainActor in
-                    guard let self, let data,
-                          let next = try? MacProviderSnapshot.decode(data) else { return }
-                    self.previous = self.snapshot
+                    guard let self else { return }
+                    guard let data, let next = try? MacProviderSnapshot.decode(data) else { return }
                     self.snapshot = next
+                    self.pathRates = self.rateSampler.ingest(next)
+                    self.lastSnapshotReceivedAt = Date().timeIntervalSince1970
                     if let error = next.lastError, !error.isEmpty { self.lastError = error }
                 }
             }
         } catch {
             lastError = error.localizedDescription
         }
-    }
-
-    private func rateMbps(previous: MacProviderPathSnapshot?,
-                          current: MacProviderPathSnapshot) -> Double {
-        guard let previous, let stamp = snapshot?.timestamp,
-              let prior = self.previous?.timestamp else { return 0 }
-        let bytes = Double((current.txBytes &+ current.rxBytes) &-
-                           (previous.txBytes &+ previous.rxBytes))
-        let elapsed = max(stamp - prior, 0.05)
-        return max(0, bytes * 8 / elapsed / 1_000_000)
     }
 
     private static func label(_ status: NEVPNStatus) -> String {

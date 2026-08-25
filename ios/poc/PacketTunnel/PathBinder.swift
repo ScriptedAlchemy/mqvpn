@@ -10,11 +10,35 @@ import Network
 /// AND read happens inside `engine.perform{}`. DispatchSource handlers never
 /// touch it — they capture their own fd/handle at creation time.
 final class PathBinder {
+    /// A cancellation handler runs on `monitorQueue`, while removal decisions
+    /// run on the engine tick thread. This one-shot bridge lets a provider
+    /// wait until both close(fd) and the tick-thread `fdClosed` notification
+    /// have happened before it destroys the core.
+    private final class CancellationGate {
+        private let lock = NSLock()
+        private var completion: (() -> Void)?
+
+        func setCompletion(_ completion: @escaping () -> Void) {
+            lock.lock()
+            self.completion = completion
+            lock.unlock()
+        }
+
+        func finish() {
+            lock.lock()
+            let completion = self.completion
+            self.completion = nil
+            lock.unlock()
+            completion?()
+        }
+    }
+
     private struct PathSlot {
         var handle: mqvpn_path_handle_t
         var fd: Int32
         var source: DispatchSourceRead
         var ifname: String
+        let cancellationGate: CancellationGate
     }
     private let engine: MqvpnEngine
     private let interfaceTypes: [NWInterface.InterfaceType]
@@ -199,6 +223,7 @@ final class PathBinder {
         //    fd/handle (immutable). Datagrams arriving between add and resume
         //    just wait in the socket buffer.
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: monitorQueue)
+        let cancellationGate = CancellationGate()
         source.setEventHandler { [weak self] in
             self?.drainSocket(fd: fd, handle: handle)
         }
@@ -208,18 +233,25 @@ final class PathBinder {
             // DispatchSource bug). After the close, hop to the tick thread to
             // report fd closure so the core can finish the slot's cleanup.
             close(fd)
-            self?.engine.perform { self?.engine.fdClosed(handle) }
+            let queued = self?.engine.perform {
+                self?.engine.fdClosed(handle)
+                cancellationGate.finish()
+            } ?? false
+            if !queued { cancellationGate.finish() }
         }
         source.resume()
-        slots[type] = PathSlot(handle: handle, fd: fd, source: source, ifname: iface.name)
+        slots[type] = PathSlot(handle: handle, fd: fd, source: source,
+                               ifname: iface.name, cancellationGate: cancellationGate)
         log.notice("path added type=\(String(describing: type), privacy: .public) fd=\(fd) handle=\(handle)")
     }
 
     /// Failover teardown. Runs on the tick thread.
     /// Order: orderly engine removal first, then cancel (whose handler closes
     /// the fd and reports fd-closed back on the tick thread).
-    private func removePath(type: NWInterface.InterfaceType) {
+    private func removePath(type: NWInterface.InterfaceType,
+                            closeCompletion: (() -> Void)? = nil) {
         guard let slot = slots.removeValue(forKey: type) else { return }
+        if let closeCompletion { slot.cancellationGate.setCompletion(closeCompletion) }
         engine.removePath(slot.handle)
         slot.source.cancel()
         log.notice("path removed type=\(String(describing: type), privacy: .public) handle=\(slot.handle)")
@@ -229,14 +261,28 @@ final class PathBinder {
     /// removePath(type:) for every live slot, then cancels the monitors
     /// themselves (start() is the only other writer of `monitors`, on the
     /// caller's thread, so this is safe without extra synchronization).
-    func stop() {
+    func stop(completion: @escaping () -> Void = {}) {
         pollTimer?.invalidate()
         pollTimer = nil
-        for type in Array(slots.keys) {
-            removePath(type: type)
+        let types = Array(slots.keys)
+        let group = DispatchGroup()
+        for type in types {
+            group.enter()
+            removePath(type: type) { group.leave() }
         }
         for (_, m) in monitors { m.cancel() }
         monitors.removeAll()
+        guard !types.isEmpty else {
+            completion()
+            return
+        }
+        // `group` drains only after every cancellation handler has closed its
+        // fd and executed fdClosed on the engine tick thread. This is the
+        // provider's transport-first shutdown boundary.
+        group.notify(queue: monitorQueue) { [weak self] in
+            guard let self else { completion(); return }
+            if !self.engine.perform(completion) { completion() }
+        }
     }
 
     /// Current (ifname, fd) per live slot, for GateMetrics' getsockopt

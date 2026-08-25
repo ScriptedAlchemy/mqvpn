@@ -37,6 +37,8 @@ swiftc -o "$OUT" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
+    "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
+    "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
     "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacRelayBinder.swift" \
@@ -76,6 +78,7 @@ swiftc -typecheck \
     "$IOS/PacketTunnel/PathBinder.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
+    "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacRelayBinder.swift" \
     "$ROOT/macos/poc/PacketTunnel/PacketTunnelProvider.swift" \
@@ -93,6 +96,7 @@ swiftc -typecheck \
     "$TMPD/ReorderStatsSnapshot.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
+    "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
     "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \

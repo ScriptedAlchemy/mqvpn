@@ -160,6 +160,19 @@ enum MacProviderStopStep: Equatable {
     case engine
 }
 
+/// Small, framework-free guard used at both sides of Network Extension's
+/// asynchronous settings apply. A core config callback is not sufficient by
+/// itself: the final active path can vanish before settings complete.
+enum MacProviderStartupSafety {
+    static func mayApplyNetworkSettings(activePathCount: Int, stopping: Bool) -> Bool {
+        !stopping && activePathCount > 0
+    }
+
+    static func mayActivatePacketFlow(activePathCount: Int, stopping: Bool) -> Bool {
+        !stopping && activePathCount > 0
+    }
+}
+
 /// Pure lifecycle policy. Runtime timers and Network Extension callbacks map
 /// their events into this state machine; it never owns routes or sockets.
 struct MacProviderLifecycle {
@@ -169,7 +182,7 @@ struct MacProviderLifecycle {
     private enum Stage {
         case idle
         case preflight(startedMs: UInt64)
-        case applyingSettings
+        case applyingSettings(startedMs: UInt64)
         case established
         case recovering(deadlineMs: UInt64)
         case failed
@@ -195,13 +208,15 @@ struct MacProviderLifecycle {
     mutating func tunnelConfigurationReady() -> MacProviderLifecycleAction {
         guard case .preflight = stage else { return .none }
         settingsRequested = true
-        stage = .applyingSettings
+        guard case let .preflight(startedMs) = stage else { return .none }
+        stage = .applyingSettings(startedMs: startedMs)
         return .applyNetworkSettings
     }
 
-    mutating func networkSettingsApplied(error: Bool) -> MacProviderLifecycleAction {
+    mutating func networkSettingsApplied(error: Bool,
+                                         activePathCount: Int = 1) -> MacProviderLifecycleAction {
         guard case .applyingSettings = stage else { return .none }
-        if error {
+        if error || activePathCount == 0 {
             stage = .failed
             return .failStart
         }
@@ -210,8 +225,12 @@ struct MacProviderLifecycle {
     }
 
     mutating func startupTimerFired(nowMs: UInt64) -> MacProviderLifecycleAction {
-        guard case let .preflight(startedMs) = stage,
-              nowMs >= startedMs + Self.startupTimeoutMs else { return .none }
+        let startedMs: UInt64
+        switch stage {
+        case let .preflight(value), let .applyingSettings(value): startedMs = value
+        default: return .none
+        }
+        guard nowMs >= startedMs + Self.startupTimeoutMs else { return .none }
         stage = .failed
         return .failStart
     }
@@ -219,6 +238,9 @@ struct MacProviderLifecycle {
     mutating func activePathCountChanged(_ count: Int,
                                          nowMs: UInt64) -> MacProviderLifecycleAction {
         switch stage {
+        case .applyingSettings where count == 0:
+            stage = .failed
+            return .failStart
         case .established where count == 0:
             let deadline = nowMs + Self.recoveryWindowMs
             stage = .recovering(deadlineMs: deadline)

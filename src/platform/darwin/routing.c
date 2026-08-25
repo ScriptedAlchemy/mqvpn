@@ -345,7 +345,7 @@ scoped_server_pin_delete(platform_ctx_t *p, const char *ifname)
 int
 darwin_setup_relay_route(platform_ctx_t *p)
 {
-    if (!p || !p->relay_enabled) return 0;
+    if (!p->relay_enabled) return 0;
     if (p->relay_route_configured) return 0;
     if (p->relay_ip[0] == '\0') return -1;
 
@@ -398,7 +398,7 @@ darwin_setup_relay_route(platform_ctx_t *p)
 void
 darwin_cleanup_relay_route(platform_ctx_t *p)
 {
-    if (!p || !p->relay_route_configured) return;
+    if (!p->relay_route_configured) return;
     char host_cidr[INET_ADDRSTRLEN + 4];
     snprintf(host_cidr, sizeof(host_cidr), "%s/32", p->relay_ip);
     const char *argv[] = {"route", "-n", "delete", "-ifscope",

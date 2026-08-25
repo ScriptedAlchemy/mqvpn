@@ -229,8 +229,7 @@ check(rejectedCompletions == 1,
 // ── Mac Relay settings and provider mode ──
 // These catch silently treating a corrupt relay configuration as VPN mode,
 // accepting a weak/wrong-size key, and enabling Start without all relay
-// prerequisites. The missing operating-mode/settings types make this test RED
-// before the production implementation exists.
+// prerequisites.
 check(OperatingMode(providerConfiguration: nil) == .vpn,
       "pre-relay provider configuration remains VPN mode")
 check(OperatingMode(providerConfiguration: [:]) == .vpn,

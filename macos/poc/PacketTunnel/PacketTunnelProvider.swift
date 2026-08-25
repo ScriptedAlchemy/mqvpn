@@ -13,24 +13,29 @@ private let macProviderLog = Logger(subsystem: "mqvpn.mac", category: "provider"
 /// helper, owns every route and DNS transaction.  This class only reaches
 /// `setTunnelNetworkSettings` after libmqvpn has authenticated and supplied a
 /// tunnel configuration.
-final class PacketTunnelProvider: NEPacketTunnelProvider {
+final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private let lifecycleQueue = DispatchQueue(label: "mqvpn.mac.provider.lifecycle")
     private let readerLock = NSLock()
+    private let startGateLock = NSLock()
 
     private var engine: MqvpnEngine?
     private var directBinder: PathBinder?
     private var relayBinder: MacRelayBinder?
     private var snapshotCache: SnapshotCache?
     private var snapshotReader: (() -> MacProviderSnapshot?)?
-    private var defaultPathObservation: NSKeyValueObservation?
     private var lifecycle = MacProviderLifecycle()
     private var startupTimer: DispatchSourceTimer?
     private var recoveryTimer: DispatchSourceTimer?
     private var startContinuation: CheckedContinuation<Void, Error>?
+    private var settingsApplyInFlight = false
+    private var settingsApplyWaiters: [() -> Void] = []
     private var startResolved = false
     private var stopping = false
+    private var transportStopTask: Task<Void, Never>?
     private var serverAddress: ResolvedServerAddress?
     private var relayAddress: ResolvedServerAddress?
+    private var startCancelled = false
+    private var lastPathCount = 0
 
     override func startTunnel(options: [String: NSObject]?) async throws {
         let rawConfig = (protocolConfiguration as? NETunnelProviderProtocol)?
@@ -73,6 +78,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
                 self.startContinuation = continuation
                 self.startResolved = false
+                self.setStartCancelled(false)
                 self.serverAddress = resolvedServer
                 self.relayAddress = resolvedRelay
                 _ = self.lifecycle.begin(nowMs: Self.nowMs())
@@ -98,11 +104,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 ? NSNumber(value: AF_INET6) : NSNumber(value: AF_INET)
             self?.packetFlow.writePackets([packet], withProtocols: [proto])
         }
-        engine.onTunnelConfig = { [weak self] info in
+        engine.onTunnelConfig = { [weak self, weak engine] info in
             // `info` is C memory owned by the callback. Copy its value before
             // crossing to the provider lifecycle queue.
             let copy = info
-            self?.lifecycleQueue.async { self?.receivedTunnelConfiguration(copy, serverIPv4: serverIPv4) }
+            // Config-ready means the server authenticated, but it does not
+            // pin a path. Capture the authoritative count on the same tick
+            // thread as the callback so an already-dead session cannot start
+            // applying a default route.
+            let activeCount = engine?.activePathCount() ?? 0
+            self?.lifecycleQueue.async {
+                self?.receivedTunnelConfiguration(copy, serverIPv4: serverIPv4,
+                                                  activePathCount: activeCount)
+            }
         }
         engine.onTunnelClosed = { [weak self] reason in
             self?.lifecycleQueue.async { self?.tunnelClosed(reason) }
@@ -140,9 +154,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         direct.start()
-        defaultPathObservation = observe(\.defaultPath) { [weak engine, weak direct] _, _ in
-            engine?.perform { direct?.reconcile() }
-        }
         armStartupTimeout()
     }
 
@@ -150,17 +161,40 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
     }
 
-    private func receivedTunnelConfiguration(_ info: mqvpn_tunnel_info_t, serverIPv4: String) {
-        guard !stopping, !startResolved,
+    private func receivedTunnelConfiguration(_ info: mqvpn_tunnel_info_t, serverIPv4: String,
+                                             activePathCount: Int) {
+        guard !startResolved else { return }
+        guard MacProviderStartupSafety.mayApplyNetworkSettings(activePathCount: activePathCount,
+                                                               stopping: stopping) else {
+            failStart(Self.error(21, "mqvpn path disappeared before tunnel settings"))
+            return
+        }
+        guard
               lifecycle.tunnelConfigurationReady() == .applyNetworkSettings else {
             return
         }
         let settings = Self.makeSettings(from: info, serverIPv4: serverIPv4,
                                          relayIPv4: relayAddress?.ipString)
+        settingsApplyInFlight = true
         setTunnelNetworkSettings(settings) { [weak self] error in
             self?.lifecycleQueue.async {
-                guard let self, !self.stopping, !self.startResolved else { return }
-                let action = self.lifecycle.networkSettingsApplied(error: error != nil)
+                guard let self else { return }
+                self.settingsApplyInFlight = false
+                let waiters = self.settingsApplyWaiters
+                self.settingsApplyWaiters.removeAll()
+                waiters.forEach { $0() }
+                guard !self.stopping, !self.startResolved else {
+                    // If an earlier bounded wait gave up, this completion may
+                    // be the one that actually installed settings. Queue a
+                    // final explicit clear so a late success cannot retain a
+                    // default route after Start/Stop has terminated.
+                    if error == nil {
+                        Task { await self.clearTunnelNetworkSettings() }
+                    }
+                    return
+                }
+                let action = self.lifecycle.networkSettingsApplied(
+                    error: error != nil, activePathCount: self.lastPathCount)
                 if action == .completeStart {
                     self.completeStart()
                 } else if action == .failStart {
@@ -172,21 +206,48 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func completeStart() {
         guard !startResolved else { return }
-        cancelStartupTimer()
         guard let engine = engine else {
             failStart(Self.error(17, "mqvpn engine stopped during startup"))
             return
         }
-        _ = engine.perform { [weak self, weak engine] in
+        let queued = engine.perform { [weak self, weak engine] in
             guard let self, let engine else { return }
+            // This is the second half of the no-blackhole gate: a path can
+            // disappear while Network Extension applies settings. Do not
+            // enable packet flow or resolve Start until a fresh tick-thread
+            // read proves a surviving path.
+            let activeCount = engine.activePathCount()
+            guard MacProviderStartupSafety.mayActivatePacketFlow(activePathCount: activeCount,
+                                                                  stopping: self.isStartCancelled) else {
+                self.lifecycleQueue.async {
+                    self.failStart(Self.error(22, "mqvpn path disappeared while applying tunnel settings"))
+                }
+                return
+            }
             engine.tunActive()
             self.snapshotCache?.start()
+            self.lifecycleQueue.async { [weak self] in
+                self?.finishSuccessfulStart(activePathCount: activeCount)
+            }
         }
+        guard queued else {
+            failStart(Self.error(17, "mqvpn tick thread unavailable during startup"))
+            return
+        }
+    }
+
+    private func finishSuccessfulStart(activePathCount: Int) {
+        guard !startResolved, !stopping else { return }
+        cancelStartupTimer()
         startResolved = true
         startContinuation?.resume()
         startContinuation = nil
         macProviderLog.notice("START_COMPLETE")
         readLoop()
+        // A path event queued just before Start resolved was intentionally
+        // ignored during preflight. Re-evaluate the captured count now so the
+        // five-second fail-open policy still applies to that edge.
+        activePathCountChanged(activePathCount)
     }
 
     private func armStartupTimeout() {
@@ -208,8 +269,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func activePathCountChanged(_ count: Int) {
-        guard startResolved, !stopping else { return }
+        lastPathCount = count
+        guard !stopping else { return }
         switch lifecycle.activePathCountChanged(count, nowMs: Self.nowMs()) {
+        case .failStart:
+            failStart(Self.error(21, "all mqvpn paths lost before Start completed"))
         case let .beginRecovery(deadlineMs):
             reasserting = true
             snapshotCache?.updateLifecycle(reasserting: true, error: "all mqvpn paths lost; recovering")
@@ -254,14 +318,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func failStart(_ error: Error) {
         guard !startResolved, !stopping else { return }
         startResolved = true
+        stopping = true
+        setStartCancelled(true)
         cancelStartupTimer()
         recoveryTimer?.cancel()
         recoveryTimer = nil
         snapshotCache?.updateLifecycle(reasserting: false, error: error.localizedDescription)
         let continuation = startContinuation
         startContinuation = nil
-        Task { [weak self] in
-            await self?.stopTransport()
+        let stopTask = ensureTransportStopTask(clearNetworkSettingsFirst: true)
+        Task {
+            await stopTask.value
             continuation?.resume(throwing: error)
         }
     }
@@ -287,22 +354,57 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
-        await withCheckedContinuation { continuation in
+        let stop = await withCheckedContinuation {
+            (continuation: CheckedContinuation<(Task<Void, Never>, CheckedContinuation<Void, Error>?, Bool), Never>) in
             lifecycleQueue.async { [weak self] in
-                guard let self else { continuation.resume(); return }
-                if self.stopping { continuation.resume(); return }
-                self.stopping = true
-                self.cancelStartupTimer()
-                self.recoveryTimer?.cancel()
-                self.recoveryTimer = nil
-                self.reasserting = false
-                _ = self.lifecycle.beginStop()
-                Task {
-                    await self.stopTransport()
-                    continuation.resume()
+                guard let self else {
+                    continuation.resume(returning: (Task {}, nil, false))
+                    return
                 }
+                let pendingStart: CheckedContinuation<Void, Error>?
+                if self.startResolved {
+                    pendingStart = nil
+                } else {
+                    // A system/user Stop is terminal for this Start. Mark it
+                    // resolved before any late config/settings callback can
+                    // install or retain routes, then resume the caller only
+                    // after the one shared teardown task has finished.
+                    self.startResolved = true
+                    pendingStart = self.startContinuation
+                    self.startContinuation = nil
+                }
+                let needsPreclear = pendingStart != nil
+                continuation.resume(returning: (
+                    self.ensureTransportStopTask(clearNetworkSettingsFirst: needsPreclear),
+                    pendingStart, needsPreclear))
             }
         }
+        await stop.0.value
+        stop.1?.resume(throwing: CancellationError())
+    }
+
+    /// Lifecycle-queue-only shared teardown. Repeated Stop calls and a Start
+    /// failure all await the same task, so none can report completion before
+    /// Network Extension transport ownership is actually released.
+    private func ensureTransportStopTask(clearNetworkSettingsFirst: Bool) -> Task<Void, Never> {
+        if let transportStopTask { return transportStopTask }
+        stopping = true
+        setStartCancelled(true)
+        cancelStartupTimer()
+        recoveryTimer?.cancel()
+        recoveryTimer = nil
+        reasserting = false
+        _ = lifecycle.beginStop()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            if clearNetworkSettingsFirst {
+                await self.waitForSettingsApplication()
+                await self.clearTunnelNetworkSettings()
+            }
+            await self.stopTransport()
+        }
+        transportStopTask = task
+        return task
     }
 
     /// The only teardown path. It waits for the relay's socket/key and logical
@@ -310,8 +412,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// core shutdown. That order prevents a late logical callback from using a
     /// closed/reused UDP fd.
     private func stopTransport() async {
-        defaultPathObservation?.invalidate()
-        defaultPathObservation = nil
         let relay = relayBinder
         relayBinder = nil
         if let relay {
@@ -322,19 +422,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let engine = engine
         let direct = directBinder
         let snapshots = snapshotCache
-        engine?.onTunnelClosed = nil
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             guard let engine else { continuation.resume(); return }
             let queued = engine.perform { [weak self] in
-                direct?.stop()
-                snapshots?.stop()
-                engine.shutdown()
-                self?.setSnapshotReader(nil)
-                continuation.resume()
+                engine.onTunnelClosed = nil
+                engine.onPathEvent = nil
+                engine.onTunOutput = nil
+                direct?.stop {
+                    // PathBinder's completion proves every Dispatch source
+                    // closed its fd and reported fdClosed on this tick thread.
+                    // Only then may core/snapshot destruction run.
+                    snapshots?.stop()
+                    engine.shutdown()
+                    self?.setSnapshotReader(nil)
+                    continuation.resume()
+                }
             }
             if !queued { continuation.resume() }
         }
-        engine?.onLogicalPathSend = nil
         self.engine = nil
         self.directBinder = nil
         self.snapshotCache = nil
@@ -344,10 +449,53 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         macProviderLog.notice("STOP_COMPLETE")
     }
 
+    /// Waits for an in-flight `setTunnelNetworkSettings` completion without
+    /// allowing a hung platform callback to strand a Stop/Start caller. A
+    /// late success is still harmless: `stopping` causes its callback to skip
+    /// activation, and the explicit clearing call below removes settings.
+    private func waitForSettingsApplication() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lifecycleQueue.async { [weak self] in
+                guard let self, self.settingsApplyInFlight else {
+                    continuation.resume()
+                    return
+                }
+                var resumed = false
+                let resumeOnce = {
+                    guard !resumed else { return }
+                    resumed = true
+                    continuation.resume()
+                }
+                self.settingsApplyWaiters.append(resumeOnce)
+                self.lifecycleQueue.asyncAfter(deadline: .now() + .seconds(2)) {
+                    resumeOnce()
+                }
+            }
+        }
+    }
+
+    private func clearTunnelNetworkSettings() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            setTunnelNetworkSettings(nil) { _ in continuation.resume() }
+        }
+    }
+
     private func setSnapshotReader(_ reader: (() -> MacProviderSnapshot?)?) {
         readerLock.lock()
         snapshotReader = reader
         readerLock.unlock()
+    }
+
+    private func setStartCancelled(_ cancelled: Bool) {
+        startGateLock.lock()
+        startCancelled = cancelled
+        startGateLock.unlock()
+    }
+
+    private var isStartCancelled: Bool {
+        startGateLock.lock()
+        defer { startGateLock.unlock() }
+        return startCancelled
     }
 
     private func currentSnapshotReader() -> (() -> MacProviderSnapshot?)? {
@@ -402,6 +550,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         for cursor in sequence(first: list, next: { $0.pointee.ifa_next }) {
             let entry = cursor.pointee
             guard let address = entry.ifa_addr, let netmask = entry.ifa_netmask,
+                  (entry.ifa_flags & UInt32(IFF_UP | IFF_RUNNING)) == UInt32(IFF_UP | IFF_RUNNING),
                   address.pointee.sa_family == sa_family_t(AF_INET),
                   netmask.pointee.sa_family == sa_family_t(AF_INET),
                   let name = String(validatingUTF8: entry.ifa_name), let kind = kinds[name],
