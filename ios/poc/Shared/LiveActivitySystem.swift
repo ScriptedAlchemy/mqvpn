@@ -165,6 +165,7 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
         // covers system/error stops but is intentionally unawaited so
         // ActivityKit can never hold up NetworkExtension teardown.
         Task { await MqvpnLiveActivityLifecycle.endImmediately() }
+        liveActivityLog.notice("provider Live Activity cleanup scheduled after transport stop")
     }
 
     private func publish() {
