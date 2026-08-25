@@ -110,7 +110,7 @@ private struct InterfaceSpeedView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                Text(Self.rateText(content?.megabitsPerSecond))
+                Text(rateText)
                     .font(compact ? .caption2.monospacedDigit() : .headline.monospacedDigit())
                     .lineLimit(1)
             }
@@ -121,10 +121,15 @@ private struct InterfaceSpeedView: View {
                                                    available: content != nil))
     }
 
-    private static func rateText(_ rate: Double?) -> String {
+    private var rateText: String {
+        let rate = content?.megabitsPerSecond
         guard let rate else { return "--" }
-        if rate < 10 { return String(format: "%.1fM", rate) }
-        return String(format: "%.0fM", rate)
+        if compact {
+            if rate < 10 { return String(format: "%.1fM", rate) }
+            return String(format: "%.0fM", rate)
+        }
+        if rate < 10 { return String(format: "%.1f Mbps", rate) }
+        return String(format: "%.0f Mbps", rate)
     }
 
     private static func accessibilityRate(_ rate: Double?, available: Bool) -> String {
