@@ -154,3 +154,40 @@ enum LiveActivityCounterSource {
         }
     }
 }
+
+enum LiveActivityContentFactory {
+    static func make(snapshot: TunnelSnapshot,
+                     rates: LiveActivityRateSnapshot) -> LiveActivityContentState {
+        let phase: LiveActivityPhase
+        switch snapshot.operatingMode {
+        case .vpn:
+            let hasActivePhysicalPath = snapshot.paths.contains {
+                $0.status == 1 && LiveActivityInterfaceKind(interfaceName: $0.name) != nil
+            }
+            phase = snapshot.clientState == 4 && hasActivePhysicalPath ? .active : .waiting
+        case .macRelay:
+            if snapshot.relay?.error != nil {
+                phase = .unavailable
+            } else if snapshot.relay?.isReady == true {
+                phase = .active
+            } else {
+                phase = .waiting
+            }
+        }
+
+        return LiveActivityContentState(
+            phase: phase,
+            sampledAt: snapshot.timestamp,
+            wifi: content(from: rates.wifi),
+            cellular: content(from: rates.cellular))
+    }
+
+    private static func content(from speed: InterfaceSpeed?) -> LiveActivityInterfaceContent? {
+        guard let speed else { return nil }
+        let rate = speed.megabitsPerSecond.flatMap { value in
+            value.isFinite ? max(0, value) : nil
+        }
+        return LiveActivityInterfaceContent(interfaceName: speed.interfaceName,
+                                            megabitsPerSecond: rate)
+    }
+}

@@ -15,6 +15,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // the start/stop lifecycle, so the reader must tolerate a nil cache.
     private var snapshot: SnapshotCache?
     private var snapshotReader: (() -> TunnelSnapshot?)?
+    private var liveActivityReporter: MqvpnLiveActivityReporting?
     private var defaultPathObservation: NSKeyValueObservation?
 
     override func startTunnel(options: [String: NSObject]?) async throws {
@@ -55,6 +56,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
             }
             relay.start()
+            if #available(iOS 16.2, *) {
+                let reporter = MqvpnLiveActivityReporter { [weak relay] in
+                    relay?.readSnapshot()
+                }
+                liveActivityReporter = reporter
+                reporter.start()
+            }
             return
         }
         let engine = MqvpnEngine()
@@ -104,6 +112,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         self.readLoop()          // one-shot API: re-armed per completion
                         metrics.start()          // 10s cadence os_log dumps
                         snapshot.start()         // 1s cadence app-facing cache
+                        if #available(iOS 16.2, *) {
+                            let reporter = MqvpnLiveActivityReporter { [weak snapshot] in
+                                snapshot?.read()
+                            }
+                            self.liveActivityReporter = reporter
+                            reporter.start()
+                        }
                         cont.resume()
                     }
                 }
@@ -204,6 +219,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // just means the server falls back to its idle timeout) and gives
         // repeated gate runs a zero state start.
         providerLog.notice("STOP_BEGIN")
+        if let reporter = liveActivityReporter {
+            await reporter.stop()
+        }
+        liveActivityReporter = nil
         defaultPathObservation?.invalidate()
         defaultPathObservation = nil
         if let relayEngine {

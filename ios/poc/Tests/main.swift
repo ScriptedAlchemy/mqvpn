@@ -362,6 +362,56 @@ check(LiveActivityInterfaceKind(interfaceName: "pdp_ip0") == .cellular,
 check(LiveActivityInterfaceKind(interfaceName: "utun9") == nil,
       "synthetic tunnel interfaces never appear as physical activity paths")
 
+let activeActivityState = LiveActivityContentFactory.make(
+    snapshot: TunnelSnapshot(
+        timestamp: 200, clientState: 4, connectedSince: 150, footprint: 0,
+        paths: [PathSnapshot(name: "en0", status: 1, txBytes: 1, rxBytes: 2)]),
+    rates: LiveActivityRateSnapshot(
+        wifi: InterfaceSpeed(interfaceName: "en0", megabitsPerSecond: 12.345),
+        cellular: nil))
+check(activeActivityState.phase == .active &&
+      activeActivityState.wifi?.interfaceName == "en0" &&
+      activeActivityState.wifi?.megabitsPerSecond == 12.345 &&
+      activeActivityState.cellular == nil,
+      "active VPN content preserves the sampled physical-interface truth")
+
+let waitingRelayState = LiveActivityContentFactory.make(
+    snapshot: TunnelSnapshot(
+        timestamp: 201, clientState: -1, connectedSince: 150, footprint: 0,
+        paths: [], operatingMode: .macRelay,
+        relay: RelaySnapshot(
+            wifiAvailable: true, cellularAvailable: true,
+            authenticatedSession: false, listenerInterface: "en0",
+            cellularInterface: "pdp_ip0", lanRxBytes: 0, lanTxBytes: 0,
+            serverRxBytes: 0, serverTxBytes: 0,
+            lastAuthenticated: nil, error: nil)),
+    rates: LiveActivityRateSnapshot(
+        wifi: InterfaceSpeed(interfaceName: "en0", megabitsPerSecond: nil),
+        cellular: InterfaceSpeed(interfaceName: "pdp_ip0", megabitsPerSecond: nil)))
+check(waitingRelayState.phase == .waiting && waitingRelayState.wifi?.megabitsPerSecond == nil,
+      "relay without an authenticated Mac is visibly waiting, not bonded")
+
+let failedRelayState = LiveActivityContentFactory.make(
+    snapshot: TunnelSnapshot(
+        timestamp: 202, clientState: -1, connectedSince: 150, footprint: 0,
+        paths: [], operatingMode: .macRelay,
+        relay: RelaySnapshot(
+            wifiAvailable: true, cellularAvailable: false,
+            authenticatedSession: false, listenerInterface: "en0",
+            cellularInterface: nil, lanRxBytes: 0, lanTxBytes: 0,
+            serverRxBytes: 0, serverTxBytes: 0,
+            lastAuthenticated: nil, error: "Cellular relay socket unavailable")),
+    rates: LiveActivityRateSnapshot(wifi: nil, cellular: nil))
+check(failedRelayState.phase == .unavailable && failedRelayState.wifi == nil &&
+      failedRelayState.cellular == nil,
+      "relay socket failure is unavailable and never invents interface rates")
+
+let contentWire = try! JSONEncoder().encode(activeActivityState)
+let contentRoundTrip = try! JSONDecoder().decode(LiveActivityContentState.self,
+                                                   from: contentWire)
+check(contentRoundTrip == activeActivityState,
+      "Live Activity content stays Codable and Hashable across the system boundary")
+
 // ── Mac Relay authenticated session state ──
 // The socket layer only passes frames here after the shared C codec has
 // authenticated them and applied its replay window. These tests catch state

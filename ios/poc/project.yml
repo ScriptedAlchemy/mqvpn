@@ -37,10 +37,14 @@ targets:
     dependencies:
       - target: PacketTunnel
         embed: true
+      - target: MqvpnLiveActivity
+        embed: true
     info:
       path: App/Info.plist
       properties:
         UILaunchScreen: {}
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
         NSLocalNetworkUsageDescription: Allow your Mac to send authenticated mqvpn relay datagrams to this iPhone.
         MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
         MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
@@ -82,3 +86,26 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+  MqvpnLiveActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.2"
+    sources:
+      - LiveActivity
+      - path: Shared
+        includes:
+          - LiveActivityContent.swift
+          - MqvpnNetworkActivityAttributes.swift
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        PRODUCT_BUNDLE_IDENTIFIER: com.zackjackson.mqvpn.LiveActivity
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+    info:
+      path: LiveActivity/Info.plist
+      properties:
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
