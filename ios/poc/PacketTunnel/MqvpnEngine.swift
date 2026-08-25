@@ -277,8 +277,7 @@ final class MqvpnEngine: NSObject {
         mqvpn_client_remove_path(c, handle)
     }
 
-    /// Tick-thread-only. xquic replicates this PING across all active paths
-    /// when multipath is enabled, keeping a lightly scheduled relay path live.
+    /// Tick-thread-only. See mqvpn_client_probe_paths.
     @discardableResult
     func probePaths() -> Int32 {
         guard let c = client else { return Int32(MQVPN_ERR_INVALID_STATE.rawValue) }

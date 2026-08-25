@@ -520,6 +520,78 @@ check(relayState.handleMacFrame(hello, now: 2) == [.sendHelloAck(sessionID: 7)],
 check(relayState.snapshot.authenticatedSession && relayState.snapshot.lastAuthenticated == 2,
       "authenticated HELLO updates readiness and liveness")
 
+check(RelayReplayEligibility.mayCheck(
+          type: .hello, sessionID: 7, activeSessionID: 7,
+          peer: peerB, activePeer: peerA),
+      "same-session authenticated HELLO may enter replay validation after endpoint migration")
+check(!RelayReplayEligibility.mayCheck(
+          type: .dataToServer, sessionID: 7, activeSessionID: 7,
+          peer: peerB, activePeer: peerA),
+      "ordinary relay data remains pinned to the authenticated peer")
+check(RelayReplayEligibility.mayCheck(
+          type: .keepalive, sessionID: 7, activeSessionID: 7,
+          peer: peerB, activePeer: peerA, pendingPeer: peerB),
+      "keepalive from a pending peer may enter replay validation")
+check(!RelayReplayEligibility.mayCheck(
+          type: .dataToServer, sessionID: 7, activeSessionID: 7,
+          peer: peerB, activePeer: peerA, pendingPeer: peerB),
+      "DATA from a pending peer may not enter replay validation")
+func pathChallengeNonce(in actions: [RelayStateAction]) -> Data? {
+    for action in actions {
+        if case .sendPathChallenge(let nonce) = action { return nonce }
+    }
+    return nil
+}
+let migratedHello = RelayInboundFrame(type: .hello, sessionID: 7, sequence: 2,
+                                      payload: Data(), peer: peerB,
+                                      authenticated: true, replayAccepted: true)
+let migratedActions = relayState.handleMacFrame(migratedHello, now: 2.5)
+let challengeNonce = pathChallengeNonce(in: migratedActions)
+check(relayState.activePeer == peerA,
+      "migrated HELLO keeps the committed peer until the candidate echoes a nonce")
+check(migratedActions.contains(.sendHelloAck(sessionID: 7)) &&
+      challengeNonce?.count == 8,
+      "migrated HELLO ACKs the candidate and emits an 8-byte path challenge")
+check(relayState.snapshot.lastAuthenticated == 2.5,
+      "candidate HELLO refreshes liveness so idle expiry does not fire mid-challenge")
+let livePeerData = RelayInboundFrame(type: .dataToServer, sessionID: 7, sequence: 3,
+                                     payload: Data([4]), peer: peerA,
+                                     authenticated: true, replayAccepted: true)
+check(relayState.handleMacFrame(livePeerData, now: 2.6) == [.forwardToFixedServer(Data([4]))],
+      "DATA from the committed peer still forwards during a path challenge")
+let pendingPeerData = RelayInboundFrame(type: .dataToServer, sessionID: 7, sequence: 4,
+                                        payload: Data([5]), peer: peerB,
+                                        authenticated: true, replayAccepted: true)
+check(relayState.handleMacFrame(pendingPeerData, now: 2.7) == [.drop(.peer)],
+      "DATA from the pending peer is dropped until the nonce is echoed")
+let promoteKeepalive = RelayInboundFrame(type: .keepalive, sessionID: 7, sequence: 5,
+                                         payload: challengeNonce ?? Data(),
+                                         peer: peerB,
+                                         authenticated: true, replayAccepted: true)
+check(relayState.handleMacFrame(promoteKeepalive, now: 2.8) == [] &&
+      relayState.activePeer == peerB,
+      "matching 8-byte keepalive from the pending peer promotes that peer")
+let retiredPeerData = RelayInboundFrame(type: .dataToServer, sessionID: 7, sequence: 6,
+                                        payload: Data([6]), peer: peerA,
+                                        authenticated: true, replayAccepted: true)
+check(relayState.handleMacFrame(retiredPeerData, now: 2.9) == [.drop(.peer)],
+      "the previous peer cannot send data after a successful promote")
+let promotedPeerData = RelayInboundFrame(type: .dataToServer, sessionID: 7, sequence: 7,
+                                         payload: Data([7]), peer: peerB,
+                                         authenticated: true, replayAccepted: true)
+check(relayState.handleMacFrame(promotedPeerData, now: 3.0) == [.forwardToFixedServer(Data([7]))],
+      "DATA from the promoted peer forwards after the nonce echo")
+
+var pendingExpireState = RelaySessionState(idleTimeout: 15)
+pendingExpireState.updateInterfaces(wifi: "en0", cellular: "pdp_ip0")
+_ = pendingExpireState.handleMacFrame(hello, now: 1)
+_ = pendingExpireState.handleMacFrame(migratedHello, now: 2)
+check(pendingExpireState.expireIfIdle(now: 17.1),
+      "idle expiry clears an in-flight path challenge")
+check(pendingExpireState.handleMacFrame(hello, now: 18) == [.sendHelloAck(sessionID: 7)] &&
+      pendingExpireState.activePeer == peerA,
+      "after expire, first HELLO commits immediately again")
+
 let competingHello = RelayInboundFrame(type: .hello, sessionID: 8, sequence: 1,
                                        payload: Data(), peer: peerB,
                                        authenticated: true, replayAccepted: true)
@@ -527,13 +599,13 @@ check(relayState.handleMacFrame(competingHello, now: 3) == [.drop(.session)],
       "a second Mac session is rejected while the first is live")
 
 let replayed = RelayInboundFrame(type: .dataToServer, sessionID: 7, sequence: 2,
-                                 payload: Data([1, 2]), peer: peerA,
+                                 payload: Data([1, 2]), peer: peerB,
                                  authenticated: true, replayAccepted: false)
 check(relayState.handleMacFrame(replayed, now: 4) == [.drop(.replay)],
       "replayed DATA is dropped before server forwarding")
 
 let dataToServer = RelayInboundFrame(type: .dataToServer, sessionID: 7, sequence: 3,
-                                     payload: Data([9, 8, 7]), peer: peerA,
+                                     payload: Data([9, 8, 7]), peer: peerB,
                                      authenticated: true, replayAccepted: true)
 check(relayState.handleMacFrame(dataToServer, now: 5) == [.forwardToFixedServer(Data([9, 8, 7]))],
       "accepted DATA carries only payload to the already-connected fixed server")
@@ -543,6 +615,11 @@ check(relayState.expireIfIdle(now: 20.1), "session expires after 15 seconds with
 check(!relayState.snapshot.authenticatedSession, "idle expiry clears authenticated session")
 
 _ = relayState.handleMacFrame(hello, now: 21)
+check(RelayPeerIdentity.endpoint(family: 6, portNetworkOrder: 0x1543,
+                                 address: Data(repeating: 0xfe, count: 16)) ==
+      RelayPeerIdentity.endpoint(family: 6, portNetworkOrder: 0x1543,
+                                 address: Data(repeating: 0xfe, count: 16)),
+      "IPv6 peer identity is address plus port, not scope or flowinfo")
 check(relayState.updateInterfaces(wifi: nil, cellular: "pdp_ip0") == [.closeWifi],
       "Wi-Fi loss closes its listener")
 check(!relayState.snapshot.authenticatedSession,

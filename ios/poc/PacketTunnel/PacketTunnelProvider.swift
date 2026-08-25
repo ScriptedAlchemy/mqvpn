@@ -280,10 +280,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    /// Relay mode needs a packet-tunnel process lifetime, not a phone traffic
-    /// route. A documentation-only /32 address satisfies NetworkExtension's
-    /// interface requirement while an empty included-routes list and nil DNS
-    /// leave all iPhone application traffic on the system's normal routing.
+    /// Packet-tunnel lifetime only. Routes and DNS come from
+    /// `RelayNetworkPlan.nonRouting` — never the public server address.
     static func makeRelaySettings() -> NEPacketTunnelNetworkSettings {
         let plan = RelayNetworkPlan.nonRouting
         let settings = NEPacketTunnelNetworkSettings(

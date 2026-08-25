@@ -32,6 +32,10 @@ final class MacRelayBinder {
     /// Network-byte-order local UDP port from the first successful bind.
     /// Reopen must reuse it so the iPhone's authenticated peer identity still matches.
     private var pinnedLocalPort: in_port_t = 0
+    /// Exact local address from the first connect. Bind-to-any plus a later
+    /// default-route change can pick utun as the source and break the iPhone peer.
+    private var pinnedLocalAddress = sockaddr_storage()
+    private var pinnedLocalAddressLength: socklen_t = 0
 
     /// Called on the binder's serial queue. Consumers should copy the value;
     /// snapshots contain counters/errors, never the relay key or payloads.
@@ -73,6 +77,10 @@ final class MacRelayBinder {
             guard let self else { return }
             if self.refreshConnectedRouteLocked() {
                 macRelayLog.notice("relay connect refreshed after tunnel routes")
+                if self.state.shouldHelloAfterRouteRefresh() {
+                    _ = self.sendFrame(type: MQVPN_RELAY_HELLO, payload: Data(),
+                                       nowMs: self.nowMs())
+                }
             } else if self.fd >= 0 {
                 macRelayLog.error("relay connect refresh after routes failed: \(self.errnoMessage(), privacy: .public)")
             }
@@ -259,6 +267,22 @@ final class MacRelayBinder {
         var reuse: Int32 = 1
         _ = setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &reuse,
                        socklen_t(MemoryLayout<Int32>.size))
+        if MacRelaySourcePin.shouldBindExactSource(pinnedAddressLength: pinnedLocalAddressLength) {
+            var address = pinnedLocalAddress
+            let exactBindSucceeded = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(socketFD, $0, pinnedLocalAddressLength)
+                }
+            } == 0
+            if MacRelaySourcePin.shouldClearPinAfterBindFailure(exactBindAttempted: true,
+                                                                bindSucceeded: exactBindSucceeded) {
+                pinnedLocalAddress = sockaddr_storage()
+                pinnedLocalAddressLength = 0
+            }
+            if exactBindSucceeded {
+                return true
+            }
+        }
         if endpointFamily == AF_INET6 {
             var address = sockaddr_in6()
             address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
@@ -291,6 +315,11 @@ final class MacRelayBinder {
             }
         }
         guard ok == 0 else { return }
+        if MacRelaySourcePin.shouldReplacePin(existingAddressLength: pinnedLocalAddressLength,
+                                              newAddressLength: length) {
+            pinnedLocalAddress = storage
+            pinnedLocalAddressLength = length
+        }
         let family = Int32(storage.ss_family)
         if family == AF_INET6 {
             let port = withUnsafeBytes(of: &storage) {
@@ -346,6 +375,8 @@ final class MacRelayBinder {
             break
         case .activateLogicalPath:
             addLogicalEnginePath()
+        case let .echoKeepalive(nonce):
+            _ = sendFrame(type: MQVPN_RELAY_KEEPALIVE, payload: nonce, nowMs: nowMs())
         case let .deliverToCore(payload, handle):
             feedEngine(handle: handle, payload: payload)
         case let .drop(reason):

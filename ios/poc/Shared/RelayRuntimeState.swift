@@ -82,6 +82,16 @@ struct RelayPeerIdentity: Equatable {
     init(_ bytes: Data) {
         self.bytes = bytes
     }
+
+    /// Port plus address only. IPv6 scope and flowinfo are not the Mac's
+    /// identity — they change when the Mac installs its default tunnel route.
+    static func endpoint(family: UInt8, portNetworkOrder: UInt16, address: Data) -> RelayPeerIdentity {
+        var port = portNetworkOrder
+        var bytes = Data([family])
+        withUnsafeBytes(of: &port) { bytes.append(contentsOf: $0) }
+        bytes.append(address)
+        return RelayPeerIdentity(bytes)
+    }
 }
 
 enum RelayFrameType: Equatable {
@@ -90,6 +100,28 @@ enum RelayFrameType: Equatable {
     case dataToServer
     case dataToMac
     case keepalive
+}
+
+enum RelayReplayEligibility {
+    static func mayCheck(type: RelayFrameType,
+                         sessionID: UInt64,
+                         activeSessionID: UInt64?,
+                         peer: RelayPeerIdentity,
+                         activePeer: RelayPeerIdentity?,
+                         pendingPeer: RelayPeerIdentity? = nil) -> Bool {
+        if activeSessionID == nil {
+            return type == .hello
+        }
+        guard activeSessionID == sessionID else { return false }
+        switch type {
+        case .hello:
+            return true
+        case .keepalive:
+            return peer == activePeer || peer == pendingPeer
+        case .dataToServer, .dataToMac, .helloAck:
+            return activePeer == peer
+        }
+    }
 }
 
 struct RelayInboundFrame: Equatable {
@@ -124,6 +156,7 @@ enum RelayStateAction: Equatable {
     case openCellular(String)
     case closeCellular
     case sendHelloAck(sessionID: UInt64)
+    case sendPathChallenge(nonce: Data)
     case forwardToFixedServer(Data)
     case drop(RelayDropReason)
 }
@@ -134,6 +167,8 @@ struct RelaySessionState {
     private var cellularInterface: String?
     private var sessionID: UInt64?
     private var peer: RelayPeerIdentity?
+    private var pendingPeerIdentity: RelayPeerIdentity?
+    private var pathChallengeNonce: Data?
     private var lastAuthenticated: Double?
     private var lanRxBytes: UInt64 = 0
     private var lanTxBytes: UInt64 = 0
@@ -147,6 +182,7 @@ struct RelaySessionState {
 
     var activeSessionID: UInt64? { sessionID }
     var activePeer: RelayPeerIdentity? { peer }
+    var pendingPeer: RelayPeerIdentity? { pendingPeerIdentity }
 
     var snapshot: RelaySnapshot {
         RelaySnapshot(
@@ -188,30 +224,36 @@ struct RelaySessionState {
             guard frame.payload.isEmpty else { return [.drop(.payload)] }
             if let current = sessionID {
                 guard current == frame.sessionID else { return [.drop(.session)] }
-                guard peer == frame.peer else { return [.drop(.peer)] }
             }
             guard frame.replayAccepted else { return [.drop(.replay)] }
             if sessionID == nil {
                 sessionID = frame.sessionID
                 peer = frame.peer
+                lastAuthenticated = now
+                error = nil
+                return [.sendHelloAck(sessionID: frame.sessionID)]
             }
             lastAuthenticated = now
             error = nil
-            return [.sendHelloAck(sessionID: frame.sessionID)]
+            if peer == frame.peer {
+                return [.sendHelloAck(sessionID: frame.sessionID)]
+            }
+            pendingPeerIdentity = frame.peer
+            let nonce = Data((0..<8).map { _ in UInt8.random(in: 0...255) })
+            pathChallengeNonce = nonce
+            return [.sendHelloAck(sessionID: frame.sessionID),
+                    .sendPathChallenge(nonce: nonce)]
 
-        case .dataToServer, .keepalive:
+        case .dataToServer:
             guard sessionID == frame.sessionID else { return [.drop(.session)] }
             guard peer == frame.peer else { return [.drop(.peer)] }
             guard frame.replayAccepted else { return [.drop(.replay)] }
-            if frame.type == .keepalive && !frame.payload.isEmpty {
-                return [.drop(.payload)]
-            }
             lastAuthenticated = now
             error = nil
-            if frame.type == .dataToServer {
-                return [.forwardToFixedServer(frame.payload)]
-            }
-            return []
+            return [.forwardToFixedServer(frame.payload)]
+
+        case .keepalive:
+            return handleKeepalive(frame, now: now)
 
         case .helloAck, .dataToMac:
             return [.drop(.messageType)]
@@ -254,9 +296,38 @@ struct RelaySessionState {
         return actions
     }
 
+    private mutating func handleKeepalive(_ frame: RelayInboundFrame,
+                                          now: Double) -> [RelayStateAction] {
+        guard sessionID == frame.sessionID else { return [.drop(.session)] }
+        if frame.peer != peer && frame.peer != pendingPeerIdentity {
+            return [.drop(.peer)]
+        }
+        guard frame.replayAccepted else { return [.drop(.replay)] }
+        if frame.peer == peer {
+            if !frame.payload.isEmpty { return [.drop(.payload)] }
+            lastAuthenticated = now
+            error = nil
+            return []
+        }
+        if frame.payload.isEmpty {
+            return [.drop(.peer)]
+        }
+        guard frame.payload.count == 8, frame.payload == pathChallengeNonce else {
+            return [.drop(.payload)]
+        }
+        peer = pendingPeerIdentity
+        pendingPeerIdentity = nil
+        pathChallengeNonce = nil
+        lastAuthenticated = now
+        error = nil
+        return []
+    }
+
     private mutating func clearSession() {
         sessionID = nil
         peer = nil
+        pendingPeerIdentity = nil
+        pathChallengeNonce = nil
         lastAuthenticated = nil
     }
 }

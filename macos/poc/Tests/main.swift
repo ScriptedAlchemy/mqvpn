@@ -564,11 +564,46 @@ check(state.receive(toMac, nowMs: 105) == .deliverToCore(Data([9, 8, 7]), 44) &&
 check(state.receive(toMac, nowMs: 106) == .drop(.replay),
       "duplicate authenticated data is rejected by the shared replay window")
 
+let emptyKeepalive = phoneFrame(MQVPN_RELAY_KEEPALIVE, sequence: 5)
+check(state.receive(emptyKeepalive, nowMs: 106) == .none && state.snapshot.active,
+      "an empty keepalive is idle traffic and does not echo")
+let probeNonce = Data([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88])
+let probeKeepalive = phoneFrame(MQVPN_RELAY_KEEPALIVE, sequence: 6, payload: probeNonce)
+check(state.receive(probeKeepalive, nowMs: 106) == .echoKeepalive(probeNonce) &&
+      state.snapshot.active && state.snapshot.pathHandle == 44,
+      "an 8-byte keepalive nonce is echoed so the iPhone can promote the path")
+let shortKeepalive = phoneFrame(MQVPN_RELAY_KEEPALIVE, sequence: 7, payload: Data(count: 7))
+check(state.receive(shortKeepalive, nowMs: 106) == .drop(.malformed) && state.snapshot.active,
+      "a 7-byte keepalive is malformed and must not echo")
+let longKeepalive = phoneFrame(MQVPN_RELAY_KEEPALIVE, sequence: 8, payload: Data(count: 9))
+check(state.receive(longKeepalive, nowMs: 106) == .drop(.malformed) && state.snapshot.active,
+      "a 9-byte keepalive is malformed and must not echo")
+
 check(MacRelaySendRecovery.shouldRefreshRoute(ENETUNREACH) &&
       MacRelaySendRecovery.shouldRefreshRoute(EHOSTUNREACH) &&
       MacRelaySendRecovery.shouldRefreshRoute(EADDRNOTAVAIL) &&
       !MacRelaySendRecovery.shouldRefreshRoute(ECONNRESET),
       "a stale connected UDP route is refreshed on the same socket; ECONNRESET still reopens")
+check(MacRelaySourcePin.shouldBindExactSource(pinnedAddressLength: 28) &&
+      !MacRelaySourcePin.shouldBindExactSource(pinnedAddressLength: 0),
+      "reopen binds the first connected LAN source; the first open still lets connect() choose")
+check(MacRelaySourcePin.shouldReplacePin(existingAddressLength: 0, newAddressLength: 28) &&
+      !MacRelaySourcePin.shouldReplacePin(existingAddressLength: 28, newAddressLength: 16) &&
+      !MacRelaySourcePin.shouldReplacePin(existingAddressLength: 28, newAddressLength: 28),
+      "a later getsockname after default routes must not replace the first LAN pin")
+check(MacRelaySourcePin.shouldClearPinAfterBindFailure(exactBindAttempted: true,
+                                                       bindSucceeded: false) &&
+      !MacRelaySourcePin.shouldClearPinAfterBindFailure(exactBindAttempted: true,
+                                                        bindSucceeded: true) &&
+      !MacRelaySourcePin.shouldClearPinAfterBindFailure(exactBindAttempted: false,
+                                                        bindSucceeded: false) &&
+      !MacRelaySourcePin.shouldClearPinAfterBindFailure(exactBindAttempted: false,
+                                                        bindSucceeded: true),
+      "only a failed exact-source bind clears the pin so reopen can fall back to the port")
+check(state.shouldHelloAfterRouteRefresh() &&
+      !MacRelaySourcePin.shouldHelloAfterRouteRefresh(started: false, hardFailure: false) &&
+      !MacRelaySourcePin.shouldHelloAfterRouteRefresh(started: true, hardFailure: true),
+      "settings apply immediately re-validates the relay with HELLO")
 state.hardSocketFailure(nowMs: 107, error: "ECONNRESET")
 check(state.snapshot.hardFailures == 1 && !state.snapshot.active &&
       state.shouldReopenSocket(nowMs: 1_106) == false &&

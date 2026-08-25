@@ -24,8 +24,27 @@ final class RelayEngine {
 
         var identity: RelayPeerIdentity {
             var copy = storage
-            let data = withUnsafeBytes(of: &copy) { Data($0.prefix(Int(length))) }
-            return RelayPeerIdentity(data)
+            return withUnsafeBytes(of: &copy) { raw in
+                guard length >= MemoryLayout<sockaddr>.size else {
+                    return RelayPeerIdentity(Data(raw.prefix(Int(length))))
+                }
+                let family = Int32(raw.load(as: sockaddr.self).sa_family)
+                if family == AF_INET, length >= MemoryLayout<sockaddr_in>.size {
+                    let addr = raw.load(as: sockaddr_in.self)
+                    var ip = addr.sin_addr
+                    let address = withUnsafeBytes(of: &ip) { Data($0) }
+                    return RelayPeerIdentity.endpoint(family: 4, portNetworkOrder: addr.sin_port,
+                                                      address: address)
+                }
+                if family == AF_INET6, length >= MemoryLayout<sockaddr_in6>.size {
+                    let addr = raw.load(as: sockaddr_in6.self)
+                    var ip = addr.sin6_addr
+                    let address = withUnsafeBytes(of: &ip) { Data($0) }
+                    return RelayPeerIdentity.endpoint(family: 6, portNetworkOrder: addr.sin6_port,
+                                                      address: address)
+                }
+                return RelayPeerIdentity(Data(raw.prefix(Int(length))))
+            }
         }
     }
 
@@ -199,7 +218,7 @@ final class RelayEngine {
                 eraseSessionSecurityState()
             case .closeCellular:
                 closeServerSocket()
-            default:
+            case .sendHelloAck, .sendPathChallenge, .forwardToFixedServer, .drop:
                 break
             }
         }
@@ -371,16 +390,22 @@ final class RelayEngine {
         }
     }
 
-    private func execute(_ actions: [RelayStateAction]) {
+    private func execute(_ actions: [RelayStateAction], reply: PeerAddress? = nil) {
         for action in actions {
             switch action {
             case .closeWifi: closeLANSocket()
             case .closeCellular: closeServerSocket()
-            case .sendHelloAck(let sessionID): sendToMac(type: MQVPN_RELAY_HELLO_ACK,
-                                                          sessionID: sessionID,
-                                                          payload: Data())
-            case .forwardToFixedServer(let payload): forwardToServer(payload)
-            case .openWifi, .openCellular, .drop: break
+            case .sendHelloAck(let sessionID):
+                sendToMac(type: MQVPN_RELAY_HELLO_ACK, sessionID: sessionID,
+                          payload: Data(), destination: reply)
+            case .sendPathChallenge(let nonce):
+                guard let sessionID = state.activeSessionID else { break }
+                sendToMac(type: MQVPN_RELAY_KEEPALIVE, sessionID: sessionID,
+                          payload: nonce, destination: reply)
+            case .forwardToFixedServer(let payload):
+                forwardToServer(payload)
+            case .openWifi, .openCellular, .drop:
+                break
             }
         }
     }
@@ -435,18 +460,31 @@ final class RelayEngine {
         guard let type else { return }
 
         let permittedFromMac = type == .hello || type == .dataToServer || type == .keepalive
-        let validControlPayload = (type != .hello && type != .keepalive) || decoded.payload_length == 0
+        let validControlPayload: Bool
+        switch type {
+        case .hello:
+            validControlPayload = decoded.payload_length == 0
+        case .keepalive:
+            validControlPayload = decoded.payload_length == 0 || decoded.payload_length == 8
+        case .helloAck, .dataToServer, .dataToMac:
+            validControlPayload = true
+        }
 
         var replayAccepted = false
         if permittedFromMac, validControlPayload,
-           type == .hello, state.activeSessionID == nil {
-            var fresh = mqvpn_replay_window_t()
-            replayAccepted = mqvpn_replay_window_accept(&fresh, decoded.sequence) == MQVPN_RELAY_OK
-            if replayAccepted { replayWindow = fresh }
-        } else if permittedFromMac, validControlPayload,
-                  state.activeSessionID == decoded.session_id,
-                  state.activePeer == peer.identity {
-            replayAccepted = mqvpn_replay_window_accept(&replayWindow, decoded.sequence) == MQVPN_RELAY_OK
+           RelayReplayEligibility.mayCheck(type: type,
+                                           sessionID: decoded.session_id,
+                                           activeSessionID: state.activeSessionID,
+                                           peer: peer.identity,
+                                           activePeer: state.activePeer,
+                                           pendingPeer: state.pendingPeer) {
+            if state.activeSessionID == nil {
+                var fresh = mqvpn_replay_window_t()
+                replayAccepted = mqvpn_replay_window_accept(&fresh, decoded.sequence) == MQVPN_RELAY_OK
+                if replayAccepted { replayWindow = fresh }
+            } else {
+                replayAccepted = mqvpn_replay_window_accept(&replayWindow, decoded.sequence) == MQVPN_RELAY_OK
+            }
         }
 
         let payload: Data
@@ -459,19 +497,18 @@ final class RelayEngine {
             type: type, sessionID: decoded.session_id, sequence: decoded.sequence,
             payload: payload, peer: peer.identity, authenticated: true,
             replayAccepted: replayAccepted)
-        let hadSession = state.activeSessionID != nil
         let actions = state.handleMacFrame(inbound, now: Date().timeIntervalSince1970)
-        if !hadSession, state.activeSessionID != nil {
-            peerAddress = peer
-        }
         let dropped = actions.contains { action in
             if case .drop = action { return true }
             return false
         }
         if !dropped {
             state.recordLanReceive(datagram.count)
+            if shouldCommitSocketPeer(actions: actions, reply: peer) {
+                peerAddress = peer
+            }
         }
-        execute(actions)
+        execute(actions, reply: peer)
     }
 
     private func swiftFrameType(_ type: mqvpn_relay_message_type_t) -> RelayFrameType? {
@@ -541,9 +578,19 @@ final class RelayEngine {
         return family == AF_INET6 ? lan6FD : lanFD
     }
 
+    private func shouldCommitSocketPeer(actions: [RelayStateAction],
+                                        reply: PeerAddress) -> Bool {
+        guard state.activePeer == reply.identity else { return false }
+        for action in actions {
+            if case .sendPathChallenge = action { return false }
+        }
+        return true
+    }
+
     private func sendToMac(type: mqvpn_relay_message_type_t,
-                           sessionID: UInt64, payload: Data) {
-        guard var peer = peerAddress else { return }
+                           sessionID: UInt64, payload: Data,
+                           destination: PeerAddress? = nil) {
+        guard var peer = destination ?? peerAddress else { return }
         let socketFD = lanSocket(for: peer)
         guard socketFD >= 0 else { return }
         var output = [UInt8](repeating: 0, count: Self.maxDatagramSize)

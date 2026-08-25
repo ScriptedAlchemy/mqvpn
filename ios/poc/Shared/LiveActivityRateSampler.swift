@@ -156,6 +156,17 @@ enum LiveActivityCounterSource {
 }
 
 enum LiveActivityContentFactory {
+    static let staleInterval: TimeInterval = 6
+
+    static func make(snapshot: TunnelSnapshot,
+                     sampler: inout LiveActivityRateSampler)
+        -> (state: LiveActivityContentState, staleDate: Date) {
+        let rates = sampler.sample(timestamp: snapshot.timestamp,
+                                   counters: LiveActivityCounterSource.counters(from: snapshot))
+        return (make(snapshot: snapshot, rates: rates),
+                Date(timeIntervalSince1970: snapshot.timestamp + staleInterval))
+    }
+
     static func make(snapshot: TunnelSnapshot,
                      rates: LiveActivityRateSnapshot) -> LiveActivityContentState {
         let phase: LiveActivityPhase

@@ -45,6 +45,7 @@ enum MacRelayDrop: Equatable {
 enum MacRelayInboundAction: Equatable {
     case none
     case activateLogicalPath
+    case echoKeepalive(Data)
     case deliverToCore(Data, mqvpn_path_handle_t)
     case drop(MacRelayDrop)
 }
@@ -220,7 +221,11 @@ struct MacRelayRuntimeState {
             dataToMacBytes &+= UInt64(payload.count)
             return .deliverToCore(payload, pathHandle)
         case MQVPN_RELAY_KEEPALIVE:
-            return frame.payload_length == 0 ? .none : reject(.malformed)
+            if frame.payload_length == 0 { return .none }
+            guard frame.payload_length == 8, let payload = frame.payload else {
+                return reject(.malformed)
+            }
+            return .echoKeepalive(Data(bytes: payload, count: 8))
         case MQVPN_RELAY_HELLO, MQVPN_RELAY_DATA_TO_SERVER:
             return reject(.messageType)
         default:
@@ -255,6 +260,11 @@ struct MacRelayRuntimeState {
     func shouldProbeActiveRelay(nowMs: UInt64) -> Bool {
         guard active, !hardFailure, let lastProbeMs else { return false }
         return nowMs - lastProbeMs >= Self.idleProbeMs
+    }
+
+    func shouldHelloAfterRouteRefresh() -> Bool {
+        sessionID != nil &&
+            MacRelaySourcePin.shouldHelloAfterRouteRefresh(started: started, hardFailure: hardFailure)
     }
 
     @discardableResult
@@ -313,6 +323,32 @@ enum MacRelaySendRecovery {
     /// the same fd; do not treat it as a reason to allocate a new source port.
     static func shouldRefreshRoute(_ code: Int32) -> Bool {
         code == ENETUNREACH || code == EHOSTUNREACH || code == EADDRNOTAVAIL
+    }
+}
+
+enum MacRelaySourcePin {
+    static func shouldBindExactSource(pinnedAddressLength: socklen_t) -> Bool {
+        pinnedAddressLength > 0
+    }
+
+    /// The first successful connect is the LAN source. Later getsockname
+    /// after default routes can report utun; that must not replace the pin.
+    static func shouldReplacePin(existingAddressLength: socklen_t,
+                                 newAddressLength: socklen_t) -> Bool {
+        existingAddressLength == 0 && newAddressLength > 0
+    }
+
+    /// HELLO is the path-validation analogue. After settings apply, send one
+    /// immediately so the iPhone can migrate the peer before idle expiry.
+    static func shouldHelloAfterRouteRefresh(started: Bool, hardFailure: Bool) -> Bool {
+        started && !hardFailure
+    }
+
+    /// Exact-source bind can fail with EADDRNOTAVAIL after a default-route
+    /// change. Clear the stored address so reopen can fall back to port-only.
+    static func shouldClearPinAfterBindFailure(exactBindAttempted: Bool,
+                                               bindSucceeded: Bool) -> Bool {
+        exactBindAttempted && !bindSucceeded
     }
 }
 

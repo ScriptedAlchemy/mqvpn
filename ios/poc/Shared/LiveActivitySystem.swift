@@ -79,7 +79,7 @@ enum MqvpnLiveActivityLifecycle {
             await activity.end(final, dismissalPolicy: .immediate)
         }
         await current.update(ActivityContent(state: state, staleDate: staleDate))
-        liveActivityLog.debug("provider Live Activity update completed mode=\(mode.rawValue, privacy: .public) phase=\(state.phase.rawValue, privacy: .public) extras=\(plan.endIDs.count)")
+        liveActivityLog.debug("Live Activity update completed mode=\(mode.rawValue, privacy: .public) phase=\(state.phase.rawValue, privacy: .public) extras=\(plan.endIDs.count)")
         return true
     }
 
@@ -170,13 +170,10 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
 
     private func publish() {
         guard !stopped, let snapshot = snapshotProvider() else { return }
-        let counters = LiveActivityCounterSource.counters(from: snapshot)
-        let rates = sampler.sample(timestamp: snapshot.timestamp, counters: counters)
-        let state = LiveActivityContentFactory.make(snapshot: snapshot, rates: rates)
-        let staleDate = Date(timeIntervalSince1970: snapshot.timestamp + 6)
+        let published = LiveActivityContentFactory.make(snapshot: snapshot, sampler: &sampler)
         Task {
             _ = await MqvpnLiveActivityLifecycle.updateExisting(
-                mode: mode, state: state, staleDate: staleDate)
+                mode: mode, state: published.state, staleDate: published.staleDate)
         }
     }
 }

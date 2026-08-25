@@ -347,14 +347,11 @@ final class TunnelController: ObservableObject {
     private func publishLiveActivity(_ snap: TunnelSnapshot) {
         guard liveActivityStarted else { return }
         if #available(iOS 16.2, *) {
-            let counters = LiveActivityCounterSource.counters(from: snap)
-            let rates = liveActivitySampler.sample(timestamp: snap.timestamp,
-                                                   counters: counters)
-            let state = LiveActivityContentFactory.make(snapshot: snap, rates: rates)
-            let staleDate = Date(timeIntervalSince1970: snap.timestamp + 6)
+            let published = LiveActivityContentFactory.make(snapshot: snap,
+                                                            sampler: &liveActivitySampler)
             Task {
                 _ = await MqvpnLiveActivityLifecycle.updateExisting(
-                    mode: operatingMode, state: state, staleDate: staleDate)
+                    mode: operatingMode, state: published.state, staleDate: published.staleDate)
             }
         }
     }
