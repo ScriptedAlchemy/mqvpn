@@ -116,6 +116,92 @@ check(MacLANInterfaceSelector.select(relayIPv4: "172.16.0.4",
                                      candidates: lanCandidates) == nil,
       "relay preflight fails honestly when no live local subnet reaches the iPhone")
 
+check(TunnelProviderConfiguration.providerBundleID ==
+      "com.zackjackson.mqvpn.mac.PacketTunnel",
+      "the Mac app owns exactly one packet-tunnel provider identifier")
+check(TunnelProviderConfiguration.localizedName == "mqvpn" &&
+      TunnelProviderConfiguration.excludeLocalNetworks &&
+      !TunnelProviderConfiguration.enforceRoutes &&
+      !TunnelProviderConfiguration.includeAllNetworks,
+      "the saved Mac VPN protocol excludes LAN and does not enforce exclusive routes")
+let foreign = ManagerDescriptor(id: "0",
+                                providerBundleID: "com.speedify.vpn.PacketTunnel",
+                                status: .connected)
+let ours = ManagerDescriptor(id: "1",
+                             providerBundleID: TunnelProviderConfiguration.providerBundleID,
+                             status: .disconnected)
+let leftover = ManagerDescriptor(id: "2",
+                                 providerBundleID: "com.zackjackson.mqvpn.PacketTunnel",
+                                 status: .disconnected)
+check(selectMatchingManager([foreign, ours, leftover],
+                            providerBundleID: TunnelProviderConfiguration.providerBundleID)?.id == "1",
+      "only the Mac provider identifier is adopted")
+check(managersEligibleForMutation([foreign, ours, leftover],
+                                  providerBundleID: TunnelProviderConfiguration.providerBundleID) == [ours],
+      "nonmatching VPN profiles are never selected for mutation")
+check(TunnelStatus.fromNEVPNRawValue(3) == .connected &&
+      TunnelStatus.fromNEVPNRawValue(4) == .reasserting &&
+      TunnelStatus.fromNEVPNRawValue(1) == .disconnected,
+      "system VPN status values map onto the host-testable lifecycle")
+check(saveGuard(isSaving: true, isEditable: false, hasManager: false) == .inProgress &&
+      saveGuard(isSaving: false, isEditable: false, hasManager: true) == .notEditable &&
+      saveGuard(isSaving: false, isEditable: true, hasManager: false) == .notReady &&
+      saveGuard(isSaving: false, isEditable: true, hasManager: true) == nil,
+      "save rejects in-flight, non-editable, and missing-manager states first")
+let validServer = ServerSettings(host: "vpn.example", port: 443, serverName: "",
+                                 authKey: "psk", insecure: false)
+check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
+                               server: validServer, relay: nil),
+      "direct-only Start is allowed with a valid server and no relay")
+check(!MacConnectGuard.canStart(isEditable: false, isSaving: false,
+                                server: validServer, relay: nil),
+      "Start stays disabled while the profile is not editable")
+check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
+                                server: validServer,
+                                relay: MacRelaySettings(enabled: true, host: "",
+                                                        port: 5443, keyBase64: "")),
+      "an enabled but incomplete iPhone relay cannot Start")
+check(StopLifecycle.canStop(hasManager: true, status: .connected) &&
+      StopLifecycle.request(hasManager: true, status: .disconnected) == .alreadyStopped &&
+      StopLifecycle.request(hasManager: true, status: .connected) == .requested &&
+      StopLifecycle.request(hasManager: false, status: .connected) == .unavailable,
+      "Stop is idempotent for an already-disconnected profile and refuses a missing manager")
+enum TestErr: Error { case boom }
+final class FakeStore: MacConfigStore {
+    var providerConfiguration: [String: Any]?
+    var commitThrows = false
+    var refreshThrows = false
+    func commit() async throws { if commitThrows { throw TestErr.boom } }
+    func refresh() async throws { if refreshThrows { throw TestErr.boom } }
+}
+func runAsync(_ body: @escaping () async -> Void) {
+    let sem = DispatchSemaphore(value: 0)
+    Task { await body(); sem.signal() }
+    sem.wait()
+}
+runAsync {
+    let store = FakeStore()
+    store.providerConfiguration = ["macRelayEnabled": NSNumber(value: false)]
+    store.commitThrows = true
+    var threw = false
+    do {
+        try await performAtomicSave(store, merge: ["macRelayEnabled": NSNumber(value: true)])
+    } catch { threw = true }
+    let rolledBack = (store.providerConfiguration?["macRelayEnabled"] as? NSNumber)?.boolValue == false
+    check(threw && rolledBack, "commit failure rolls the Mac provider configuration back")
+}
+runAsync {
+    let store = FakeStore()
+    store.providerConfiguration = [:]
+    store.refreshThrows = true
+    var threw = false
+    do {
+        try await performAtomicSave(store, merge: ["macRelayHost": "192.168.1.42"])
+    } catch { threw = true }
+    check(!threw && store.providerConfiguration?["macRelayHost"] as? String == "192.168.1.42",
+          "a post-commit refresh failure keeps the persisted Mac relay host")
+}
+
 var failures = 0
 func check(_ condition: Bool, _ message: String) {
     if !condition {

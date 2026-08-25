@@ -32,12 +32,12 @@ swiftc -o "$OUT" \
     "$IOS/Shared/ReorderSettings.swift" \
     "$IOS/Shared/HybridSettings.swift" \
     "$IOS/Shared/OperatingMode.swift" \
-    "$IOS/Shared/TunnelLifecycle.swift" \
     "$IOS/Shared/RelayRuntimeState.swift" \
     "$IOS/Shared/ProviderMessage.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
+    "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacRelayBinder.swift" \
     "$TMPD/mqvpn_clock_shim.o" "$TMPD/reorder_layout_shim.o" \
@@ -81,3 +81,23 @@ swiftc -typecheck \
     "$ROOT/macos/poc/PacketTunnel/PacketTunnelProvider.swift" \
     -framework Network -framework NetworkExtension -framework SystemConfiguration \
     -framework Security -framework CoreFoundation
+swiftc -typecheck \
+    -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+    -import-objc-header "$ROOT/macos/poc/PacketTunnel/BridgingHeader.h" \
+    -I"$ROOT/include" -I"$ROOT/src" -I"$IOS/Shared" \
+    "$IOS/Shared/PoCConfig.swift" \
+    "$IOS/Shared/ServerSettings.swift" \
+    "$IOS/Shared/ServerResolve.swift" \
+    "$IOS/Shared/ReorderSettings.swift" \
+    "$IOS/Shared/HybridSettings.swift" \
+    "$TMPD/ReorderStatsSnapshot.swift" \
+    "$IOS/PacketTunnel/MqvpnEngine.swift" \
+    "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
+    "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
+    "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
+    "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
+    "$ROOT/macos/poc/App/TunnelController.swift" \
+    "$ROOT/macos/poc/App/DashboardView.swift" \
+    "$ROOT/macos/poc/App/SettingsView.swift" \
+    "$ROOT/macos/poc/App/MqvpnMacApp.swift" \
+    -framework SwiftUI -framework NetworkExtension -framework Security
