@@ -23,6 +23,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private var lifecycle = MacProviderLifecycle()
     private var startupTimer: DispatchSourceTimer?
     private var recoveryTimer: DispatchSourceTimer?
+    private var reconnectTimer: DispatchSourceTimer?
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var settingsApplyInFlight = false
     private var settingsApplyWaiters: [() -> Void] = []
@@ -201,7 +202,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
     private func receivedTunnelConfiguration(_ info: mqvpn_tunnel_info_t, serverIPv4: String,
                                              activePathCount: Int) {
-        guard !startResolved else { return }
+        if startResolved {
+            guard !lifecycle.isStopping,
+                  lifecycle.tunnelConfigurationReady() == .applyReconnectSettings else { return }
+            // Re-apply settings on the live NE session: the reconnected core
+            // may have been assigned a different tunnel address.
+            let settings = Self.makeSettings(from: info, serverIPv4: serverIPv4,
+                                             relayIPv4: relayAddress?.ipString)
+            setTunnelNetworkSettings(settings) { [weak self] error in
+                self?.lifecycleQueue.async {
+                    guard let self, !self.lifecycle.isStopping else { return }
+                    if self.lifecycle.reconnectSettingsApplied(error: error != nil)
+                        == .completeReconnect {
+                        self.refreshRelayRouteAfterSettings { [weak self] in
+                            self?.lifecycleQueue.async { self?.completeReconnect() }
+                        }
+                    }
+                }
+            }
+            return
+        }
         // Preserve the same tick-thread observation for the asynchronous
         // settings completion gate. Relying only on a separately delivered
         // path event leaves this at its initial zero when config-ready wins
@@ -362,9 +382,68 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         let error = Self.error(Int(reason), "mqvpn tunnel closed")
         if !startResolved {
             failStart(error)
-        } else if !lifecycle.isStopping {
+            return
+        }
+        guard !lifecycle.isStopping else { return }
+        switch lifecycle.tunnelClosed(
+            permanent: MacProviderCloseReason.isPermanent(reason),
+            nowMs: Self.nowMs()) {
+        case let .beginReconnect(deadlineMs):
+            // libmqvpn is already running its own backoff reconnect; hold the
+            // profile up under reasserting until a fresh config-ready lands
+            // or the bounded window expires. This is what lets an interface
+            // returning (cable replug, Wi-Fi toggle) rejoin the same NE
+            // session instead of tearing it down.
+            recoveryTimer?.cancel()
+            recoveryTimer = nil
+            reasserting = true
+            snapshotCache?.updateLifecycle(reasserting: true,
+                                           error: "mqvpn session lost; reconnecting")
+            macProviderLog.notice("mqvpn reconnecting after transient close reason=\(reason)")
+            armReconnectTimer(deadlineMs: deadlineMs)
+        case .cancelTunnel:
+            reconnectTimer?.cancel()
+            reconnectTimer = nil
+            reasserting = false
             snapshotCache?.updateLifecycle(reasserting: false, error: error.localizedDescription)
             cancelTunnelWithError(error)
+        default:
+            break
+        }
+    }
+
+    private func armReconnectTimer(deadlineMs: UInt64) {
+        reconnectTimer?.cancel()
+        let remaining = max(0, Int64(deadlineMs) - Int64(Self.nowMs()))
+        let timer = DispatchSource.makeTimerSource(queue: lifecycleQueue)
+        timer.schedule(deadline: .now() + .milliseconds(Int(remaining)))
+        timer.setEventHandler { [weak self] in
+            guard let self,
+                  self.lifecycle.reconnectTimerFired(nowMs: Self.nowMs()) == .cancelTunnel
+            else { return }
+            self.reasserting = false
+            self.snapshotCache?.updateLifecycle(reasserting: false,
+                                                error: "mqvpn reconnect window expired")
+            self.cancelTunnelWithError(Self.error(23, "mqvpn session did not reconnect in time"))
+        }
+        timer.resume()
+        reconnectTimer = timer
+    }
+
+    /// Reconnect epilogue: the core re-established its session and fresh
+    /// tunnel settings are installed. Reopen TUN and leave reasserting.
+    private func completeReconnect() {
+        reconnectTimer?.cancel()
+        reconnectTimer = nil
+        guard let engine else { return }
+        _ = engine.perform { [weak self] in
+            engine.tunActive()
+            self?.lifecycleQueue.async {
+                guard let self, !self.lifecycle.isStopping else { return }
+                self.reasserting = false
+                self.snapshotCache?.updateLifecycle(reasserting: false, error: nil)
+                macProviderLog.notice("mqvpn session reconnected; tunnel resumed")
+            }
         }
     }
 
@@ -376,6 +455,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         cancelStartupTimer()
         recoveryTimer?.cancel()
         recoveryTimer = nil
+        reconnectTimer?.cancel()
+        reconnectTimer = nil
         relaySession.cancelMonitor()
         snapshotCache?.updateLifecycle(reasserting: false, error: error.localizedDescription)
         let continuation = startContinuation
@@ -447,6 +528,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         cancelStartupTimer()
         recoveryTimer?.cancel()
         recoveryTimer = nil
+        reconnectTimer?.cancel()
+        reconnectTimer = nil
         relaySession.cancelMonitor()
         reasserting = false
         let task = Task { [weak self] in

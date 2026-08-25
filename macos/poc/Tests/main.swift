@@ -317,6 +317,27 @@ check(SchedulerSettings(providerConfiguration: MacProviderConfiguration.make(
         relay: MacRelaySettings(enabled: false, host: "", port: 5443, keyBase64: ""),
         hybrid: hybrid)).policy == SchedulerSettings.maxThroughput,
       "Mac provider configuration defaults Optimize For to Max Throughput")
+check(scheduler.requestedDisplayLabel == "Requested Low Latency" &&
+      SchedulerSettings.requestedCaption == "Requested",
+      "Mac dashboard labels Optimize For as requested, not effective")
+check(OperatingMode.vpn.usesOptimizeFor && !OperatingMode.macRelay.usesOptimizeFor,
+      "Optimize For is VPN-only; iPhone Mac Relay hides it")
+check(EnginePerformanceApply.scheduler() == MQVPN_SCHED_WLB &&
+      EnginePerformanceApply.mode(for: SchedulerSettings.maxThroughput)
+        == MQVPN_PERF_MAX_THROUGHPUT &&
+      EnginePerformanceApply.mode(for: SchedulerSettings.lowLatency)
+        == MQVPN_PERF_LOW_LATENCY,
+      "Mac engine apply uses C performance constants and always WLB")
+if let cfg = mqvpn_config_new() {
+    let maxRCs = EnginePerformanceApply.apply(cfg, policy: SchedulerSettings.maxThroughput)
+    let lowRCs = EnginePerformanceApply.apply(cfg, policy: SchedulerSettings.lowLatency)
+    mqvpn_config_free(cfg)
+    check(maxRCs.modeRC == 0 && maxRCs.schedulerRC == 0 &&
+          lowRCs.modeRC == 0 && lowRCs.schedulerRC == 0,
+          "both Optimize For values apply WLB + performance mode on a real config")
+} else {
+    check(false, "mqvpn_config_new for engine apply")
+}
 check(MacPollingLifecycle.shouldPoll(status: .connected) &&
       MacPollingLifecycle.shouldPoll(status: .reasserting) &&
       !MacPollingLifecycle.shouldPoll(status: .connecting) &&
@@ -968,6 +989,67 @@ check(MacRelayNWTransport.makeEndpoint(
           ResolvedServerAddress(storage: unspec, len: socklen_t(MemoryLayout<sockaddr_storage>.size)),
           interfaceName: "en1") == nil,
       "an unresolvable address family yields no endpoint instead of a wrong-family connection")
+
+// --- session reconnect across interface return ---
+// A transient session close (interface churn, idle timeout) must hold the
+// tunnel under reasserting while libmqvpn's own backoff reconnect runs,
+// then re-apply settings from the fresh config-ready. Observed live: cable
+// replug and Wi-Fi-off both killed the NE session while the core logged
+// "reconnecting in 5 seconds".
+var reconnect = MacProviderLifecycle()
+_ = reconnect.begin(nowMs: 0)
+_ = reconnect.tunnelConfigurationReady()
+_ = reconnect.networkSettingsApplied(error: false, activePathCount: 2)
+check(!MacProviderCloseReason.isPermanent(-10) && !MacProviderCloseReason.isPermanent(-12) &&
+      MacProviderCloseReason.isPermanent(-5) && MacProviderCloseReason.isPermanent(-4),
+      "closed/timeout are transient; auth/tls are permanent")
+guard case let .beginReconnect(deadline) = reconnect.tunnelClosed(permanent: false, nowMs: 1_000)
+else { check(false, "transient close after establishment begins a bounded reconnect"); exit(1) }
+check(deadline == 1_000 + MacProviderLifecycle.reconnectWindowMs,
+      "reconnect deadline uses the reconnect window")
+check(reconnect.activePathCountChanged(0, nowMs: 1_100) == MacProviderLifecycleAction.none,
+      "path loss during reconnect must not race the reconnect window with recovery")
+check(reconnect.reconnectTimerFired(nowMs: 1_200) == MacProviderLifecycleAction.none,
+      "the reconnect window does not expire early")
+check(reconnect.tunnelConfigurationReady() == .applyReconnectSettings,
+      "a fresh config-ready during reconnect re-applies settings on the live session")
+check(reconnect.tunnelClosed(permanent: false, nowMs: 1_300) == MacProviderLifecycleAction.none,
+      "a failed reconnect attempt keeps waiting inside the same window")
+check(reconnect.tunnelConfigurationReady() == .applyReconnectSettings &&
+      reconnect.reconnectSettingsApplied(error: true) == MacProviderLifecycleAction.none,
+      "a failed settings re-apply returns to waiting, not to established")
+check(reconnect.tunnelConfigurationReady() == .applyReconnectSettings &&
+      reconnect.reconnectSettingsApplied(error: false) == .completeReconnect,
+      "a successful re-apply completes the reconnect")
+check(reconnect.reconnectTimerFired(nowMs: 999_999) == MacProviderLifecycleAction.none,
+      "a stale reconnect timer cannot cancel a re-established session")
+check(reconnect.activePathCountChanged(0, nowMs: 2_000) ==
+      .beginRecovery(deadlineMs: 2_000 + MacProviderLifecycle.recoveryWindowMs),
+      "after reconnect the ordinary path-loss recovery machinery resumes")
+
+var reconnectExpire = MacProviderLifecycle()
+_ = reconnectExpire.begin(nowMs: 0)
+_ = reconnectExpire.tunnelConfigurationReady()
+_ = reconnectExpire.networkSettingsApplied(error: false, activePathCount: 1)
+_ = reconnectExpire.tunnelClosed(permanent: false, nowMs: 10)
+check(reconnectExpire.reconnectTimerFired(
+          nowMs: 10 + MacProviderLifecycle.reconnectWindowMs) == .cancelTunnel,
+      "an unanswered reconnect window cancels the tunnel")
+
+var permanentClose = MacProviderLifecycle()
+_ = permanentClose.begin(nowMs: 0)
+_ = permanentClose.tunnelConfigurationReady()
+_ = permanentClose.networkSettingsApplied(error: false, activePathCount: 1)
+check(permanentClose.tunnelClosed(permanent: true, nowMs: 10) == .cancelTunnel,
+      "a permanent close still terminates immediately")
+
+var recoveringClose = MacProviderLifecycle()
+_ = recoveringClose.begin(nowMs: 0)
+_ = recoveringClose.tunnelConfigurationReady()
+_ = recoveringClose.networkSettingsApplied(error: false, activePathCount: 1)
+_ = recoveringClose.activePathCountChanged(0, nowMs: 100)
+guard case .beginReconnect = recoveringClose.tunnelClosed(permanent: false, nowMs: 200)
+else { check(false, "a transient close during path recovery upgrades to reconnect"); exit(1) }
 
 if failures != 0 {
     print("macOS relay host tests: \(failures) failure(s)")

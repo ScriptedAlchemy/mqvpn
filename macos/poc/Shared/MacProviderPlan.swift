@@ -204,7 +204,20 @@ enum MacProviderLifecycleAction: Equatable {
     case failStart
     case beginRecovery(deadlineMs: UInt64)
     case endRecovery
+    case beginReconnect(deadlineMs: UInt64)
+    case applyReconnectSettings
+    case completeReconnect
     case cancelTunnel
+}
+
+/// MQVPN_ERR_TLS, AUTH, PROTOCOL, and ABI_MISMATCH cannot recover without a
+/// configuration or binary change. CLOSED, TIMEOUT, and engine-internal
+/// closes can: the core schedules its own backoff reconnect for those, and
+/// the provider's job is to stay alive (reasserting) until it lands.
+enum MacProviderCloseReason {
+    static func isPermanent(_ reason: Int32) -> Bool {
+        reason == -4 || reason == -5 || reason == -6 || reason == -11
+    }
 }
 
 enum MacRelayRebindDecision: Equatable {
@@ -238,6 +251,8 @@ enum MacProviderStartupSafety {
 struct MacProviderLifecycle {
     static let startupTimeoutMs: UInt64 = 10_000
     static let recoveryWindowMs: UInt64 = 5_000
+    /// Long enough for the core's 5s/10s/20s backoff to land two attempts.
+    static let reconnectWindowMs: UInt64 = 35_000
 
     private enum Stage {
         case idle
@@ -245,6 +260,11 @@ struct MacProviderLifecycle {
         case applyingSettings(startedMs: UInt64)
         case established
         case recovering(deadlineMs: UInt64)
+        /// The core session closed for a transient reason and libmqvpn's own
+        /// backoff reconnect is running. NE stays up under `reasserting`; a
+        /// fresh tunnel_config_ready re-applies settings.
+        case reconnecting(deadlineMs: UInt64)
+        case reapplyingReconnectSettings(deadlineMs: UInt64)
         case failed
         case stopping
     }
@@ -271,11 +291,68 @@ struct MacProviderLifecycle {
     }
 
     mutating func tunnelConfigurationReady() -> MacProviderLifecycleAction {
+        if case let .reconnecting(deadlineMs) = stage {
+            stage = .reapplyingReconnectSettings(deadlineMs: deadlineMs)
+            return .applyReconnectSettings
+        }
         guard case .preflight = stage else { return .none }
         settingsRequested = true
         guard case let .preflight(startedMs) = stage else { return .none }
         stage = .applyingSettings(startedMs: startedMs)
         return .applyNetworkSettings
+    }
+
+    /// Post-establishment session close. Transient reasons hold the tunnel
+    /// under reasserting while the core reconnects; permanent ones, or a
+    /// close before establishment, keep today's terminal behavior.
+    mutating func tunnelClosed(permanent: Bool,
+                               nowMs: UInt64) -> MacProviderLifecycleAction {
+        switch stage {
+        case .established, .recovering:
+            guard !permanent else {
+                stage = .failed
+                return .cancelTunnel
+            }
+            let deadline = nowMs + Self.reconnectWindowMs
+            stage = .reconnecting(deadlineMs: deadline)
+            return .beginReconnect(deadlineMs: deadline)
+        case .reconnecting, .reapplyingReconnectSettings:
+            // The reconnect attempt itself died; keep waiting for the next
+            // one inside the same bounded window. A permanent failure
+            // (e.g. rotated PSK) still terminates immediately.
+            guard !permanent else {
+                stage = .failed
+                return .cancelTunnel
+            }
+            if case let .reapplyingReconnectSettings(deadlineMs) = stage {
+                stage = .reconnecting(deadlineMs: deadlineMs)
+            }
+            return .none
+        default:
+            return .none
+        }
+    }
+
+    mutating func reconnectSettingsApplied(error: Bool) -> MacProviderLifecycleAction {
+        guard case let .reapplyingReconnectSettings(deadlineMs) = stage else { return .none }
+        if error {
+            stage = .reconnecting(deadlineMs: deadlineMs)
+            return .none
+        }
+        stage = .established
+        return .completeReconnect
+    }
+
+    mutating func reconnectTimerFired(nowMs: UInt64) -> MacProviderLifecycleAction {
+        switch stage {
+        case let .reconnecting(deadlineMs),
+             let .reapplyingReconnectSettings(deadlineMs):
+            guard nowMs >= deadlineMs else { return .none }
+            stage = .failed
+            return .cancelTunnel
+        default:
+            return .none
+        }
     }
 
     mutating func networkSettingsApplied(error: Bool,
@@ -313,6 +390,11 @@ struct MacProviderLifecycle {
         case .recovering where count > 0:
             stage = .established
             return .endRecovery
+        case .reconnecting, .reapplyingReconnectSettings:
+            // The core tears its paths down and rebuilds them across a
+            // reconnect; the recovery machinery must not race the bounded
+            // reconnect window with its own five-second cancel.
+            return .none
         default:
             return .none
         }
