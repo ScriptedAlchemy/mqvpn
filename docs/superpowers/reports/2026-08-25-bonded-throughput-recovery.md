@@ -78,16 +78,44 @@ All implementation below is **uncommitted** (`git diff --stat`: 36 files, +393/�
 |------|---------|
 | **1** | `mqvpn_performance_mode_t`, `mqvpn_config_set_performance_mode()`, parse/name helpers,
   `OptimizeFor` config key; `tests/test_api.c` + `tests/test_config.c` extended (previously GREEN). |
-| **2** | xquic WLB: acknowledged-goodput EWMA, warm-up **3 s \| 1 MiB**, floors **20% / 5%**,
-  `xqc_conn_set_wlb_policy()`, `xqc_conn_get_wlb_path_stats()`; standalone CUnit
-  **24/24 GREEN**. |
+| **2** | xquic WLB pinned at `29fb1ca` (parent `ddfc196`): application-only **confirmed**
+  ACK goodput, warm-up **3 s \| 1 MiB**, floors **20% / 5%**. |
 | **3** | Client emits `mqvpn-performance: throughput\|latency` on CONNECT-IP after auth path;
-  server applies mode + WLB policy post-PSK; live tunnel duplicate → **409** (cannot mutate). |
-| **4–6** | Shared `SchedulerSettings` (“Optimize For”: Max Throughput / Low Latency); iOS + macOS
-  Settings UI, provider persistence, `mqvpn_config_set_performance_mode()` in tunnel engine;
-  host tests in `ios/poc/Tests/main.swift`, `macos/poc/Tests/main.swift`. |
-| **7** | Loopback **9090** `get_status` JSON: client `"performance"` plus per-path
-  `"goodput_bps"`, `"warmup"`, `"weight_pct"` via `mqvpn_server_get_client_wlb()`;
-  `status.c` CLI prints client `optimize:` plus per-path goodput/warmup/weight;
-  bound test updated in `test_control_response_bound.c`. |
+  server applies WLB policy post-PSK and records **effective** mode only on `XQC_OK`;
+  live duplicate → **409** and must not mutate policy (`test_server_double_connectip`, Linux). |
+| **4–6** | `SchedulerSettings.policy` is `let`; dashboards show **Requested**; iOS hides
+  Optimize For in Mac Relay; `EnginePerformanceApply` always `MQVPN_SCHED_WLB`
+  and calls the C performance setter; unused MinRTT `coreScheduler` mapping removed;
+  host tests GREEN. |
+| **7** | 9090 JSON: effective `"performance"` plus per-path WLB fields; CLI reads 257 KiB
+  and prints goodput as **B/s**; control socket `ctrl_write_all`; **SOVERSION 4**
+  for `mqvpn_client_info_t.performance[]`. |
 | **8** | **PENDING** — no signed deploy, no physical throughput matrix, no acceptance gates claimed. |
+
+## Final acceptance receipts — probe-recovery build (2026-08-25, `397e9e6`)
+
+Deployed everywhere (CT 212, Mac app, iPhone app) at `397e9e6`
+(xquic `f8ea0c7`): evicted-path payload probes, TCP-lane reentrant close
+fix (`2b76b9b`), datagram ack crediting (xquic `29fb1ca`).
+
+Three back-to-back `networkQuality -s` trials through the live bond,
+per-path receipts via nettop on the extension:
+
+| Trial | Down | Up | Relay down MB | Relay up MB |
+|---|---|---|---|---|
+| 1 | 125.0 | **58.2** | 0.8 | **34.4** |
+| 2 | 164.3 | 35.9 | 0.2 | 5.4 |
+| 3 | 132.5 | 44.5 | 0.1 | 0.9 |
+
+Medians: **132.5 down / 44.5 up**. Session survived every saturation
+trial (same extension PID throughout); trial 1's 58.2 Mbps up exceeds the
+prior all-time bonded record (56.6).
+
+Relay downlink is physically bounded in this topology: the iPhone-to-Mac
+LAN hop and the direct Wi-Fi path share en1 airtime, so under saturation
+the relay's downlink leg loses the radio to direct traffic, PTOs, and is
+correctly evicted; the 0.1-0.8 MB observed matches probe cadence plus
+revival attempts. Uplink airtime splits differently and the relay
+contributed up to 37% of upload bytes. A wired-only Mac (en0 + relay,
+Wi-Fi direct disabled) is the topology where relay downlink can
+contribute; that variant remains unmeasured.
