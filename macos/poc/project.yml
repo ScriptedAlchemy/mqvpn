@@ -27,6 +27,7 @@ targets:
         excludes:
           - "*.c"
           - MacRelayRuntimeState.swift
+          - MacRelayTransportPolicy.swift
       - path: ../../ios/poc/Shared
         includes:
           - PoCConfig.swift

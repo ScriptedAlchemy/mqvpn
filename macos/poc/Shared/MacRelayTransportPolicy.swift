@@ -56,6 +56,7 @@ enum MacRelayTransportPolicy {
     }
 
     static func isRecoverableRouteError(_ error: NWError) -> Bool {
-        MacRelaySendRecovery.shouldRefreshRoute(errnoValue(for: error))
+        let code = errnoValue(for: error)
+        return code == ENETUNREACH || code == EHOSTUNREACH || code == EADDRNOTAVAIL
     }
 }

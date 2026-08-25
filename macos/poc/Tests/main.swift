@@ -911,6 +911,28 @@ if case let .hostPort(host, port) = v4Endpoint {
     check(false, "IPv4 relay endpoint builds a hostPort endpoint")
 }
 
+var v6 = sockaddr_in6()
+v6.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+v6.sin6_family = sa_family_t(AF_INET6)
+v6.sin6_port = UInt16(5443).bigEndian
+_ = "fe80::1234".withCString { inet_pton(AF_INET6, $0, &v6.sin6_addr) }
+var v6Storage = sockaddr_storage()
+withUnsafeMutableBytes(of: &v6Storage) { dst in
+    withUnsafeBytes(of: &v6) { src in
+        dst.copyBytes(from: src.prefix(MemoryLayout<sockaddr_in6>.size))
+    }
+}
+let v6Endpoint = MacRelayNWTransport.makeEndpoint(
+    ResolvedServerAddress(storage: v6Storage, len: socklen_t(MemoryLayout<sockaddr_in6>.size)),
+    interfaceName: "en1")
+if case let .hostPort(host, port) = v6Endpoint {
+    check(port.rawValue == 5443, "IPv6 relay endpoint keeps its port in host order")
+    check("\(host)".contains("%en1"),
+          "link-local IPv6 relay endpoint keeps the Bonjour interface scope")
+} else {
+    check(false, "IPv6 relay endpoint builds a scoped hostPort endpoint")
+}
+
 var unspec = sockaddr_storage()
 unspec.ss_family = sa_family_t(AF_UNSPEC)
 check(MacRelayNWTransport.makeEndpoint(

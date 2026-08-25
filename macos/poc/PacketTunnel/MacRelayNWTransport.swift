@@ -229,12 +229,20 @@ final class MacRelayNWTransport {
         if family == AF_INET6 {
             let sin6 = withUnsafeBytes(of: &storage) { $0.load(as: sockaddr_in6.self) }
             var raw = sin6.sin6_addr
-            let bytes = withUnsafeBytes(of: &raw) { Data($0) }
             guard let port = NWEndpoint.Port(rawValue: UInt16(bigEndian: sin6.sin6_port)) else {
                 return nil
             }
-            let scope = interface(named: interfaceName)
-            guard let host = IPv6Address(bytes, scope) else { return nil }
+            var text = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            guard inet_ntop(AF_INET6, &raw, &text, socklen_t(text.count)) != nil else {
+                return nil
+            }
+            // NWPathMonitor.currentPath is empty until a monitor starts, so a
+            // synchronous interface lookup cannot supply a reliable scope.
+            // Network's parser accepts the standard numeric zone suffix and
+            // carries it into the endpoint without DNS or a monitor race.
+            guard let host = IPv6Address("\(String(cString: text))%\(interfaceName)") else {
+                return nil
+            }
             return .hostPort(host: .ipv6(host), port: port)
         }
         return nil
