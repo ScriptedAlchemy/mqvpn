@@ -92,6 +92,7 @@ struct mqvpn_config_s {
     int insecure;
 
     mqvpn_scheduler_t scheduler;
+    mqvpn_performance_mode_t performance_mode;
     mqvpn_cc_t cc;
 
     /* Reinjection (speculative multipath duplication). 0 = OFF (default,
@@ -304,5 +305,22 @@ typedef struct {
 MQVPN_INTERNAL int mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
                                                     mqvpn_internal_client_reinject_t *out,
                                                     int max);
+
+/* Per-client snapshot of WLB goodput / warm-up / weight. Same ABI reason
+ * as reinject: mqvpn_path_stats_t cannot grow. Index-aligned with
+ * mqvpn_server_get_client_info() inside one control-command handler. */
+typedef struct {
+    int n_paths;
+    struct {
+        uint64_t path_id;
+        uint64_t goodput_bps;
+        uint8_t weight_pct;
+        uint8_t warmup;
+    } paths[MQVPN_MAX_PATHS];
+} mqvpn_internal_client_wlb_t;
+
+MQVPN_INTERNAL int mqvpn_server_get_client_wlb(const mqvpn_server_t *s,
+                                               mqvpn_internal_client_wlb_t *out,
+                                               int max);
 
 #endif /* MQVPN_INTERNAL_H */

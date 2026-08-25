@@ -16,6 +16,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "performance_mode.h"
 #include "xquic/xquic.h"
 
 #if defined(__APPLE__) && defined(MQVPN_API_TEST_SEAM)
@@ -277,6 +278,30 @@ TEST(config_load_json_invalid_tuning)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_load_json_performance_mode)
+{
+    static const struct {
+        const char *json;
+        mqvpn_performance_mode_t want;
+    } ok_cases[] = {
+        {"{\"optimize_for\":\"latency\"}", MQVPN_PERF_LOW_LATENCY},
+        {"{\"performance\":\"throughput\"}", MQVPN_PERF_MAX_THROUGHPUT},
+        {"{\"optimize_for\":\"LaTeNcY\"}", MQVPN_PERF_LOW_LATENCY},
+    };
+
+    for (size_t i = 0; i < sizeof(ok_cases) / sizeof(ok_cases[0]); i++) {
+        mqvpn_config_t *cfg = mqvpn_config_new();
+        ASSERT_EQ(mqvpn_config_load_json(cfg, ok_cases[i].json), MQVPN_OK);
+        ASSERT_EQ(cfg->performance_mode, ok_cases[i].want);
+        mqvpn_config_free(cfg);
+    }
+
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"optimize_for\":\"invalid\"}"),
+              MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_set_tls_server_name)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -314,6 +339,74 @@ TEST(config_set_tun_mtu)
     ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 9001), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, -1), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_set_tun_mtu(NULL, 1400), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_performance_mode)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->performance_mode, MQVPN_PERF_MAX_THROUGHPUT);
+    ASSERT_EQ(mqvpn_config_set_performance_mode(cfg, MQVPN_PERF_MAX_THROUGHPUT), MQVPN_OK);
+    ASSERT_EQ(cfg->performance_mode, MQVPN_PERF_MAX_THROUGHPUT);
+    ASSERT_EQ(mqvpn_config_set_performance_mode(cfg, MQVPN_PERF_LOW_LATENCY), MQVPN_OK);
+    ASSERT_EQ(cfg->performance_mode, MQVPN_PERF_LOW_LATENCY);
+    ASSERT_EQ(mqvpn_config_set_performance_mode(cfg, (mqvpn_performance_mode_t)99),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->performance_mode, MQVPN_PERF_LOW_LATENCY);
+    ASSERT_EQ(mqvpn_config_set_performance_mode(NULL, MQVPN_PERF_MAX_THROUGHPUT),
+              MQVPN_ERR_INVALID_ARG);
+    mqvpn_performance_mode_t parsed = MQVPN_PERF_LOW_LATENCY;
+    ASSERT_EQ(mqvpn_performance_mode_parse("throughput", 10, &parsed), MQVPN_OK);
+    ASSERT_EQ(parsed, MQVPN_PERF_MAX_THROUGHPUT);
+    ASSERT_EQ(mqvpn_performance_mode_parse("LATENCY", 7, &parsed), MQVPN_OK);
+    ASSERT_EQ(parsed, MQVPN_PERF_LOW_LATENCY);
+    ASSERT_EQ(mqvpn_performance_mode_parse("unknown", 7, &parsed), MQVPN_ERR_INVALID_ARG);
+    ASSERT_STR_EQ(mqvpn_performance_mode_name(MQVPN_PERF_MAX_THROUGHPUT), "throughput");
+    ASSERT_STR_EQ(mqvpn_performance_mode_name(MQVPN_PERF_LOW_LATENCY), "latency");
+    mqvpn_performance_mode_t hdr = MQVPN_PERF_LOW_LATENCY;
+    ASSERT_EQ(mqvpn_performance_header_match("mqvpn-performance", 17, "throughput", 10,
+                                             &hdr),
+              1);
+    ASSERT_EQ(hdr, MQVPN_PERF_MAX_THROUGHPUT);
+    ASSERT_EQ(mqvpn_performance_header_match("mqvpn-performance", 17, "latency", 7, &hdr),
+              1);
+    ASSERT_EQ(hdr, MQVPN_PERF_LOW_LATENCY);
+    ASSERT_EQ(mqvpn_performance_header_match("mqvpn-performance", 17, "invalid", 7, &hdr),
+              1);
+    ASSERT_EQ(hdr, MQVPN_PERF_MAX_THROUGHPUT);
+    ASSERT_EQ(mqvpn_performance_header_match("other", 5, "latency", 7, &hdr), 0);
+    static const struct {
+        const char *name;
+        size_t name_len;
+        const char *value;
+        size_t value_len;
+        int want_match;
+        mqvpn_performance_mode_t want_mode;
+    } extra_hdr_cases[] = {
+        {"mqvpn-performance", 17, "", 0, 1, MQVPN_PERF_MAX_THROUGHPUT},
+        {"MQVPN-performance", 17, "latency", 7, 0, MQVPN_PERF_LOW_LATENCY},
+    };
+    for (size_t i = 0; i < sizeof(extra_hdr_cases) / sizeof(extra_hdr_cases[0]); i++) {
+        hdr = MQVPN_PERF_LOW_LATENCY;
+        ASSERT_EQ(mqvpn_performance_header_match(extra_hdr_cases[i].name,
+                                                 extra_hdr_cases[i].name_len,
+                                                 extra_hdr_cases[i].value,
+                                                 extra_hdr_cases[i].value_len, &hdr),
+                  extra_hdr_cases[i].want_match);
+        ASSERT_EQ(hdr, extra_hdr_cases[i].want_mode);
+    }
+    parsed = MQVPN_PERF_LOW_LATENCY;
+    ASSERT_EQ(mqvpn_performance_mode_parse("", 0, &parsed), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(parsed, MQVPN_PERF_LOW_LATENCY);
+    ASSERT_EQ(mqvpn_performance_mode_parse(NULL, 10, &parsed), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_performance_mode_parse("throughput", 10, NULL), MQVPN_ERR_INVALID_ARG);
+    hdr = MQVPN_PERF_LOW_LATENCY;
+    ASSERT_EQ(mqvpn_performance_header_match(NULL, 17, "latency", 7, &hdr), 0);
+    ASSERT_EQ(hdr, MQVPN_PERF_LOW_LATENCY);
+    ASSERT_EQ(mqvpn_performance_header_match("mqvpn-performance", 17, NULL, 7, &hdr), 0);
+    ASSERT_EQ(hdr, MQVPN_PERF_LOW_LATENCY);
+    ASSERT_EQ(mqvpn_performance_header_match("mqvpn-performance", 17, "latency", 7, NULL),
+              0);
     mqvpn_config_free(cfg);
 }
 
@@ -3187,9 +3280,11 @@ main(void)
     run_config_load_json_invalid_users();
     run_config_load_json_users_brace_in_string_value();
     run_config_load_json_invalid_tuning();
+    run_config_load_json_performance_mode();
     run_config_set_tls_server_name();
     run_config_set_insecure();
     run_config_set_tun_mtu();
+    run_config_set_performance_mode();
     run_config_set_scheduler();
     run_config_set_cc();
     run_config_load_json_reinjection();

@@ -10,6 +10,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 #include "mqvpn_sched_names.h"
+#include "performance_mode.h"
 #include "json_mini.h"
 
 #include <stdlib.h>
@@ -143,6 +144,7 @@ mqvpn_config_new(void)
     /* Defaults */
     cfg->server_port = 443;
     cfg->scheduler = MQVPN_SCHED_WLB;
+    cfg->performance_mode = MQVPN_PERF_MAX_THROUGHPUT;
     cfg->log_level = MQVPN_LOG_INFO;
     cfg->multipath = 1;
     cfg->reconnect_enable = 1;
@@ -338,6 +340,18 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->scheduler = sched;
     }
 
+    /* Canonical key is optimize_for (INI OptimizeFor). `performance` is a
+     * request-local alias for the same enum used on CONNECT-IP / 9090. */
+    v = json_find_key(json_text, "optimize_for");
+    if (!v) v = json_find_key(json_text, "performance");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        mqvpn_performance_mode_t mode = MQVPN_PERF_MAX_THROUGHPUT;
+        if (mqvpn_performance_mode_parse(tmp, strlen(tmp), &mode) != MQVPN_OK) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->performance_mode = mode;
+    }
+
     v = json_find_key(json_text, "cc");
     if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
         mqvpn_cc_t cc = MQVPN_CC_BBR2;
@@ -454,6 +468,17 @@ mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched)
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     if (!is_valid_scheduler(sched)) return MQVPN_ERR_INVALID_ARG;
     cfg->scheduler = sched;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_performance_mode(mqvpn_config_t *cfg, mqvpn_performance_mode_t mode)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (mode != MQVPN_PERF_MAX_THROUGHPUT && mode != MQVPN_PERF_LOW_LATENCY) {
+        return MQVPN_ERR_INVALID_ARG;
+    }
+    cfg->performance_mode = mode;
     return MQVPN_OK;
 }
 

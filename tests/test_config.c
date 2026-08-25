@@ -107,6 +107,7 @@ test_defaults(void)
     ASSERT_EQ_INT(cfg.n_paths, 0, "default n_paths");
     ASSERT_EQ_INT(cfg.n_dns, 0, "default n_dns");
     ASSERT_EQ_STR(cfg.scheduler, "wlb", "default scheduler");
+    ASSERT_EQ_STR(cfg.optimize_for, "throughput", "default optimize_for");
     ASSERT_EQ_STR(cfg.cc, "bbr2", "default cc");
     ASSERT_EQ_STR(cfg.reinjection, "off", "default reinjection");
     ASSERT_EQ_INT(cfg.reinjection_srtt_factor_pct, 110,
@@ -368,6 +369,48 @@ test_parse_scheduler_wlb_udp_pin(void)
 
     ASSERT_EQ_INT(rc, 0, "scheduler wlb_udp_pin config parse ok");
     ASSERT_EQ_STR(cfg.scheduler, "wlb_udp_pin", "scheduler wlb_udp_pin");
+}
+
+static void
+test_parse_optimize_for(void)
+{
+    const char *ini_tp = "[Multipath]\n"
+                         "OptimizeFor = throughput\n";
+    const char *ini_lat = "[Multipath]\n"
+                          "OptimizeFor = latency\n";
+    const char *ini_bad = "[Multipath]\n"
+                          "OptimizeFor = unknown\n";
+    const char *ini_empty = "";
+    char *path;
+    mqvpn_file_config_t cfg;
+    int rc;
+
+    path = write_tmp(ini_tp);
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "optimize_for throughput parse ok");
+    ASSERT_EQ_STR(cfg.optimize_for, "throughput", "optimize_for throughput");
+
+    path = write_tmp(ini_lat);
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "optimize_for latency parse ok");
+    ASSERT_EQ_STR(cfg.optimize_for, "latency", "optimize_for latency");
+
+    path = write_tmp(ini_bad);
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, -1, "optimize_for unknown is parse error");
+
+    path = write_tmp(ini_empty);
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "empty config parse ok");
+    ASSERT_EQ_STR(cfg.optimize_for, "throughput", "missing optimize_for defaults");
 }
 
 static void
@@ -2356,6 +2399,7 @@ main(void)
     test_parse_client_config();
     test_parse_scheduler_backup_fec();
     test_parse_scheduler_wlb_udp_pin();
+    test_parse_optimize_for();
     test_parse_cc_ini();
     test_parse_cc_json();
     test_parse_init_max_path_id_bounds();

@@ -107,6 +107,11 @@ typedef enum {
 } mqvpn_scheduler_t;
 
 typedef enum {
+    MQVPN_PERF_MAX_THROUGHPUT = 0,
+    MQVPN_PERF_LOW_LATENCY = 1,
+} mqvpn_performance_mode_t;
+
+typedef enum {
     MQVPN_REINJ_OFF = 0,
     MQVPN_REINJ_DEADLINE = 1, /* stream lane: lateness + LOW-class duplication */
     MQVPN_REINJ_IDLE = 2,     /* stream lane: duplicate unacked when send queue idle */
@@ -352,6 +357,7 @@ typedef struct {
     uint64_t bytes_rx;
     mqvpn_path_stats_t paths[MQVPN_MAX_PATHS];
     int n_paths;
+    char performance[16]; /* "throughput" | "latency" */
 } mqvpn_client_info_t;
 
 typedef struct {
@@ -513,6 +519,11 @@ MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username
 MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text);
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
+MQVPN_API int mqvpn_config_set_performance_mode(mqvpn_config_t *cfg,
+                                                mqvpn_performance_mode_t mode);
+MQVPN_API const char *mqvpn_performance_mode_name(mqvpn_performance_mode_t mode);
+MQVPN_API int mqvpn_performance_mode_parse(const char *text, size_t len,
+                                           mqvpn_performance_mode_t *out);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
 
 /* Reinjection (speculative multipath duplication of unacked data). OFF by

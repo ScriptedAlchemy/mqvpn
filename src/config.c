@@ -13,6 +13,7 @@
 #include "json_mini.h"
 #include "libmqvpn.h"
 #include "log.h"
+#include "performance_mode.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -592,6 +593,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
     /* [Multipath] */
     CFG_STR(SEC_MULTIPATH, "Scheduler", "scheduler", scheduler),
+    CFG_STR(SEC_MULTIPATH, "OptimizeFor", "optimize_for", optimize_for),
     CFG_STR(SEC_MULTIPATH, "Reinjection", "reinjection", reinjection),
     CFG_INT_FB(SEC_MULTIPATH, "ReinjectionSrttFactorPct", "reinjection_srtt_factor_pct",
                reinjection_srtt_factor_pct, cfgk_int_reinj_factor_pct, 110),
@@ -1321,6 +1323,18 @@ decode_relay_key(const char *encoded, size_t encoded_len, unsigned char out[32])
 }
 
 static int
+validate_optimize_for(const mqvpn_file_config_t *cfg)
+{
+    mqvpn_performance_mode_t mode = MQVPN_PERF_MAX_THROUGHPUT;
+    if (mqvpn_performance_mode_parse(cfg->optimize_for, strlen(cfg->optimize_for),
+                                     &mode) != MQVPN_OK) {
+        LOG_ERR("config: [Multipath] OptimizeFor must be 'throughput' or 'latency'");
+        return -1;
+    }
+    return 0;
+}
+
+static int
 validate_relay_config(mqvpn_file_config_t *cfg)
 {
     if (!cfg->relay_enabled) return 0;
@@ -1419,6 +1433,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     snprintf(cfg->cert_file, sizeof(cfg->cert_file), "server.crt");
     snprintf(cfg->key_file, sizeof(cfg->key_file), "server.key");
     snprintf(cfg->scheduler, sizeof(cfg->scheduler), "wlb");
+    snprintf(cfg->optimize_for, sizeof(cfg->optimize_for), "throughput");
     snprintf(cfg->cc, sizeof(cfg->cc), "bbr2");
     snprintf(cfg->reinjection, sizeof(cfg->reinjection), "off");
     cfg->reinjection_srtt_factor_pct = 110;
@@ -1468,7 +1483,8 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
     if (*s == '{') {
         int rc = mqvpn_config_load_json_filecfg(cfg, s);
         free(buf);
-        return rc == 0 ? validate_relay_config(cfg) : rc;
+        if (rc != 0) return rc;
+        return validate_optimize_for(cfg) == 0 ? validate_relay_config(cfg) : -1;
     }
 
     int lineno = 0;
@@ -1532,5 +1548,6 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
     }
 
     free(buf);
-    return fatal ? -1 : validate_relay_config(cfg);
+    if (fatal) return -1;
+    return validate_optimize_for(cfg) == 0 ? validate_relay_config(cfg) : -1;
 }

@@ -16,7 +16,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # the newer library.
 #   1 -> 2  hybrid lane/flow counters
 #   2 -> 3  udp_tx_sends / udp_tx_datagrams
-set(MQVPN_SOVERSION 3)
+#   3 -> 4  mqvpn_client_info_t.performance[]
+set(MQVPN_SOVERSION 4)
 
 # ---------- Options ----------
 option(XQUIC_BUILD_DIR "Path to pre-built xquic build directory" "")
@@ -229,6 +230,7 @@ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 set(MQVPN_LIB_SOURCES
     src/relay_protocol.c
     src/mqvpn_config.c
+    src/performance_mode.c
     src/mqvpn_client.c
     src/udp_offload.c
     src/mqvpn_server.c
@@ -676,13 +678,13 @@ if(BUILD_TESTING)
     # below (:681 / :866); kept in sync so Tasks 6-8's red/green loops are
     # not vacuous on darwin. Link diff vs Linux: dl/m are folded into
     # libSystem here, and stdc++ becomes c++ (libc++).
-    add_executable(test_config tests/test_config.c src/config.c src/log.c)
+    add_executable(test_config tests/test_config.c src/config.c src/performance_mode.c src/log.c)
     target_include_directories(test_config PRIVATE
         ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
     add_test(NAME test_config COMMAND test_config)
 
     add_executable(test_config_relay_nonapple tests/test_config_relay_nonapple.c
-        src/config.c src/log.c)
+        src/config.c src/performance_mode.c src/log.c)
     target_compile_definitions(test_config_relay_nonapple PRIVATE
         MQVPN_CONFIG_FORCE_NONAPPLE)
     target_include_directories(test_config_relay_nonapple PRIVATE
@@ -812,7 +814,7 @@ if(BUILD_TESTING)
              COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_bssl_build_guard.sh)
 
     # Each test links only the source files it needs (no xquic dependency)
-    add_executable(test_config  tests/test_config.c  src/config.c  src/log.c)
+    add_executable(test_config  tests/test_config.c  src/config.c src/performance_mode.c src/log.c)
     add_executable(test_auth    tests/test_auth.c    src/auth.c    src/log.c)
     add_executable(test_session tests/test_session.c src/addr_pool.c src/log.c)
     add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/platform/posix/dns_common.c     src/log.c)
@@ -829,8 +831,8 @@ if(BUILD_TESTING)
     # test_reorder_rx #include's src/reorder_rx.c to reach the file-local ring;
     # do NOT also list reorder_rx.c here (it would compile the TU twice).
     # mqvpn_config.c is linked (separate TU) for the composed-builder bridge test.
-    add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/log.c)
-    add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
+    add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/performance_mode.c src/log.c)
+    add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/performance_mode.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
