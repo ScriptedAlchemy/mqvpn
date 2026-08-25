@@ -57,7 +57,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             relay.start()
             if #available(iOS 16.2, *) {
-                let reporter = MqvpnLiveActivityReporter { [weak relay] in
+                let reporter = MqvpnLiveActivityReporter(mode: .macRelay) { [weak relay] in
                     relay?.readSnapshot()
                 }
                 liveActivityReporter = reporter
@@ -113,7 +113,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         metrics.start()          // 10s cadence os_log dumps
                         snapshot.start()         // 1s cadence app-facing cache
                         if #available(iOS 16.2, *) {
-                            let reporter = MqvpnLiveActivityReporter { [weak snapshot] in
+                            let reporter = MqvpnLiveActivityReporter(mode: .vpn) { [weak snapshot] in
                                 snapshot?.read()
                             }
                             self.liveActivityReporter = reporter
@@ -219,10 +219,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // just means the server falls back to its idle timeout) and gives
         // repeated gate runs a zero state start.
         providerLog.notice("STOP_BEGIN")
-        if let reporter = liveActivityReporter {
-            await reporter.stop()
-        }
-        liveActivityReporter = nil
+        let reporter = liveActivityReporter
+        await LiveActivityStopSequence.perform(
+            transportTeardown: {
+                await self.stopTransport()
+            },
+            scheduleActivityCleanup: {
+                reporter?.stopBestEffort()
+                self.liveActivityReporter = nil
+            })
+    }
+
+    private func stopTransport() async {
         defaultPathObservation?.invalidate()
         defaultPathObservation = nil
         if let relayEngine {

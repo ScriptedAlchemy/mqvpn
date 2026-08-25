@@ -17,24 +17,30 @@ enum MqvpnLiveActivityLifecycle {
     static func begin(mode: OperatingMode, timestamp: Double = Date().timeIntervalSince1970) -> Bool {
         let state = LiveActivityContentState.lifecycle(.connecting, timestamp: timestamp)
         let content = ActivityContent(state: state, staleDate: Date(timeIntervalSince1970: timestamp + 10))
-
-        if let activity = Activity<MqvpnNetworkActivityAttributes>.activities.first(where: {
-            $0.attributes.mode == mode.rawValue
-        }) {
+        let activities = Activity<MqvpnNetworkActivityAttributes>.activities
+        let plan = selectionPlan(activities: activities, desiredMode: mode.rawValue)
+        if let currentID = plan.currentID,
+           let activity = activities.first(where: { $0.id == currentID }) {
             Task { await activity.update(content) }
-            endExtras(keeping: activity.id, state: state)
+            endActivities(activities, ids: plan.endIDs, state: state)
+            liveActivityLog.notice("reusing exact-mode Live Activity mode=\(mode.rawValue, privacy: .public) extras=\(plan.endIDs.count)")
             return true
         }
 
+        // A prior-mode or crash-duplicate activity is never allowed to pose as
+        // the new session if the new request fails.
+        endActivities(activities, ids: plan.endIDs, state: state)
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
             liveActivityLog.notice("Live Activities unavailable or disabled")
             return false
         }
         do {
-            _ = try Activity.request(
+            let activity = try Activity.request(
                 attributes: MqvpnNetworkActivityAttributes(mode: mode.rawValue),
                 content: content,
                 pushType: nil)
+            endExtras(keeping: activity.id, state: state)
+            liveActivityLog.notice("requested Live Activity mode=\(mode.rawValue, privacy: .public)")
             return true
         } catch {
             liveActivityLog.error("Live Activity request failed: \(error.localizedDescription, privacy: .public)")
@@ -58,11 +64,50 @@ enum MqvpnLiveActivityLifecycle {
         }
     }
 
+    static func updateExisting(mode: OperatingMode,
+                               state: LiveActivityContentState,
+                               staleDate: Date) async -> Bool {
+        let activities = Activity<MqvpnNetworkActivityAttributes>.activities
+        let plan = selectionPlan(activities: activities, desiredMode: mode.rawValue)
+        guard let currentID = plan.currentID,
+              let current = activities.first(where: { $0.id == currentID }) else {
+            liveActivityLog.notice("no exact-mode foreground-created Live Activity to update")
+            return false
+        }
+        let final = ActivityContent(state: state, staleDate: nil)
+        for activity in activities where plan.endIDs.contains(activity.id) {
+            await activity.end(final, dismissalPolicy: .immediate)
+        }
+        await current.update(ActivityContent(state: state, staleDate: staleDate))
+        liveActivityLog.debug("provider Live Activity update completed mode=\(mode.rawValue, privacy: .public) phase=\(state.phase.rawValue, privacy: .public) extras=\(plan.endIDs.count)")
+        return true
+    }
+
+    private static func selectionPlan(
+        activities: [Activity<MqvpnNetworkActivityAttributes>],
+        desiredMode: String
+    ) -> LiveActivitySelectionPlan {
+        LiveActivitySelection.plan(
+            activities: activities.map {
+                LiveActivityDescriptor(id: $0.id, mode: $0.attributes.mode)
+            }, desiredMode: desiredMode)
+    }
+
     private static func endExtras(keeping activityID: String,
                                   state: LiveActivityContentState) {
+        let activities = Activity<MqvpnNetworkActivityAttributes>.activities
+        let ids = activities.compactMap { $0.id == activityID ? nil : $0.id }
+        endActivities(activities, ids: ids, state: state)
+    }
+
+    private static func endActivities(
+        _ activities: [Activity<MqvpnNetworkActivityAttributes>],
+        ids: [String],
+        state: LiveActivityContentState
+    ) {
+        let ids = Set(ids)
         let content = ActivityContent(state: state, staleDate: nil)
-        for activity in Activity<MqvpnNetworkActivityAttributes>.activities
-            where activity.id != activityID {
+        for activity in activities where ids.contains(activity.id) {
             Task { await activity.end(content, dismissalPolicy: .immediate) }
         }
     }
@@ -70,7 +115,7 @@ enum MqvpnLiveActivityLifecycle {
 
 protocol MqvpnLiveActivityReporting: AnyObject {
     func start()
-    func stop() async
+    func stopBestEffort()
 }
 
 /// Packet-provider rate reporter. It reads only the lock-protected production
@@ -81,11 +126,14 @@ protocol MqvpnLiveActivityReporting: AnyObject {
 final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
     private let queue = DispatchQueue(label: "mqvpn.live-activity")
     private let snapshotProvider: () -> TunnelSnapshot?
+    private let mode: OperatingMode
     private var sampler = LiveActivityRateSampler()
     private var timer: DispatchSourceTimer?
     private var stopped = false
 
-    init(snapshotProvider: @escaping () -> TunnelSnapshot?) {
+    init(mode: OperatingMode,
+         snapshotProvider: @escaping () -> TunnelSnapshot?) {
+        self.mode = mode
         self.snapshotProvider = snapshotProvider
     }
 
@@ -103,15 +151,20 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
         }
     }
 
-    func stop() async {
-        queue.sync {
-            guard !stopped else { return }
+    func stopBestEffort() {
+        let shouldEnd: Bool = queue.sync {
+            guard !stopped else { return false }
             stopped = true
             timer?.setEventHandler {}
             timer?.cancel()
             timer = nil
+            return true
         }
-        await MqvpnLiveActivityLifecycle.endImmediately()
+        guard shouldEnd else { return }
+        // The foreground app already ends on user Stop. Provider-side cleanup
+        // covers system/error stops but is intentionally unawaited so
+        // ActivityKit can never hold up NetworkExtension teardown.
+        Task { await MqvpnLiveActivityLifecycle.endImmediately() }
     }
 
     private func publish() {
@@ -120,13 +173,9 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
         let rates = sampler.sample(timestamp: snapshot.timestamp, counters: counters)
         let state = LiveActivityContentFactory.make(snapshot: snapshot, rates: rates)
         let staleDate = Date(timeIntervalSince1970: snapshot.timestamp + 6)
-        let content = ActivityContent(state: state, staleDate: staleDate)
         Task {
-            guard let activity = Activity<MqvpnNetworkActivityAttributes>.activities.first else {
-                liveActivityLog.notice("no foreground-created Live Activity to update")
-                return
-            }
-            await activity.update(content)
+            _ = await MqvpnLiveActivityLifecycle.updateExisting(
+                mode: mode, state: state, staleDate: staleDate)
         }
     }
 }

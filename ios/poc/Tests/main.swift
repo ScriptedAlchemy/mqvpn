@@ -412,6 +412,59 @@ let contentRoundTrip = try! JSONDecoder().decode(LiveActivityContentState.self,
 check(contentRoundTrip == activeActivityState,
       "Live Activity content stays Codable and Hashable across the system boundary")
 
+check(LiveActivityDisplayPolicy.visible(activeActivityState.wifi, isStale: false) ==
+      activeActivityState.wifi,
+      "fresh Live Activity content remains visible")
+check(LiveActivityDisplayPolicy.visible(activeActivityState.wifi, isStale: true) == nil,
+      "stale Live Activity content never presents the last Mbps as live")
+check(LiveActivityDisplayPolicy.accessibilityState(isStale: true,
+                                                    interfaceAvailable: true) == "stale data",
+      "stale compact interface accessibility says stale data")
+check(LiveActivityDisplayPolicy.accessibilityState(isStale: false,
+                                                    interfaceAvailable: false) == "offline",
+      "missing fresh interface accessibility says offline")
+
+let duplicateActivityPlan = LiveActivitySelection.plan(
+    activities: [
+        LiveActivityDescriptor(id: "vpn-old", mode: "vpn"),
+        LiveActivityDescriptor(id: "vpn-current", mode: "vpn"),
+        LiveActivityDescriptor(id: "relay-stale", mode: "macRelay"),
+    ], desiredMode: "vpn")
+check(duplicateActivityPlan.currentID == "vpn-old" &&
+      duplicateActivityPlan.endIDs == ["vpn-current", "relay-stale"],
+      "crash duplicates retain one exact-mode activity and end every extra")
+
+let switchedActivityPlan = LiveActivitySelection.plan(
+    activities: [
+        LiveActivityDescriptor(id: "vpn-stale", mode: "vpn"),
+        LiveActivityDescriptor(id: "relay-current", mode: "macRelay"),
+    ], desiredMode: "macRelay")
+check(switchedActivityPlan.currentID == "relay-current" &&
+      switchedActivityPlan.endIDs == ["vpn-stale"],
+      "VPN-to-relay switch selects only the exact relay activity")
+
+let createActivityPlan = LiveActivitySelection.plan(
+    activities: [LiveActivityDescriptor(id: "vpn-stale", mode: "vpn")],
+    desiredMode: "macRelay")
+check(createActivityPlan.currentID == nil &&
+      createActivityPlan.endIDs == ["vpn-stale"],
+      "missing desired mode requests a new activity and ends stale modes")
+
+runAsync {
+    var stopEvents: [String] = []
+    await LiveActivityStopSequence.perform(
+        transportTeardown: {
+            stopEvents.append("transport-begin")
+            await Task.yield()
+            stopEvents.append("transport-end")
+        },
+        scheduleActivityCleanup: {
+            stopEvents.append("activity-scheduled")
+        })
+    check(stopEvents == ["transport-begin", "transport-end", "activity-scheduled"],
+          "transport teardown completes before bounded ActivityKit cleanup is scheduled")
+}
+
 // ── Mac Relay authenticated session state ──
 // The socket layer only passes frames here after the shared C codec has
 // authenticated them and applied its replay window. These tests catch state

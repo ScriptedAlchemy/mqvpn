@@ -19,15 +19,21 @@ struct MqvpnSpeedLiveActivity: Widget {
                 .activityBackgroundTint(.black.opacity(0.88))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
-            DynamicIsland {
+            let wifi = LiveActivityDisplayPolicy.visible(context.state.wifi,
+                                                         isStale: context.isStale)
+            let cellular = LiveActivityDisplayPolicy.visible(context.state.cellular,
+                                                             isStale: context.isStale)
+            return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     InterfaceSpeedView(kind: .wifi,
-                                       content: context.state.wifi,
+                                       content: wifi,
+                                       isStale: context.isStale,
                                        compact: false)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     InterfaceSpeedView(kind: .cellular,
-                                       content: context.state.cellular,
+                                       content: cellular,
+                                       isStale: context.isStale,
                                        compact: false)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
@@ -36,15 +42,17 @@ struct MqvpnSpeedLiveActivity: Widget {
                 }
             } compactLeading: {
                 InterfaceSpeedView(kind: .wifi,
-                                   content: context.state.wifi,
+                                   content: wifi,
+                                   isStale: context.isStale,
                                    compact: true)
             } compactTrailing: {
                 InterfaceSpeedView(kind: .cellular,
-                                   content: context.state.cellular,
+                                   content: cellular,
+                                   isStale: context.isStale,
                                    compact: true)
             } minimal: {
-                MinimalInterfacesView(wifi: context.state.wifi,
-                                      cellular: context.state.cellular)
+                MinimalInterfacesView(wifi: wifi, cellular: cellular,
+                                      isStale: context.isStale)
             }
             .keylineTint(.green)
         }
@@ -55,6 +63,10 @@ private struct LockScreenSpeedView: View {
     let context: ActivityViewContext<MqvpnNetworkActivityAttributes>
 
     var body: some View {
+        let wifi = LiveActivityDisplayPolicy.visible(context.state.wifi,
+                                                     isStale: context.isStale)
+        let cellular = LiveActivityDisplayPolicy.visible(context.state.cellular,
+                                                         isStale: context.isStale)
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Label(context.attributes.mode == "macRelay" ? "mqvpn relay" : "mqvpn VPN",
@@ -65,11 +77,13 @@ private struct LockScreenSpeedView: View {
             }
             HStack(spacing: 12) {
                 InterfaceSpeedView(kind: .wifi,
-                                   content: context.state.wifi,
+                                   content: wifi,
+                                   isStale: context.isStale,
                                    compact: false)
                 Divider().overlay(.white.opacity(0.25))
                 InterfaceSpeedView(kind: .cellular,
-                                   content: context.state.cellular,
+                                   content: cellular,
+                                   isStale: context.isStale,
                                    compact: false)
             }
         }
@@ -89,6 +103,7 @@ private enum DisplayInterfaceKind {
 private struct InterfaceSpeedView: View {
     let kind: DisplayInterfaceKind
     let content: LiveActivityInterfaceContent?
+    let isStale: Bool
     let compact: Bool
 
     private var icon: String {
@@ -117,8 +132,11 @@ private struct InterfaceSpeedView: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
-        .accessibilityValue(Self.accessibilityRate(content?.megabitsPerSecond,
-                                                   available: content != nil))
+        .accessibilityValue(isStale
+            ? LiveActivityDisplayPolicy.accessibilityState(isStale: true,
+                                                           interfaceAvailable: false)
+            : Self.accessibilityRate(content?.megabitsPerSecond,
+                                     available: content != nil))
     }
 
     private var rateText: String {
@@ -142,6 +160,7 @@ private struct InterfaceSpeedView: View {
 private struct MinimalInterfacesView: View {
     let wifi: LiveActivityInterfaceContent?
     let cellular: LiveActivityInterfaceContent?
+    let isStale: Bool
 
     var body: some View {
         HStack(spacing: 2) {
@@ -153,7 +172,8 @@ private struct MinimalInterfacesView: View {
         .font(.caption2)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("mqvpn interfaces")
-        .accessibilityValue("Wi-Fi \(wifi == nil ? "offline" : "active"), cellular \(cellular == nil ? "offline" : "active")")
+        .accessibilityValue(isStale ? "stale data" :
+            "Wi-Fi \(wifi == nil ? "offline" : "active"), cellular \(cellular == nil ? "offline" : "active")")
     }
 }
 
