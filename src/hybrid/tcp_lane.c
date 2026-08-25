@@ -749,11 +749,17 @@ tcp_lane_downlink_drain(mqvpn_tcp_flow_t *f)
  *
  * Returns LIVE with downlink_paused cleared on success, LIVE with
  * downlink_paused still set if there still isn't room (retry later), or
- * the teardown status (ABORTED — GONE cannot happen here, f->pcb is
- * always live on entry) if the retry write failed fatally. */
+ * the teardown status (ABORTED — GONE cannot happen here, a live caller's
+ * f->pcb is non-NULL) if the retry write failed fatally. */
 static tcp_lane_flow_status_t
 tcp_lane_downlink_stash_retry(mqvpn_tcp_flow_t *f)
 {
+    /* Belt-and-suspenders for reentrant teardown: a flow reached through
+     * a stale stream mapping mid-close has pcb == NULL, and tcp_sndbuf
+     * would dereference it. */
+    if (!f->pcb) {
+        return TCP_LANE_FLOW_LIVE;
+    }
     if ((size_t)MQVPN_TCP_LANE_TCP_SNDBUF(f->pcb) < (size_t)f->downlink_stash_len) {
         return TCP_LANE_FLOW_LIVE; /* still not enough room; wait and retry later */
     }
@@ -956,9 +962,20 @@ static void
 tcp_lane_close_h3(mqvpn_tcp_flow_t *f)
 {
     if (f->h3_request) {
-        cli_tcp_lane_h3_close(f->h3_request);
+        void *req = f->h3_request;
+        /* Clear the pointers BEFORE closing. xqc_h3_request_close drives
+         * the engine synchronously, and a READ_BODY notify still pending
+         * for this same request re-enters the downlink pump from inside
+         * the close. With f->stream still set, find_flow_by_stream hands
+         * that reentrant notify a flow whose pcb is already gone — on the
+         * on_lwip_err path lwIP freed it before we were called — and the
+         * paused stash-retry dereferences f->pcb before any liveness
+         * guard (observed live as a SIGSEGV in
+         * tcp_lane_downlink_pump_status under bulk download). Cleared
+         * pointers make the reentrant notify miss the flow entirely. */
         f->h3_request = NULL;
         f->stream = NULL;
+        cli_tcp_lane_h3_close(req);
     }
 }
 
