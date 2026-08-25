@@ -222,8 +222,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             transportTeardown: {
                 await self.stopTransport()
             },
-            scheduleActivityCleanup: {
-                reporter?.stopBestEffort()
+            activityCleanup: {
+                await reporter?.stop()
                 self.liveActivityReporter = nil
             })
     }

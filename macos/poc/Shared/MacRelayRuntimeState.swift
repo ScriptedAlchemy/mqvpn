@@ -69,6 +69,7 @@ struct MacRelayRuntimeState {
     private var active = false
     private var pathActivationPending = false
     private var sessionID: UInt64?
+    private var lastSessionID: UInt64?
     private var pathHandle: mqvpn_path_handle_t?
     private var txSequence: UInt64 = 0
     private var rxReplay = mqvpn_replay_window_t()
@@ -99,6 +100,10 @@ struct MacRelayRuntimeState {
 
     var canEncode: Bool { key != nil && started && sessionID != nil }
 
+    func resumeSessionID() -> UInt64? {
+        MacRelaySessionRenewal.resumeSessionID(current: sessionID, last: lastSessionID)
+    }
+
     var snapshot: MacRelayRuntimeSnapshot {
         MacRelayRuntimeSnapshot(
             started: started, active: active, sessionID: sessionID,
@@ -118,9 +123,13 @@ struct MacRelayRuntimeState {
         active = false
         pathActivationPending = false
         pathHandle = nil
+        if MacRelaySessionRenewal.shouldResetTransmitSequence(
+            resuming: sessionID, previous: lastSessionID ?? self.sessionID) {
+            txSequence = 0
+            rxReplay = mqvpn_replay_window_t()
+        }
         self.sessionID = sessionID
-        txSequence = 0
-        rxReplay = mqvpn_replay_window_t()
+        lastSessionID = sessionID
         lastHelloMs = nil
         lastAuthenticatedMs = nowMs
         lastProbeMs = nowMs
@@ -272,6 +281,7 @@ struct MacRelayRuntimeState {
         guard started, let lastAuthenticatedMs,
               nowMs - lastAuthenticatedMs > idleTimeoutMs else { return false }
         _ = detachLogicalPath()
+        lastSessionID = sessionID ?? lastSessionID
         sessionID = nil
         rxReplay = mqvpn_replay_window_t()
         lastError = "relay authentication expired"
@@ -280,6 +290,7 @@ struct MacRelayRuntimeState {
 
     mutating func hardSocketFailure(nowMs: UInt64, error: String) {
         _ = detachLogicalPath()
+        lastSessionID = sessionID ?? lastSessionID
         sessionID = nil
         rxReplay = mqvpn_replay_window_t()
         hardFailure = true
@@ -314,6 +325,18 @@ struct MacRelayRuntimeState {
         case MQVPN_RELAY_ERR_AUTH_FAILED: return .authentication
         default: return .malformed
         }
+    }
+}
+
+enum MacRelaySessionRenewal {
+    /// Reopen and idle recovery must keep the iPhone's live lease. A new
+    /// random session is rejected as `.session` until that 15s lease expires.
+    static func resumeSessionID(current: UInt64?, last: UInt64?) -> UInt64? {
+        current ?? last
+    }
+
+    static func shouldResetTransmitSequence(resuming: UInt64, previous: UInt64?) -> Bool {
+        previous != resuming
     }
 }
 

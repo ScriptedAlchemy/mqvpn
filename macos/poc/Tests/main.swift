@@ -609,6 +609,13 @@ check(state.snapshot.hardFailures == 1 && !state.snapshot.active &&
       state.shouldReopenSocket(nowMs: 1_106) == false &&
       state.shouldReopenSocket(nowMs: 1_107),
       "hard socket failure removes its path and waits one second before reopen")
+check(MacRelaySessionRenewal.resumeSessionID(current: UInt64?.none, last: session) == session &&
+      MacRelaySessionRenewal.resumeSessionID(current: UInt64?.none, last: UInt64?.none) == nil &&
+      !MacRelaySessionRenewal.shouldResetTransmitSequence(resuming: session, previous: session) &&
+      MacRelaySessionRenewal.shouldResetTransmitSequence(resuming: session + 1, previous: session),
+      "socket reopen resumes the authenticated session instead of minting a lease the iPhone will reject")
+check(state.resumeSessionID() == session,
+      "hard socket failure remembers the session so HELLO can continue the same lease")
 check(state.beginSession(sessionID: session + 2, nowMs: 1_107) == .started &&
       state.snapshot.sessionID == session + 2 && state.snapshot.pathHandle == nil,
       "reopen starts a fresh session with no inherited logical path")

@@ -174,7 +174,8 @@ final class MacRelayBinder {
     private func startFreshSession() {
         let previous = state.detachLogicalPath()
         removeEnginePath(previous)
-        guard state.beginSession(sessionID: randomSessionID(), nowMs: nowMs()) == .started else {
+        guard state.beginSession(sessionID: state.resumeSessionID() ?? randomSessionID(),
+                                 nowMs: nowMs()) == .started else {
             recordSocketFailure("relay session initialization failed")
             return
         }
