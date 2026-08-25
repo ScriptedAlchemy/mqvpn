@@ -45,7 +45,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let relay = RelayEngine(settings: relaySettings, serverAddress: resolved)
             relayEngine = relay
             snapshotReader = { [weak relay] in relay?.readSnapshot() }
-            let networkSettings = Self.makeRelaySettings(server: resolvedIP)
+            let networkSettings = Self.makeRelaySettings()
             try await withCheckedThrowingContinuation {
                 (continuation: CheckedContinuation<Void, Error>) in
                 setTunnelNetworkSettings(networkSettings) { error in
@@ -284,10 +284,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// route. A documentation-only /32 address satisfies NetworkExtension's
     /// interface requirement while an empty included-routes list and nil DNS
     /// leave all iPhone application traffic on the system's normal routing.
-    static func makeRelaySettings(server: String) -> NEPacketTunnelNetworkSettings {
+    static func makeRelaySettings() -> NEPacketTunnelNetworkSettings {
         let plan = RelayNetworkPlan.nonRouting
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: server)
-        let ipv4 = NEIPv4Settings(addresses: ["192.0.2.1"],
+        let settings = NEPacketTunnelNetworkSettings(
+            tunnelRemoteAddress: plan.tunnelRemoteAddress)
+        let ipv4 = NEIPv4Settings(addresses: [plan.assignedAddress],
                                   subnetMasks: ["255.255.255.255"])
         ipv4.includedRoutes = plan.includedIPv4Routes.map {
             NEIPv4Route(destinationAddress: $0, subnetMask: "255.255.255.255")

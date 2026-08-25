@@ -56,6 +56,18 @@ struct LiveActivitySelectionPlan: Equatable {
     let endIDs: [String]
 }
 
+/// The Island is created by the foreground app process. A packet-tunnel
+/// updater seeing zero descriptors means this session never called begin().
+enum LiveActivitySessionPolicy {
+    static func shouldBegin(alreadyStarted: Bool, isUp: Bool) -> Bool {
+        isUp && !alreadyStarted
+    }
+
+    static func shouldEnd(alreadyStarted: Bool, isUp: Bool) -> Bool {
+        alreadyStarted && !isUp
+    }
+}
+
 /// Deterministic duplicate and mode-switch policy shared by the foreground
 /// requester and provider updater. There is exactly one current activity, and
 /// it must match the running mode.

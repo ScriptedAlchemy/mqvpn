@@ -55,6 +55,7 @@ final class TunnelController: ObservableObject {
     private var lastIngestedSeq: UInt64 = 0
     private var lastIngestedTimestamp: Double = 0
     private var liveActivityStarted = false
+    private var liveActivitySampler = LiveActivityRateSampler()
 
     var isEditable: Bool { manager != nil && status == .disconnected }
     var isConnectable: Bool {
@@ -161,10 +162,15 @@ final class TunnelController: ObservableObject {
             lastIngestedSeq = 0
             lastIngestedTimestamp = 0
         }
-        if liveActivityStarted && (s == .disconnected || s == .invalid) {
-            liveActivityStarted = false
-            if #available(iOS 16.2, *) {
+        if #available(iOS 16.2, *) {
+            let up = Self.isUp(s)
+            if LiveActivitySessionPolicy.shouldEnd(alreadyStarted: liveActivityStarted,
+                                                   isUp: up) {
+                liveActivityStarted = false
                 Task { await MqvpnLiveActivityLifecycle.endImmediately() }
+            } else if LiveActivitySessionPolicy.shouldBegin(alreadyStarted: liveActivityStarted,
+                                                            isUp: up) {
+                liveActivityStarted = MqvpnLiveActivityLifecycle.begin(mode: operatingMode)
             }
         }
         reconcilePolling()
@@ -310,6 +316,7 @@ final class TunnelController: ObservableObject {
             prevSnapshot = snap
             snapshot = snap
             pathRates = [:]
+            publishLiveActivity(snap)
             return
         }
         if let prev = prevSnapshot {
@@ -333,6 +340,22 @@ final class TunnelController: ObservableObject {
         prevSnapshot = snap
         snapshot = snap
         eventLog.ingest(snap)
+        publishLiveActivity(snap)
+    }
+
+    private func publishLiveActivity(_ snap: TunnelSnapshot) {
+        guard liveActivityStarted else { return }
+        if #available(iOS 16.2, *) {
+            let counters = LiveActivityCounterSource.counters(from: snap)
+            let rates = liveActivitySampler.sample(timestamp: snap.timestamp,
+                                                   counters: counters)
+            let state = LiveActivityContentFactory.make(snapshot: snap, rates: rates)
+            let staleDate = Date(timeIntervalSince1970: snap.timestamp + 6)
+            Task {
+                _ = await MqvpnLiveActivityLifecycle.updateExisting(
+                    mode: operatingMode, state: state, staleDate: staleDate)
+            }
+        }
     }
 
     private static func describe(_ s: NEVPNStatus) -> String {

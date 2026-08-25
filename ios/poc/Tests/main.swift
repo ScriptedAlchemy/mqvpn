@@ -556,6 +556,18 @@ check(stopActions == [.closeWifi], "Stop closes every currently open relay socke
 check(relayState.snapshot == .stopped, "Stop resets interfaces, counters, session, and errors")
 check(RelayNetworkPlan.nonRouting.includedIPv4Routes.isEmpty && RelayNetworkPlan.nonRouting.dnsServers.isEmpty,
       "relay network plan installs no default route and no DNS capture")
+check(RelayNetworkPlan.nonRouting.tunnelRemoteAddress == "192.0.2.2" &&
+      RelayNetworkPlan.nonRouting.assignedAddress == "192.0.2.1" &&
+      RelayNetworkPlan.nonRouting.tunnelRemoteAddress != "208.69.79.206",
+      "relay settings must not claim the public server as tunnelRemoteAddress")
+check(LiveActivitySessionPolicy.shouldBegin(alreadyStarted: false, isUp: true) &&
+      !LiveActivitySessionPolicy.shouldBegin(alreadyStarted: true, isUp: true) &&
+      !LiveActivitySessionPolicy.shouldBegin(alreadyStarted: false, isUp: false),
+      "a connected session with no Island must create one")
+check(LiveActivitySessionPolicy.shouldEnd(alreadyStarted: true, isUp: false) &&
+      !LiveActivitySessionPolicy.shouldEnd(alreadyStarted: false, isUp: false) &&
+      !LiveActivitySessionPolicy.shouldEnd(alreadyStarted: true, isUp: true),
+      "disconnect ends only an activity this session actually started")
 check(RelaySocketPlan.fixed.lanListener == .wifi &&
       RelaySocketPlan.fixed.fixedServer == .cellular,
       "LAN listener is Wi-Fi-only and the fixed server socket is cellular-only")

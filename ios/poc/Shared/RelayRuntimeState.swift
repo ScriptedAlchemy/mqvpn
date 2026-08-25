@@ -47,8 +47,14 @@ enum RelayDashboard {
 struct RelayNetworkPlan: Equatable {
     let includedIPv4Routes: [String]
     let dnsServers: [String]
+    /// Documentation-only remote. Must never be the public mqvpn server, or
+    /// iOS can steal that /32 into the dummy utun and blackhole cellular.
+    let tunnelRemoteAddress: String
+    let assignedAddress: String
 
-    static let nonRouting = RelayNetworkPlan(includedIPv4Routes: [], dnsServers: [])
+    static let nonRouting = RelayNetworkPlan(
+        includedIPv4Routes: [], dnsServers: [],
+        tunnelRemoteAddress: "192.0.2.2", assignedAddress: "192.0.2.1")
 }
 
 enum RelayInterfaceClass: Equatable {
