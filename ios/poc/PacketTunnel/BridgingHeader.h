@@ -4,6 +4,7 @@
 #ifndef MQVPN_POC_BRIDGING_H
 #define MQVPN_POC_BRIDGING_H
 #include <libmqvpn.h>
+#include <mqvpn/relay_protocol.h>
 #include "mqvpn_clock_shim.h"
 
 // Internal reorder stats API. reorder.h supplies mqvpn_reorder_stats_t + the

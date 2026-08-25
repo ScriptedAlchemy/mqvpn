@@ -17,17 +17,28 @@ struct TunnelSnapshot: Codable {
     let seq: UInt64                    // provider-monotonic ordering key
     let reorderConfigured: Bool        // core enabled with >=1 rule (provider truth)
     let reorder: ReorderStatsSnapshot? // nil = layout-unavailable / not present
+    let operatingMode: OperatingMode
+    let relay: RelaySnapshot?
 
     // Explicit memberwise init: the NEW fields default so the existing producer
     // (SnapshotCache) compiles until it is updated to pass real values.
     init(timestamp: Double, clientState: Int32, connectedSince: Double?,
          footprint: UInt64, paths: [PathSnapshot],
          seq: UInt64 = 0, reorderConfigured: Bool = false,
-         reorder: ReorderStatsSnapshot? = nil) {
+         reorder: ReorderStatsSnapshot? = nil,
+         operatingMode: OperatingMode = .vpn,
+         relay: RelaySnapshot? = nil) {
         self.timestamp = timestamp; self.clientState = clientState
         self.connectedSince = connectedSince; self.footprint = footprint
         self.paths = paths; self.seq = seq
         self.reorderConfigured = reorderConfigured; self.reorder = reorder
+        self.operatingMode = operatingMode; self.relay = relay
+    }
+
+    static func relayStopped(timestamp: Double) -> TunnelSnapshot {
+        TunnelSnapshot(timestamp: timestamp, clientState: -1,
+                       connectedSince: nil, footprint: 0, paths: [],
+                       operatingMode: .macRelay, relay: .stopped)
     }
 }
 
@@ -69,6 +80,7 @@ extension TunnelSnapshot {
     enum CodingKeys: String, CodingKey {
         case timestamp, clientState, connectedSince, footprint, paths
         case seq, reorderConfigured, reorder
+        case operatingMode, relay
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -80,6 +92,8 @@ extension TunnelSnapshot {
             paths: try c.decode([PathSnapshot].self, forKey: .paths),
             seq: try c.decodeIfPresent(UInt64.self, forKey: .seq) ?? 0,
             reorderConfigured: try c.decodeIfPresent(Bool.self, forKey: .reorderConfigured) ?? false,
-            reorder: try c.decodeIfPresent(ReorderStatsSnapshot.self, forKey: .reorder))
+            reorder: try c.decodeIfPresent(ReorderStatsSnapshot.self, forKey: .reorder),
+            operatingMode: try c.decodeIfPresent(OperatingMode.self, forKey: .operatingMode) ?? .vpn,
+            relay: try c.decodeIfPresent(RelaySnapshot.self, forKey: .relay))
     }
 }

@@ -36,6 +36,8 @@ final class TunnelController: ObservableObject {
     @Published var reorderSettings: ReorderSettings = .disabled
     @Published var hybridSettings = HybridSettings.disabled
     @Published var serverSettings: ServerSettings?   // nil = unset/corrupt → Connect disabled
+    @Published var operatingMode: OperatingMode = .vpn
+    @Published var relaySettings: RelaySettings?
     @Published var configError: String?              // separate from statusText (updateStatus overwrites)
     @Published private(set) var isSaving = false
     /// Observed directly by the dashboard; fed the same snapshot stream.
@@ -54,7 +56,11 @@ final class TunnelController: ObservableObject {
     private var lastIngestedTimestamp: Double = 0
 
     var isEditable: Bool { manager != nil && status == .disconnected }
-    var isConnectable: Bool { isEditable && serverSettings != nil && !isSaving }
+    var isConnectable: Bool {
+        isEditable && !isSaving &&
+            RelayStartGuard.canStart(mode: operatingMode, server: serverSettings,
+                                     relay: relaySettings)
+    }
     var isStoppable: Bool {
         guard manager != nil else { return false }
         switch Self.tunnelStatus(status) {
@@ -111,6 +117,19 @@ final class TunnelController: ObservableObject {
             manager = m
             reorderSettings = ReorderSettings(providerConfiguration: pc) ?? .disabled
             hybridSettings = HybridSettings(providerConfiguration: pc) ?? .disabled
+            if let mode = OperatingMode(providerConfiguration: pc) {
+                operatingMode = mode
+                relaySettings = RelaySettings(providerConfiguration: pc)
+                if mode == .macRelay && relaySettings == nil {
+                    serverSettings = nil
+                    configError = "relay config invalid — re-enter in Settings"
+                }
+            } else {
+                operatingMode = .vpn
+                relaySettings = nil
+                serverSettings = nil
+                configError = "operating mode invalid — re-enter in Settings"
+            }
             attachObserver(to: m)
             updateStatus(m.connection.status)
         } catch {
@@ -168,7 +187,9 @@ final class TunnelController: ObservableObject {
     /// mutate -> commit -> refresh sequence in performAtomicSave, the exact
     /// function the host tests fault-inject — so the tested logic IS the
     /// production logic.
-    func saveSettings(server: ServerSettings, reorder: ReorderSettings, hybrid: HybridSettings) async throws {
+    func saveSettings(server: ServerSettings, reorder: ReorderSettings,
+                      hybrid: HybridSettings, operatingMode: OperatingMode,
+                      relay: RelaySettings?) async throws {
         if let e = saveGuard(isSaving: isSaving, isEditable: isEditable, hasManager: manager != nil) {
             throw e
         }
@@ -181,8 +202,17 @@ final class TunnelController: ObservableObject {
         var merged = server.toProviderConfiguration()
         for (k, v) in reorder.toProviderConfiguration() { merged[k] = v }
         for (k, v) in hybrid.toProviderConfiguration() { merged[k] = v }
+        for (k, v) in operatingMode.toProviderConfiguration() { merged[k] = v }
+        if let relay, relay.isValid {
+            for (k, v) in relay.toProviderConfiguration() { merged[k] = v }
+        }
         try await performAtomicSave(NEConfigStore(manager: manager, proto: proto), merge: merged)
-        serverSettings = server; reorderSettings = reorder; hybridSettings = hybrid; configError = nil   // only on success
+        serverSettings = server
+        reorderSettings = reorder
+        hybridSettings = hybrid
+        self.operatingMode = operatingMode
+        relaySettings = relay?.isValid == true ? relay : nil
+        configError = nil   // only on success
     }
 
     // MARK: - Snapshot polling
@@ -257,6 +287,12 @@ final class TunnelController: ObservableObject {
 
     /// Compute per-path rates from the previous sample, then publish.
     private func ingest(_ snap: TunnelSnapshot) {
+        if snap.operatingMode == .macRelay {
+            prevSnapshot = snap
+            snapshot = snap
+            pathRates = [:]
+            return
+        }
         if let prev = prevSnapshot {
             let dt = snap.timestamp - prev.timestamp
             if dt > 0.05 {
@@ -290,6 +326,12 @@ final class TunnelController: ObservableObject {
         case .disconnecting: return "disconnecting"
         @unknown default: return "unknown(\(s.rawValue))"
         }
+    }
+
+    var dashboardStatusText: String {
+        guard operatingMode == .macRelay else { return statusText }
+        return RelayDashboard.statusLabel(tunnelStatus: Self.tunnelStatus(status),
+                                          snapshot: snapshot)
     }
 
     private static func tunnelStatus(_ s: NEVPNStatus) -> TunnelStatus {

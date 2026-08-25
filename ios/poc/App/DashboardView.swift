@@ -18,11 +18,14 @@ struct DashboardView: View {
                     connectionHeader
                     pathSection
                     statsRow
-                    if let snap = controller.snapshot, snap.reorderConfigured, let r = snap.reorder {
+                    if controller.operatingMode == .vpn,
+                       let snap = controller.snapshot, snap.reorderConfigured, let r = snap.reorder {
                         ReorderStatsCard(stats: r)
                     }
-                    BulkDownloadView()
-                    eventSection
+                    if controller.operatingMode == .vpn {
+                        BulkDownloadView()
+                        eventSection
+                    }
                 }
                 .padding()
             }
@@ -41,8 +44,8 @@ struct DashboardView: View {
     private var connectionHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                StatusBadge(text: controller.statusText.uppercased(), color: headerColor)
-                if let cs = controller.snapshot?.clientState {
+                StatusBadge(text: controller.dashboardStatusText.uppercased(), color: headerColor)
+                if controller.operatingMode == .vpn, let cs = controller.snapshot?.clientState {
                     Text("core: \(Self.clientStateName(cs))")
                         .font(.caption).foregroundColor(.secondary)
                 }
@@ -64,7 +67,14 @@ struct DashboardView: View {
 
     /// NEVPNStatus drives the badge; any recorded load/start error wins as red.
     private var headerColor: Color {
-        if controller.statusText.contains("error") { return .red }
+        if controller.statusText.contains("error") || controller.snapshot?.relay?.error != nil {
+            return .red
+        }
+        if controller.operatingMode == .macRelay {
+            if controller.snapshot?.relay?.isReady == true { return .green }
+            return controller.status == .connecting || controller.status == .reasserting
+                ? .yellow : .gray
+        }
         switch controller.status {
         case .connected: return .green
         case .connecting, .reasserting: return .yellow
@@ -91,13 +101,22 @@ struct DashboardView: View {
 
     private var pathSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Paths").font(.headline)
-            if let paths = controller.snapshot?.paths, !paths.isEmpty {
-                ForEach(paths, id: \.name) { p in
-                    PathCardView(path: p, rateMbps: controller.pathRates[p.name])
+            if controller.operatingMode == .macRelay {
+                Text("Mac Relay").font(.headline)
+                if let relay = controller.snapshot?.relay {
+                    RelayStatusCard(snapshot: relay)
+                } else {
+                    Text("no data").font(.caption).foregroundStyle(.secondary)
                 }
             } else {
-                Text("no data").font(.caption).foregroundColor(.secondary)
+                Text("Paths").font(.headline)
+                if let paths = controller.snapshot?.paths, !paths.isEmpty {
+                    ForEach(paths, id: \.name) { p in
+                        PathCardView(path: p, rateMbps: controller.pathRates[p.name])
+                    }
+                } else {
+                    Text("no data").font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -127,7 +146,13 @@ struct DashboardView: View {
     }
 
     private var totalBytes: UInt64 {
-        (controller.snapshot?.paths ?? []).reduce(0) { $0 + $1.txBytes + $1.rxBytes }
+        if let relay = controller.snapshot?.relay {
+            return relay.lanRxBytes + relay.lanTxBytes +
+                relay.serverRxBytes + relay.serverTxBytes
+        }
+        return (controller.snapshot?.paths ?? []).reduce(0) {
+            $0 + $1.txBytes + $1.rxBytes
+        }
     }
 
     /// Uptime is provider-clock based (both fields come from the snapshot), so
@@ -208,4 +233,44 @@ struct DashboardView: View {
         return f
     }()
 
+}
+
+private struct RelayStatusCard: View {
+    let snapshot: RelaySnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(interfaceText(snapshot.listenerInterface, fallback: "Wi-Fi unavailable"),
+                      systemImage: snapshot.wifiAvailable ? "wifi" : "wifi.slash")
+                Spacer()
+                Text(Self.byteText(snapshot.lanRxBytes + snapshot.lanTxBytes))
+                    .font(.caption.monospacedDigit())
+            }
+            HStack {
+                Label(interfaceText(snapshot.cellularInterface, fallback: "Cellular unavailable"),
+                      systemImage: "antenna.radiowaves.left.and.right")
+                Spacer()
+                Text(Self.byteText(snapshot.serverRxBytes + snapshot.serverTxBytes))
+                    .font(.caption.monospacedDigit())
+            }
+            Text(snapshot.authenticatedSession ? "Mac authenticated" : "Waiting for authenticated Mac")
+                .font(.caption)
+                .foregroundStyle(snapshot.authenticatedSession ? .green : .secondary)
+            if let error = snapshot.error {
+                Text(error).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10)
+            .fill(Color(.secondarySystemBackground)))
+    }
+
+    private func interfaceText(_ interface: String?, fallback: String) -> String {
+        interface.map { "\($0) ready" } ?? fallback
+    }
+
+    private static func byteText(_ bytes: UInt64) -> String {
+        String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+    }
 }

@@ -225,4 +225,130 @@ StopLifecycle.performOrFinish(
 check(rejectedCompletions == 1,
       "rejected engine dispatch finishes locally exactly once")
 
+// ── Mac Relay settings and provider mode ──
+// These catch silently treating a corrupt relay configuration as VPN mode,
+// accepting a weak/wrong-size key, and enabling Start without all relay
+// prerequisites. The missing operating-mode/settings types make this test RED
+// before the production implementation exists.
+check(OperatingMode(providerConfiguration: nil) == .vpn,
+      "pre-relay provider configuration remains VPN mode")
+check(OperatingMode(providerConfiguration: [:]) == .vpn,
+      "missing operatingMode remains VPN mode")
+check(OperatingMode(providerConfiguration: ["operatingMode": "bogus"]) == nil,
+      "unknown operatingMode fails closed")
+check(OperatingMode(providerConfiguration: OperatingMode.macRelay.toProviderConfiguration()) == .macRelay,
+      "Mac Relay mode provider round-trip")
+
+let relayKeyData = Data((0..<32).map(UInt8.init))
+let relayKey = relayKeyData.base64EncodedString()
+let relay = RelaySettings(keyBase64: relayKey, listenPort: 5443)
+check(relay.decodedKey == relayKeyData, "relay key decodes to exactly 32 bytes")
+check(relay.isValid, "32-byte relay key and valid port are accepted")
+check(RelaySettings(providerConfiguration: relay.toProviderConfiguration()) == relay,
+      "relay provider configuration round-trip")
+check(!RelaySettings(keyBase64: "not base64", listenPort: 5443).isValid,
+      "invalid Base64 relay key is rejected")
+check(!RelaySettings(keyBase64: Data(repeating: 1, count: 31).base64EncodedString(), listenPort: 5443).isValid,
+      "non-32-byte relay key is rejected")
+check(!RelaySettings(keyBase64: relayKey, listenPort: 0).isValid,
+      "relay port zero is rejected")
+check(!RelaySettings(keyBase64: relayKey, listenPort: 65_536).isValid,
+      "relay port above 65535 is rejected")
+check(RelaySettings(providerConfiguration: ["relayKey": relayKey]) == nil,
+      "missing relay listen port fails closed")
+
+check(RelayStartGuard.canStart(mode: .vpn, server: ss, relay: nil),
+      "VPN mode remains startable without relay settings")
+check(!RelayStartGuard.canStart(mode: .macRelay, server: ss, relay: nil),
+      "Mac Relay mode cannot start without relay settings")
+check(RelayStartGuard.canStart(mode: .macRelay, server: ss, relay: relay),
+      "Mac Relay mode starts with valid server and relay settings")
+check(!RelayStartGuard.canStart(mode: .macRelay, server: .emptyDraft, relay: relay),
+      "Mac Relay mode cannot start without a valid fixed server")
+
+let relayWire = TunnelSnapshot(
+    timestamp: 10, clientState: -1, connectedSince: nil, footprint: 12,
+    paths: [], operatingMode: .macRelay,
+    relay: RelaySnapshot(wifiAvailable: true, cellularAvailable: true,
+                         authenticatedSession: true, listenerInterface: "en0",
+                         cellularInterface: "pdp_ip0", lanRxBytes: 10,
+                         lanTxBytes: 20, serverRxBytes: 30, serverTxBytes: 40,
+                         lastAuthenticated: 9, error: nil))
+let relayWireRoundTrip = try! ProviderMessage.decode(ProviderMessage.encode(relayWire))
+check(relayWireRoundTrip.operatingMode == .macRelay && relayWireRoundTrip.relay?.isReady == true,
+      "relay snapshot provider round-trip preserves readiness")
+check(RelayDashboard.statusLabel(tunnelStatus: .connected, snapshot: relayWireRoundTrip) == "Relay ready",
+      "relay dashboard labels an authenticated ready relay")
+check(RelayDashboard.statusLabel(tunnelStatus: .connected,
+                                 snapshot: TunnelSnapshot.relayStopped(timestamp: 11)) == "Relay waiting",
+      "relay dashboard never labels a mere listener as ready")
+
+// ── Mac Relay authenticated session state ──
+// The socket layer only passes frames here after the shared C codec has
+// authenticated them and applied its replay window. These tests catch state
+// mutation before authentication, destination-bearing arbitrary forwarding,
+// multiple simultaneous Mac sessions, stale sessions, and incomplete Stop.
+let peerA = RelayPeerIdentity(Data([192, 168, 1, 30, 0x15, 0x43]))
+let peerB = RelayPeerIdentity(Data([192, 168, 1, 31, 0x15, 0x43]))
+var relayState = RelaySessionState(idleTimeout: 15)
+relayState.updateInterfaces(wifi: "en0", cellular: "pdp_ip0")
+check(relayState.snapshot.wifiAvailable && relayState.snapshot.cellularAvailable,
+      "relay reports both injected physical interfaces")
+
+let unauthHello = RelayInboundFrame(type: .hello, sessionID: 7, sequence: 1,
+                                    payload: Data(), peer: peerA,
+                                    authenticated: false, replayAccepted: false)
+check(relayState.handleMacFrame(unauthHello, now: 1) == [.drop(.authentication)],
+      "wrong-key HELLO drops before session state changes")
+check(!relayState.snapshot.authenticatedSession,
+      "wrong-key HELLO does not create a session")
+
+let hello = RelayInboundFrame(type: .hello, sessionID: 7, sequence: 1,
+                              payload: Data(), peer: peerA,
+                              authenticated: true, replayAccepted: true)
+check(relayState.handleMacFrame(hello, now: 2) == [.sendHelloAck(sessionID: 7)],
+      "authenticated HELLO creates one session and requests ACK")
+check(relayState.snapshot.authenticatedSession && relayState.snapshot.lastAuthenticated == 2,
+      "authenticated HELLO updates readiness and liveness")
+
+let competingHello = RelayInboundFrame(type: .hello, sessionID: 8, sequence: 1,
+                                       payload: Data(), peer: peerB,
+                                       authenticated: true, replayAccepted: true)
+check(relayState.handleMacFrame(competingHello, now: 3) == [.drop(.session)],
+      "a second Mac session is rejected while the first is live")
+
+let replayed = RelayInboundFrame(type: .dataToServer, sessionID: 7, sequence: 2,
+                                 payload: Data([1, 2]), peer: peerA,
+                                 authenticated: true, replayAccepted: false)
+check(relayState.handleMacFrame(replayed, now: 4) == [.drop(.replay)],
+      "replayed DATA is dropped before server forwarding")
+
+let dataToServer = RelayInboundFrame(type: .dataToServer, sessionID: 7, sequence: 3,
+                                     payload: Data([9, 8, 7]), peer: peerA,
+                                     authenticated: true, replayAccepted: true)
+check(relayState.handleMacFrame(dataToServer, now: 5) == [.forwardToFixedServer(Data([9, 8, 7]))],
+      "accepted DATA carries only payload to the already-connected fixed server")
+
+check(!relayState.expireIfIdle(now: 19.9), "session remains before 15-second idle timeout")
+check(relayState.expireIfIdle(now: 20.1), "session expires after 15 seconds without authenticated traffic")
+check(!relayState.snapshot.authenticatedSession, "idle expiry clears authenticated session")
+
+_ = relayState.handleMacFrame(hello, now: 21)
+check(relayState.updateInterfaces(wifi: nil, cellular: "pdp_ip0") == [.closeWifi],
+      "Wi-Fi loss closes its listener")
+check(!relayState.snapshot.authenticatedSession,
+      "Wi-Fi loss erases the peer-bound authenticated session")
+check(relayState.updateInterfaces(wifi: "en0", cellular: nil) == [.openWifi("en0"), .closeCellular],
+      "cellular loss is observable without fabricating readiness")
+
+_ = relayState.handleMacFrame(hello, now: 22)
+let stopActions = relayState.stop()
+check(stopActions == [.closeWifi], "Stop closes every currently open relay socket")
+check(relayState.snapshot == .stopped, "Stop resets interfaces, counters, session, and errors")
+check(RelayNetworkPlan.nonRouting.includedIPv4Routes.isEmpty && RelayNetworkPlan.nonRouting.dnsServers.isEmpty,
+      "relay network plan installs no default route and no DNS capture")
+check(RelaySocketPlan.fixed.lanListener == .wifi &&
+      RelaySocketPlan.fixed.fixedServer == .cellular,
+      "LAN listener is Wi-Fi-only and the fixed server socket is cellular-only")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }

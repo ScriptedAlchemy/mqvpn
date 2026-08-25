@@ -8,16 +8,22 @@ private let providerLog = Logger(subsystem: "mqvpn.poc", category: "provider")
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     private var engine: MqvpnEngine?
+    private var relayEngine: RelayEngine?
     private var binder: PathBinder?
     private var metrics: GateMetrics?
     // Optional (not `!`): handleAppMessage can be delivered independently of
     // the start/stop lifecycle, so the reader must tolerate a nil cache.
     private var snapshot: SnapshotCache?
+    private var snapshotReader: (() -> TunnelSnapshot?)?
     private var defaultPathObservation: NSKeyValueObservation?
 
     override func startTunnel(options: [String: NSObject]?) async throws {
         let providerConfig = (self.protocolConfiguration as? NETunnelProviderProtocol)?
             .providerConfiguration
+        guard let operatingMode = OperatingMode(providerConfiguration: providerConfig) else {
+            throw NSError(domain: "mqvpn.poc", code: 9,
+                          userInfo: [NSLocalizedDescriptionKey: "operating mode invalid"])
+        }
         guard let server = ServerSettings(providerConfiguration: providerConfig) else {
             throw NSError(domain: "mqvpn.poc", code: 10,
                           userInfo: [NSLocalizedDescriptionKey: "server not configured"])
@@ -30,6 +36,27 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             throw NSError(domain: "mqvpn.poc", code: 11,
                           userInfo: [NSLocalizedDescriptionKey: "server unresolved: \(server.host)"])
         }
+        if operatingMode == .macRelay {
+            guard let relaySettings = RelaySettings(providerConfiguration: providerConfig),
+                  RelayStartGuard.canStart(mode: operatingMode, server: server,
+                                           relay: relaySettings) else {
+                throw NSError(domain: "mqvpn.poc", code: 12,
+                              userInfo: [NSLocalizedDescriptionKey: "relay settings invalid"])
+            }
+            let relay = RelayEngine(settings: relaySettings, serverAddress: resolved)
+            relayEngine = relay
+            snapshotReader = { [weak relay] in relay?.readSnapshot() }
+            let networkSettings = Self.makeRelaySettings(server: resolvedIP)
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                setTunnelNetworkSettings(networkSettings) { error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume() }
+                }
+            }
+            relay.start()
+            return
+        }
         let engine = MqvpnEngine()
         let binder = PathBinder(engine: engine)
         let metrics = GateMetrics(engine: engine, binder: binder)
@@ -38,6 +65,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         self.binder = binder
         self.metrics = metrics
         self.snapshot = snapshot
+        self.snapshotReader = { [weak snapshot] in snapshot?.read() }
 
         engine.onTunOutput = { [weak self] data in
             // NEPacketTunnelFlow requires a protocol family per packet; the
@@ -161,7 +189,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// app renders as "no data".
     override func handleAppMessage(_ messageData: Data,
                                    completionHandler: ((Data?) -> Void)?) {
-        guard let snap = snapshot?.read(),
+        guard let snap = snapshotReader?(),
               let data = try? ProviderMessage.encode(snap) else {
             completionHandler?(nil)
             return
@@ -178,6 +206,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         providerLog.notice("STOP_BEGIN")
         defaultPathObservation?.invalidate()
         defaultPathObservation = nil
+        if let relayEngine {
+            relayEngine.stop()
+            self.relayEngine = nil
+            self.snapshotReader = nil
+            self.snapshot = nil
+            self.engine = nil
+            self.binder = nil
+            self.metrics = nil
+            providerLog.notice("STOP_FINISHED relay=true")
+            return
+        }
         await withCheckedContinuation { cont in
             let engine = self.engine
             let binder = self.binder
@@ -196,6 +235,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self?.binder = nil
                     self?.metrics = nil
                     self?.snapshot = nil
+                    self?.snapshotReader = nil
                     providerLog.notice("STOP_FINISHED accepted=true")
                     cont.resume()
                 },
@@ -208,9 +248,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self?.binder = nil
                     self?.metrics = nil
                     self?.snapshot = nil
+                    self?.snapshotReader = nil
                     providerLog.notice("STOP_FINISHED accepted=false")
                     cont.resume()
                 })
         }
+    }
+
+    /// Relay mode needs a packet-tunnel process lifetime, not a phone traffic
+    /// route. A documentation-only /32 address satisfies NetworkExtension's
+    /// interface requirement while an empty included-routes list and nil DNS
+    /// leave all iPhone application traffic on the system's normal routing.
+    static func makeRelaySettings(server: String) -> NEPacketTunnelNetworkSettings {
+        let plan = RelayNetworkPlan.nonRouting
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: server)
+        let ipv4 = NEIPv4Settings(addresses: ["192.0.2.1"],
+                                  subnetMasks: ["255.255.255.255"])
+        ipv4.includedRoutes = plan.includedIPv4Routes.map {
+            NEIPv4Route(destinationAddress: $0, subnetMask: "255.255.255.255")
+        }
+        settings.ipv4Settings = ipv4
+        settings.dnsSettings = plan.dnsServers.isEmpty
+            ? nil : NEDNSSettings(servers: plan.dnsServers)
+        return settings
     }
 }

@@ -22,6 +22,9 @@ struct SettingsView: View {
 
     @State private var hybridEnabled: Bool
     @State private var hybridMode: Int
+    @State private var operatingMode: OperatingMode
+    @State private var relayKeyText: String
+    @State private var relayPortText: String
 
     init(controller: TunnelController) {
         self.controller = controller
@@ -39,6 +42,10 @@ struct SettingsView: View {
 
         _hybridEnabled = State(initialValue: controller.hybridSettings.enabled)
         _hybridMode = State(initialValue: controller.hybridSettings.tcpMode)
+        _operatingMode = State(initialValue: controller.operatingMode)
+        let relay = controller.relaySettings ?? .emptyDraft
+        _relayKeyText = State(initialValue: relay.keyBase64)
+        _relayPortText = State(initialValue: String(relay.listenPort))
     }
 
     private var draft: ReorderSettings {
@@ -55,25 +62,64 @@ struct SettingsView: View {
                        authKey: pskText, insecure: insecure)
     }
     private var serverValid: Bool { serverDraft.isValid }   // reuse the model's rule (host trimmed in init; port -1 when unparseable → false)
+    private var relayDraft: RelaySettings {
+        RelaySettings(keyBase64: relayKeyText,
+                      listenPort: Int(relayPortText.trimmingCharacters(in: .whitespaces)) ?? -1)
+    }
+    private var formValid: Bool {
+        guard serverValid else { return false }
+        return operatingMode == .vpn ? draft.isSavable : relayDraft.isValid
+    }
 
     var body: some View {
         NavigationView {
             Form {
+                Section("Mode") {
+                    Picker("Operating Mode", selection: $operatingMode) {
+                        Text("VPN").tag(OperatingMode.vpn)
+                        Text("Mac Relay").tag(OperatingMode.macRelay)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(!controller.isEditable)
+                }
                 Section("Server") {
                     TextField("Server Host/IP", text: $hostText)
                         .keyboardType(.URL).autocorrectionDisabled().textInputAutocapitalization(.never)
                         .disabled(!controller.isEditable)
                     TextField("Port", text: $portText)
                         .keyboardType(.numberPad).disabled(!controller.isEditable)
-                    TextField("TLS Server Name (optional, default: host)", text: $serverNameText)
-                        .keyboardType(.URL).autocorrectionDisabled().textInputAutocapitalization(.never)
-                        .disabled(!controller.isEditable)
-                    SecureField("PSK (Auth Key)", text: $pskText).disabled(!controller.isEditable)
-                    Toggle("Insecure (skip TLS verify)", isOn: $insecure).disabled(!controller.isEditable)
+                    if operatingMode == .vpn {
+                        TextField("TLS Server Name (optional, default: host)", text: $serverNameText)
+                            .keyboardType(.URL).autocorrectionDisabled().textInputAutocapitalization(.never)
+                            .disabled(!controller.isEditable)
+                        SecureField("PSK (Auth Key)", text: $pskText).disabled(!controller.isEditable)
+                        Toggle("Insecure (skip TLS verify)", isOn: $insecure).disabled(!controller.isEditable)
+                    }
                     if !serverValid {
                         Text("Host required; port must be 1–65535.").font(.caption).foregroundColor(.red)
                     }
                 }
+                if operatingMode == .macRelay {
+                    Section {
+                        SecureField("32-byte Base64 Relay Key", text: $relayKeyText)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .disabled(!controller.isEditable)
+                        TextField("LAN Listen Port", text: $relayPortText)
+                            .keyboardType(.numberPad)
+                            .disabled(!controller.isEditable)
+                        if !relayDraft.isValid {
+                            Text("A 32-byte Base64 key and port 1–65535 are required.")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    } header: {
+                        Text("Mac Relay")
+                    } footer: {
+                        Text("The Mac connects to this iPhone over the shared Wi-Fi LAN; only mqvpn UDP is forwarded over cellular.")
+                    }
+                }
+                if operatingMode == .vpn {
                 Section("Reorder Buffer") {
                     Toggle("Enabled", isOn: $enabled).disabled(!controller.isEditable)
                     if enabled {
@@ -105,6 +151,7 @@ struct SettingsView: View {
                 } header: { Text("Hybrid Mode") } footer: {
                     Text("Requires hybrid support on the server; TCP connections fail otherwise.")
                 }
+                }
                 if let errorText { Section { Text(errorText).foregroundColor(.red) } }
                 if !controller.isEditable {
                     Section { Text("Disconnect to edit settings.")
@@ -119,7 +166,7 @@ struct SettingsView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { Task { await save() } }
-                        .disabled(!serverValid || !draft.isSavable || controller.isSaving || !controller.isEditable)
+                        .disabled(!formValid || controller.isSaving || !controller.isEditable)
                 }
             }
         }
@@ -127,7 +174,13 @@ struct SettingsView: View {
 
     private func save() async {
         let hybrid = HybridSettings(enabled: hybridEnabled, tcpMode: hybridMode)
-        do { try await controller.saveSettings(server: serverDraft, reorder: draft, hybrid: hybrid); dismiss() }
+        do {
+            try await controller.saveSettings(
+                server: serverDraft, reorder: draft, hybrid: hybrid,
+                operatingMode: operatingMode,
+                relay: operatingMode == .macRelay ? relayDraft : controller.relaySettings)
+            dismiss()
+        }
         catch { errorText = "Save failed: \(error)" }
     }
 }

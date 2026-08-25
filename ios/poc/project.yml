@@ -41,6 +41,7 @@ targets:
       path: App/Info.plist
       properties:
         UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: Allow your Mac to send authenticated mqvpn relay datagrams to this iPhone.
         MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
         MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
         MqvpnServerName: $(MQVPN_POC_SERVER_NAME)
@@ -61,7 +62,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.zackjackson.mqvpn.PacketTunnel
         PROVISIONING_PROFILE_SPECIFIER: mqvpn PacketTunnel Development
         SWIFT_OBJC_BRIDGING_HEADER: PacketTunnel/BridgingHeader.h
-        OTHER_LDFLAGS: "-lmqvpn -llwip_core -lxquic-static -lssl -lcrypto -lc++"
+        # libmqvpn contains the shared relay codec and Apple's system-trust
+        # verifier; crypto supplies HMAC, while Security/CoreFoundation back
+        # SecTrust on physical iOS.
+        OTHER_LDFLAGS: "-lmqvpn -llwip_core -lxquic-static -lssl -lcrypto -framework Security -framework CoreFoundation -lc++"
     entitlements:
       path: PacketTunnel.entitlements
       properties:
@@ -74,6 +78,7 @@ targets:
         MqvpnServerName: $(MQVPN_POC_SERVER_NAME)
         MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
         MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
+        NSLocalNetworkUsageDescription: Allow your Mac to send authenticated mqvpn relay datagrams to this iPhone.
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider

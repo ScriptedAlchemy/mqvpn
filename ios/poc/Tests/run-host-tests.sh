@@ -19,6 +19,9 @@ swiftc -o "$OUT" \
     "$SHARED/HybridSettings.swift" \
     "$SHARED/ProviderMessage.swift" \
     "$SHARED/TunnelLifecycle.swift" \
+    "$SHARED/OperatingMode.swift" \
+    "$SHARED/RelaySettings.swift" \
+    "$SHARED/RelayRuntimeState.swift" \
     "$APP/ReorderIngest.swift" \
     "$DIR/main.swift"
 "$OUT"
