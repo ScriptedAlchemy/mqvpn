@@ -1,0 +1,299 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
+import Foundation
+
+/// The observable relay state. It intentionally contains no secret material.
+struct MacRelayRuntimeSnapshot: Equatable {
+    let started: Bool
+    let active: Bool
+    let sessionID: UInt64?
+    let pathHandle: mqvpn_path_handle_t?
+    let helloSent: UInt64
+    let rawReceived: UInt64
+    let authAccepted: UInt64
+    let authRejected: UInt64
+    let ackReceived: UInt64
+    let lanTxBytes: UInt64
+    let lanRxBytes: UInt64
+    let dataToMacBytes: UInt64
+    let hardFailures: UInt64
+    let lastError: String?
+
+    static let stopped = MacRelayRuntimeSnapshot(
+        started: false, active: false, sessionID: nil, pathHandle: nil,
+        helloSent: 0, rawReceived: 0, authAccepted: 0, authRejected: 0,
+        ackReceived: 0, lanTxBytes: 0, lanRxBytes: 0, dataToMacBytes: 0,
+        hardFailures: 0, lastError: nil)
+}
+
+enum MacRelayDrop: Equatable {
+    case authentication
+    case direction
+    case session
+    case replay
+    case malformed
+    case messageType
+}
+
+enum MacRelayInboundAction: Equatable {
+    case none
+    case activateLogicalPath
+    case deliverToCore(Data, mqvpn_path_handle_t)
+    case drop(MacRelayDrop)
+}
+
+enum MacRelaySessionStartResult: Equatable {
+    case started
+    case rejected
+}
+
+/// Pure single-queue state and portable relay-codec boundary for the macOS
+/// binder. Socket I/O and libmqvpn calls live outside this type; every frame
+/// is encoded/decoded by the shared C implementation rather than Swift HMAC.
+struct MacRelayRuntimeState {
+    private static let helloRetryMs: UInt64 = 1_000
+    private static let idleProbeMs: UInt64 = 5_000
+    private static let reopenDelayMs: UInt64 = 1_000
+
+    private var key: Data?
+    private let idleTimeoutMs: UInt64
+    private var started = false
+    private var active = false
+    private var pathActivationPending = false
+    private var sessionID: UInt64?
+    private var pathHandle: mqvpn_path_handle_t?
+    private var txSequence: UInt64 = 0
+    private var rxReplay = mqvpn_replay_window_t()
+    private var lastHelloMs: UInt64?
+    private var lastAuthenticatedMs: UInt64?
+    private var lastProbeMs: UInt64?
+    private var lastFailureMs: UInt64?
+    private var hardFailure = false
+    private var helloSent: UInt64 = 0
+    private var rawReceived: UInt64 = 0
+    private var authAccepted: UInt64 = 0
+    private var authRejected: UInt64 = 0
+    private var ackReceived: UInt64 = 0
+    private var lanTxBytes: UInt64 = 0
+    private var lanRxBytes: UInt64 = 0
+    private var dataToMacBytes: UInt64 = 0
+    private var hardFailures: UInt64 = 0
+    private var lastError: String?
+
+    init(key: Data, idleTimeoutMs: UInt64 = 15_000) {
+        self.key = key.count == Int(MQVPN_RELAY_KEY_SIZE) ? key : nil
+        self.idleTimeoutMs = idleTimeoutMs
+    }
+
+    var canEncode: Bool { key != nil && started && sessionID != nil }
+
+    var snapshot: MacRelayRuntimeSnapshot {
+        MacRelayRuntimeSnapshot(
+            started: started, active: active, sessionID: sessionID,
+            pathHandle: pathHandle, helloSent: helloSent, rawReceived: rawReceived,
+            authAccepted: authAccepted, authRejected: authRejected,
+            ackReceived: ackReceived, lanTxBytes: lanTxBytes, lanRxBytes: lanRxBytes,
+            dataToMacBytes: dataToMacBytes, hardFailures: hardFailures,
+            lastError: lastError)
+    }
+
+    @discardableResult
+    mutating func beginSession(sessionID: UInt64, nowMs: UInt64) -> MacRelaySessionStartResult {
+        guard key != nil, sessionID != 0 else { return .rejected }
+        started = true
+        active = false
+        pathActivationPending = false
+        pathHandle = nil
+        self.sessionID = sessionID
+        txSequence = 0
+        rxReplay = mqvpn_replay_window_t()
+        lastHelloMs = nil
+        lastAuthenticatedMs = nowMs
+        lastProbeMs = nowMs
+        lastFailureMs = nil
+        hardFailure = false
+        lastError = nil
+        return .started
+    }
+
+    /// Builds a real HMAC-authenticated relay datagram with the portable C
+    /// codec. The caller sends it over the connected, interface-bound socket.
+    mutating func encode(type: mqvpn_relay_message_type_t, payload: Data,
+                         nowMs: UInt64) -> Data? {
+        guard let key, let sessionID, started, payload.count <= Int(MQVPN_RELAY_MAX_PAYLOAD_SIZE)
+        else { return nil }
+        var datagram = [UInt8](repeating: 0,
+                                count: Int(MQVPN_RELAY_HEADER_SIZE + MQVPN_RELAY_MAX_PAYLOAD_SIZE +
+                                           MQVPN_RELAY_TAG_SIZE))
+        var datagramLength = 0
+        let result = key.withUnsafeBytes { keyBytes in
+            payload.withUnsafeBytes { payloadBytes in
+                mqvpn_relay_encode(
+                    keyBytes.baseAddress!.assumingMemoryBound(to: UInt8.self), type,
+                    MQVPN_RELAY_MAC_TO_IPHONE, sessionID, txSequence,
+                    payloadBytes.baseAddress?.assumingMemoryBound(to: UInt8.self), payload.count,
+                    &datagram, datagram.count, &datagramLength)
+            }
+        }
+        guard result == MQVPN_RELAY_OK else {
+            lastError = "relay encode failed: \(result.rawValue)"
+            return nil
+        }
+        txSequence &+= 1
+        if type == MQVPN_RELAY_HELLO {
+            helloSent &+= 1
+            lastHelloMs = nowMs
+            lastProbeMs = nowMs
+        }
+        lanTxBytes &+= UInt64(datagramLength)
+        return Data(datagram.prefix(datagramLength))
+    }
+
+    mutating func receive(_ datagram: Data, nowMs: UInt64) -> MacRelayInboundAction {
+        rawReceived &+= 1
+        lanRxBytes &+= UInt64(datagram.count)
+        guard let key, let expectedSession = sessionID, started else {
+            authRejected &+= 1
+            return .drop(.session)
+        }
+        var frame = mqvpn_relay_frame_t()
+        var expected = expectedSession
+        let result = key.withUnsafeBytes { keyBytes in
+            datagram.withUnsafeBytes { bytes in
+                mqvpn_relay_decode(
+                    keyBytes.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    bytes.baseAddress?.assumingMemoryBound(to: UInt8.self), datagram.count,
+                    MQVPN_RELAY_IPHONE_TO_MAC, &expected, &frame)
+            }
+        }
+        guard result == MQVPN_RELAY_OK else {
+            authRejected &+= 1
+            return .drop(dropReason(for: result))
+        }
+        guard mqvpn_replay_window_accept(&rxReplay, frame.sequence) == MQVPN_RELAY_OK else {
+            authRejected &+= 1
+            return .drop(.replay)
+        }
+        authAccepted &+= 1
+        lastAuthenticatedMs = nowMs
+        lastError = nil
+
+        switch frame.type {
+        case MQVPN_RELAY_HELLO_ACK:
+            guard frame.payload_length == 0 else { return reject(.malformed) }
+            ackReceived &+= 1
+            guard !active, !pathActivationPending else { return .none }
+            pathActivationPending = true
+            return .activateLogicalPath
+        case MQVPN_RELAY_DATA_TO_MAC:
+            guard active, let pathHandle else { return reject(.messageType) }
+            let payload = Data(bytes: frame.payload!, count: frame.payload_length)
+            dataToMacBytes &+= UInt64(payload.count)
+            return .deliverToCore(payload, pathHandle)
+        case MQVPN_RELAY_KEEPALIVE:
+            return frame.payload_length == 0 ? .none : reject(.malformed)
+        case MQVPN_RELAY_HELLO, MQVPN_RELAY_DATA_TO_SERVER:
+            return reject(.messageType)
+        default:
+            return reject(.messageType)
+        }
+    }
+
+    @discardableResult
+    mutating func attachLogicalPath(_ handle: mqvpn_path_handle_t) -> Bool {
+        guard started, sessionID != nil, handle >= 0, !hardFailure, pathActivationPending else {
+            return false
+        }
+        pathHandle = handle
+        active = true
+        pathActivationPending = false
+        return true
+    }
+
+    mutating func detachLogicalPath() -> mqvpn_path_handle_t? {
+        let handle = pathHandle
+        pathHandle = nil
+        active = false
+        pathActivationPending = false
+        return handle
+    }
+
+    func shouldRetryHello(nowMs: UInt64) -> Bool {
+        guard started, !active, !hardFailure, let lastHelloMs else { return false }
+        return nowMs - lastHelloMs >= Self.helloRetryMs
+    }
+
+    func shouldProbeActiveRelay(nowMs: UInt64) -> Bool {
+        guard active, !hardFailure, let lastProbeMs else { return false }
+        return nowMs - lastProbeMs >= Self.idleProbeMs
+    }
+
+    @discardableResult
+    mutating func expireIfIdle(nowMs: UInt64) -> Bool {
+        guard started, let lastAuthenticatedMs,
+              nowMs - lastAuthenticatedMs > idleTimeoutMs else { return false }
+        _ = detachLogicalPath()
+        sessionID = nil
+        rxReplay = mqvpn_replay_window_t()
+        lastError = "relay authentication expired"
+        return true
+    }
+
+    mutating func hardSocketFailure(nowMs: UInt64, error: String) {
+        _ = detachLogicalPath()
+        sessionID = nil
+        rxReplay = mqvpn_replay_window_t()
+        hardFailure = true
+        lastFailureMs = nowMs
+        hardFailures &+= 1
+        lastError = error
+    }
+
+    func shouldReopenSocket(nowMs: UInt64) -> Bool {
+        guard hardFailure, let lastFailureMs else { return false }
+        return nowMs - lastFailureMs >= Self.reopenDelayMs
+    }
+
+    mutating func stop() {
+        if var key {
+            key.resetBytes(in: 0..<key.count)
+            self.key = key
+        }
+        key = nil
+        self = MacRelayRuntimeState(key: Data(), idleTimeoutMs: idleTimeoutMs)
+    }
+
+    private mutating func reject(_ reason: MacRelayDrop) -> MacRelayInboundAction {
+        authRejected &+= 1
+        return .drop(reason)
+    }
+
+    private func dropReason(for result: mqvpn_relay_result_t) -> MacRelayDrop {
+        switch result {
+        case MQVPN_RELAY_ERR_WRONG_DIRECTION: return .direction
+        case MQVPN_RELAY_ERR_WRONG_SESSION: return .session
+        case MQVPN_RELAY_ERR_AUTH_FAILED: return .authentication
+        default: return .malformed
+        }
+    }
+}
+
+enum MacRelayEndpointSafety {
+    static func isLocalEndpoint(_ endpoint: String, localIPv4Addresses: [String]) -> Bool {
+        let normalized = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        return localIPv4Addresses.contains {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines) == normalized
+        }
+    }
+}
+
+/// Descriptor numbers are reusable. A read handler captured for an old socket
+/// is allowed to run after cancellation, so it must match both identity and a
+/// monotonically increasing transport generation before touching relay state.
+enum MacRelayTransportGeneration {
+    static func accepts(capturedGeneration: UInt64, currentGeneration: UInt64,
+                        capturedFD: Int32, currentFD: Int32, stopped: Bool) -> Bool {
+        !stopped && capturedGeneration == currentGeneration && capturedFD == currentFD
+    }
+}
