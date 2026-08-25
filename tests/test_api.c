@@ -12,9 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <errno.h>
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "xquic/xquic.h"
 
 /* ── Test infrastructure ── */
 
@@ -684,6 +686,64 @@ mock_path_event(mqvpn_path_handle_t h, mqvpn_path_status_t s, void *u)
     g_last_path_event_status = s;
 }
 
+typedef struct {
+    int calls;
+    mqvpn_path_handle_t path;
+    uint8_t pkt[64];
+    size_t len;
+    struct sockaddr_storage peer;
+    socklen_t peer_len;
+    ssize_t result;
+} send_packet_ex_capture_t;
+
+static ssize_t
+capture_send_packet_ex(mqvpn_path_handle_t path, const uint8_t *pkt, size_t len,
+                       const struct sockaddr *peer, socklen_t peer_len, void *user_ctx)
+{
+    send_packet_ex_capture_t *capture = user_ctx;
+    capture->calls++;
+    capture->path = path;
+    capture->len = len;
+    if (len <= sizeof(capture->pkt)) memcpy(capture->pkt, pkt, len);
+    capture->peer_len = peer_len;
+    if (peer && peer_len <= sizeof(capture->peer)) memcpy(&capture->peer, peer, peer_len);
+    return capture->result;
+}
+
+static int g_legacy_send_calls;
+static mqvpn_path_handle_t g_legacy_send_path;
+
+static void
+capture_legacy_send_packet(mqvpn_path_handle_t path, const uint8_t *pkt, size_t len,
+                           const struct sockaddr *peer, socklen_t peer_len,
+                           void *user_ctx)
+{
+    (void)pkt;
+    (void)len;
+    (void)peer;
+    (void)peer_len;
+    (void)user_ctx;
+    g_legacy_send_calls++;
+    g_legacy_send_path = path;
+}
+
+static mqvpn_client_t *
+make_send_test_client(send_packet_ex_capture_t *capture, mqvpn_send_packet_fn legacy_send)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    cbs.send_packet = legacy_send;
+    cbs.send_packet_ex = capture ? capture_send_packet_ex : NULL;
+
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, capture);
+    mqvpn_config_free(cfg);
+    return c;
+}
+
 /* Helper: create a valid client for lifecycle tests */
 static mqvpn_client_t *
 make_test_client(void)
@@ -1001,6 +1061,235 @@ TEST(client_add_path_max)
     /* one more path should fail */
     ASSERT_EQ(mqvpn_client_add_path_fd(c, 99, NULL), (mqvpn_path_handle_t)-1);
 
+    mqvpn_client_destroy(c);
+}
+
+extern int mqvpn_client_test_force_validating(mqvpn_client_t *c,
+                                              mqvpn_path_handle_t handle,
+                                              uint64_t xqc_path_id);
+extern ssize_t mqvpn_client_test_write_socket_ex(mqvpn_client_t *c, uint64_t xqc_path_id,
+                                                 const uint8_t *pkt, size_t len,
+                                                 const struct sockaddr *peer,
+                                                 socklen_t peer_len);
+extern ssize_t mqvpn_client_test_write_socket(mqvpn_client_t *c, const uint8_t *pkt,
+                                              size_t len, const struct sockaddr *peer,
+                                              socklen_t peer_len);
+
+static struct sockaddr
+send_test_peer(void)
+{
+    struct sockaddr peer;
+    memset(&peer, 0, sizeof(peer));
+    peer.sa_family = AF_INET;
+    memcpy(peer.sa_data, "peer-token", sizeof("peer-token"));
+    return peer;
+}
+
+TEST(callback_path_without_send_callback_is_rejected)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_add_path_fd(c, -1, NULL), (mqvpn_path_handle_t)-1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(callback_path_with_result_callback_sends_and_accounts_once)
+{
+    const uint8_t pkt[] = {0x11, 0x22, 0x33, 0x44, 0x55};
+    struct sockaddr peer = send_test_peer();
+    send_packet_ex_capture_t capture = {.result = (ssize_t)sizeof(pkt)};
+    mqvpn_client_t *c = make_send_test_client(&capture, NULL);
+
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, -1, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h, 41), 0);
+    ASSERT_EQ(
+        mqvpn_client_test_write_socket_ex(c, 41, pkt, sizeof(pkt), &peer, sizeof(peer)),
+        (ssize_t)sizeof(pkt));
+
+    ASSERT_EQ(capture.calls, 1);
+    ASSERT_EQ(capture.path, h);
+    ASSERT_EQ(capture.len, sizeof(pkt));
+    ASSERT_EQ(memcmp(capture.pkt, pkt, sizeof(pkt)), 0);
+    ASSERT_EQ(capture.peer_len, sizeof(peer));
+    ASSERT_EQ(memcmp(&capture.peer, &peer, sizeof(peer)), 0);
+
+    mqvpn_stats_t stats;
+    ASSERT_EQ(mqvpn_client_get_stats(c, &stats), MQVPN_OK);
+    ASSERT_EQ(stats.bytes_tx, sizeof(pkt));
+    ASSERT_EQ(stats.udp_tx_sends, 1);
+    ASSERT_EQ(stats.udp_tx_datagrams, 1);
+
+    mqvpn_path_info_t paths[MQVPN_MAX_PATHS];
+    int n_paths = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, paths, MQVPN_MAX_PATHS, &n_paths), MQVPN_OK);
+    ASSERT_EQ(n_paths, 1);
+    ASSERT_EQ(paths[0].bytes_tx, sizeof(pkt));
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(callback_path_eagain_does_not_close_or_account)
+{
+    const uint8_t pkt[] = {0x61, 0x62, 0x63};
+    struct sockaddr peer = send_test_peer();
+    send_packet_ex_capture_t capture = {.result = -EAGAIN};
+    mqvpn_client_t *c = make_send_test_client(&capture, NULL);
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, -1, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h, 42), 0);
+
+    ASSERT_EQ(
+        mqvpn_client_test_write_socket_ex(c, 42, pkt, sizeof(pkt), &peer, sizeof(peer)),
+        XQC_SOCKET_EAGAIN);
+    ASSERT_EQ(capture.calls, 1);
+
+    mqvpn_stats_t stats;
+    ASSERT_EQ(mqvpn_client_get_stats(c, &stats), MQVPN_OK);
+    ASSERT_EQ(stats.bytes_tx, 0);
+    ASSERT_EQ(stats.udp_tx_sends, 0);
+    ASSERT_EQ(stats.udp_tx_datagrams, 0);
+
+    mqvpn_path_info_t paths[MQVPN_MAX_PATHS];
+    int n_paths = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, paths, MQVPN_MAX_PATHS, &n_paths), MQVPN_OK);
+    ASSERT_EQ(n_paths, 1);
+    ASSERT_NE(paths[0].status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(callback_path_hard_error_uses_attached_path_dead_policy)
+{
+    const uint8_t pkt[] = {0x71, 0x72};
+    struct sockaddr peer = send_test_peer();
+    send_packet_ex_capture_t capture = {.result = -EIO};
+    mqvpn_client_t *c = make_send_test_client(&capture, NULL);
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, -1, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h, 43), 0);
+
+    /* Existing sendto policy downgrades a hard send failure to retry while
+     * any platform path is still attached. Callback-backed paths must use
+     * that same policy rather than inventing a second close rule. */
+    ASSERT_EQ(
+        mqvpn_client_test_write_socket_ex(c, 43, pkt, sizeof(pkt), &peer, sizeof(peer)),
+        XQC_SOCKET_EAGAIN);
+    ASSERT_EQ(capture.calls, 1);
+
+    mqvpn_stats_t stats;
+    ASSERT_EQ(mqvpn_client_get_stats(c, &stats), MQVPN_OK);
+    ASSERT_EQ(stats.bytes_tx, 0);
+    ASSERT_EQ(stats.udp_tx_sends, 0);
+    ASSERT_EQ(stats.udp_tx_datagrams, 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(callback_path_partial_send_fails_closed_without_accounting)
+{
+    const uint8_t pkt[] = {0x81, 0x82, 0x83, 0x84};
+    struct sockaddr peer = send_test_peer();
+    send_packet_ex_capture_t capture = {.result = 2};
+    mqvpn_client_t *c = make_send_test_client(&capture, NULL);
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, -1, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h, 44), 0);
+
+    ASSERT_EQ(
+        mqvpn_client_test_write_socket_ex(c, 44, pkt, sizeof(pkt), &peer, sizeof(peer)),
+        XQC_SOCKET_EAGAIN);
+    mqvpn_stats_t stats;
+    ASSERT_EQ(mqvpn_client_get_stats(c, &stats), MQVPN_OK);
+    ASSERT_EQ(stats.bytes_tx, 0);
+    ASSERT_EQ(stats.udp_tx_sends, 0);
+    ASSERT_EQ(stats.udp_tx_datagrams, 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(callback_path_remove_readd_preserves_live_xquic_binding_slot)
+{
+    send_packet_ex_capture_t capture = {0};
+    mqvpn_client_t *c = make_send_test_client(&capture, NULL);
+    mqvpn_path_handle_t old_h = mqvpn_client_add_path_fd(c, -1, NULL);
+    ASSERT_NE(old_h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, old_h, 45), 0);
+    ASSERT_EQ(mqvpn_client_remove_path(c, old_h), MQVPN_OK);
+
+    mqvpn_path_handle_t new_h = mqvpn_client_add_path_fd(c, -1, NULL);
+    ASSERT_NE(new_h, (mqvpn_path_handle_t)-1);
+    ASSERT_NE(new_h, old_h);
+
+    mqvpn_path_info_t paths[MQVPN_MAX_PATHS];
+    int n_paths = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, paths, MQVPN_MAX_PATHS, &n_paths), MQVPN_OK);
+    ASSERT_EQ(n_paths, 2);
+    ASSERT_EQ(paths[0].handle, old_h);
+    ASSERT_EQ(paths[0].status, MQVPN_PATH_CLOSED);
+    ASSERT_EQ(paths[1].handle, new_h);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(fd_path_never_invokes_send_callback)
+{
+    const uint8_t pkt[] = {0x91};
+    struct sockaddr peer = send_test_peer();
+    send_packet_ex_capture_t capture = {.result = (ssize_t)sizeof(pkt)};
+    mqvpn_client_t *c = make_send_test_client(&capture, capture_legacy_send_packet);
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h, 46), 0);
+    g_legacy_send_calls = 0;
+
+    /* fd 42 is deliberately not a socket in this unit process. The syscall
+     * fails, but neither callback may be used as an fd-path fallback. */
+    ASSERT_EQ(
+        mqvpn_client_test_write_socket_ex(c, 46, pkt, sizeof(pkt), &peer, sizeof(peer)),
+        XQC_SOCKET_EAGAIN);
+    ASSERT_EQ(mqvpn_client_test_write_socket(c, pkt, sizeof(pkt), &peer, sizeof(peer)),
+              XQC_SOCKET_ERROR);
+    ASSERT_EQ(capture.calls, 0);
+    ASSERT_EQ(g_legacy_send_calls, 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(callback_path_accepts_legacy_void_callback)
+{
+    const uint8_t pkt[] = {0xa1, 0xa2};
+    struct sockaddr peer = send_test_peer();
+    mqvpn_client_t *c = make_send_test_client(NULL, capture_legacy_send_packet);
+    g_legacy_send_calls = 0;
+    g_legacy_send_path = -1;
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, -1, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h, 47), 0);
+
+    ASSERT_EQ(
+        mqvpn_client_test_write_socket_ex(c, 47, pkt, sizeof(pkt), &peer, sizeof(peer)),
+        (ssize_t)sizeof(pkt));
+    ASSERT_EQ(g_legacy_send_calls, 1);
+    ASSERT_EQ(g_legacy_send_path, h);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(callback_path_result_callback_is_gated_by_struct_size)
+{
+    send_packet_ex_capture_t capture = {0};
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    cbs.send_packet_ex = capture_send_packet_ex;
+    cbs.struct_size = offsetof(mqvpn_client_callbacks_t, send_packet_ex);
+
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, &capture);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(mqvpn_client_add_path_fd(c, -1, NULL), (mqvpn_path_handle_t)-1);
     mqvpn_client_destroy(c);
 }
 
@@ -1356,9 +1645,6 @@ TEST(cb_path_removed_validating_to_create_wait)
  * (PATH_ABANDON) exactly like a secondary's; the id-0 guard introduced by
  * the PR4 refactor (#116) skipped it and cost a ~95-115 s server-side
  * downlink blackout on primary loss (iOS PoC gate G-i3). */
-extern int mqvpn_client_test_force_validating(mqvpn_client_t *c,
-                                              mqvpn_path_handle_t handle,
-                                              uint64_t xqc_path_id);
 extern int mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle);
 
 TEST(remove_live_primary_emits_abandon)
@@ -2737,9 +3023,11 @@ TEST(add_path_fd_with_outcome_invalid_args_return_minus_one)
     mqvpn_add_path_outcome_t outcome = MQVPN_ADD_PATH_OK;
     ASSERT_EQ(mqvpn_client_add_path_fd_with_outcome(NULL, 42, NULL, &outcome),
               (mqvpn_path_handle_t)-1);
-    /* fd<0 also rejected */
+    /* fd -1 requires a configured callback; lower sentinels are invalid. */
     mqvpn_client_t *c = make_test_client();
     ASSERT_EQ(mqvpn_client_add_path_fd_with_outcome(c, -1, NULL, &outcome),
+              (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_add_path_fd_with_outcome(c, -2, NULL, &outcome),
               (mqvpn_path_handle_t)-1);
     mqvpn_client_destroy(c);
 }
@@ -2830,6 +3118,15 @@ main(void)
     run_get_paths_null_safety();
     run_client_remove_path();
     run_client_add_path_max();
+    run_callback_path_without_send_callback_is_rejected();
+    run_callback_path_with_result_callback_sends_and_accounts_once();
+    run_callback_path_eagain_does_not_close_or_account();
+    run_callback_path_hard_error_uses_attached_path_dead_policy();
+    run_callback_path_partial_send_fails_closed_without_accounting();
+    run_callback_path_remove_readd_preserves_live_xquic_binding_slot();
+    run_fd_path_never_invokes_send_callback();
+    run_callback_path_accepts_legacy_void_callback();
+    run_callback_path_result_callback_is_gated_by_struct_size();
 
     /* TUN control tests */
     run_client_set_tun_active();

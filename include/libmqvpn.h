@@ -17,9 +17,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #ifdef _WIN32
+#  include <basetsd.h>
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+typedef SSIZE_T ssize_t;
 #else
+#  include <sys/types.h>  /* ssize_t */
 #  include <sys/socket.h> /* socklen_t, struct sockaddr */
 #endif
 
@@ -379,6 +382,14 @@ typedef void (*mqvpn_send_packet_fn)(mqvpn_path_handle_t path, const uint8_t *pk
                                      size_t len, const struct sockaddr *peer,
                                      socklen_t peer_len, void *user_ctx);
 
+/* Result-bearing counterpart for callback-backed logical paths. Return len
+ * after accepting the complete datagram, -EAGAIN for temporary backpressure,
+ * or another negative errno value for a hard send failure. Partial positive
+ * results are rejected because UDP datagrams are atomic. */
+typedef ssize_t (*mqvpn_send_packet_ex_fn)(mqvpn_path_handle_t path, const uint8_t *pkt,
+                                           size_t len, const struct sockaddr *peer,
+                                           socklen_t peer_len, void *user_ctx);
+
 typedef void (*mqvpn_tunnel_closed_fn)(mqvpn_error_t reason, void *user_ctx);
 
 typedef void (*mqvpn_ready_for_tun_fn)(void *user_ctx);
@@ -432,6 +443,10 @@ typedef struct {
     /* Reconnect control — appended under ABI 2 (additive struct_size
      * growth; older callers with a shorter struct leave this NULL). */
     void (*reconnect_scheduled)(int delay_sec, void *user_ctx);
+
+    /* Result-bearing callback-backed path send — ABI-appended under ABI 2.
+     * Access is gated by struct_size; NULL preserves fd/legacy-callback mode. */
+    mqvpn_send_packet_ex_fn send_packet_ex;
 } mqvpn_client_callbacks_t;
 
 #define MQVPN_CLIENT_CALLBACKS_INIT                      \
@@ -655,6 +670,9 @@ MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
 MQVPN_API int mqvpn_client_connect(mqvpn_client_t *client);
 MQVPN_API int mqvpn_client_disconnect(mqvpn_client_t *client);
 
+/* fd >= 0 adds a normal socket-backed path. fd == -1 adds a callback-backed
+ * logical path and is accepted only when send_packet_ex or legacy send_packet
+ * is configured; all other negative values are rejected. */
 MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd(mqvpn_client_t *client, int fd,
                                                        const mqvpn_path_desc_t *desc);
 
@@ -665,7 +683,8 @@ MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd(mqvpn_client_t *client, i
  * mqvpn_client_add_path_fd().
  *
  * Returns the path handle (>= 0) on success, or -1 if the slot table is
- * full / args are invalid (in which case *outcome is not written).
+ * full / args are invalid (in which case *outcome is not written). fd == -1
+ * has the same callback-backed-path admission rule as mqvpn_client_add_path_fd.
  *
  * Use this in platform recovery paths (RTM_NEWLINK / NotifyUnicastIpAddress
  * Change / NWPathMonitor) where the caller needs to distinguish:

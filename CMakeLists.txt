@@ -673,6 +673,23 @@ if(BUILD_TESTING)
     set_target_properties(test_conn_settings PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
+
+    # Public client API tests are platform-independent and cover callback-
+    # backed logical paths used by the Darwin relay adapter. Drive the real
+    # file-local xquic write callback through a hidden test-only seam.
+    add_executable(test_api tests/test_api.c)
+    target_link_libraries(test_api mqvpn_lib ${XQUIC_LIB} ${SSL_LIB}
+                          ${CRYPTO_LIB} c++)
+    target_include_directories(test_api PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_compile_definitions(mqvpn_lib PRIVATE MQVPN_API_TEST_SEAM)
+    target_compile_definitions(test_api PRIVATE MQVPN_API_TEST_SEAM)
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        target_compile_definitions(test_api PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
+    endif()
+    set_target_properties(test_api PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_api COMMAND test_api)
 endif()
 
 else() # NOT WIN32, NOT APPLE — Linux
@@ -901,7 +918,11 @@ if(BUILD_TESTING)
     # libmqvpn public API test (links libmqvpn + xquic)
     add_executable(test_api tests/test_api.c)
     target_link_libraries(test_api mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
-    target_include_directories(test_api PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_include_directories(test_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    # The API test drives the real file-local xquic write callback through a
+    # narrow hidden wrapper. Keep that seam out of non-test library builds.
+    target_compile_definitions(mqvpn_lib PRIVATE MQVPN_API_TEST_SEAM)
+    target_compile_definitions(test_api PRIVATE MQVPN_API_TEST_SEAM)
     if(MQVPN_HYBRID_TCP_LANE_BUILD)
         # Lets test_api compile the hybrid-only tests (tcp_max_flows
         # pool-bound warn); without it those #ifdef blocks are vacuous.

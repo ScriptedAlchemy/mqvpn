@@ -73,7 +73,8 @@
 #define HANDSHAKE_STALL_TIMEOUT_MS 5000
 /* PATH_RECREATE_* and PATH_STABLE_THRESHOLD_US relocated to path_state_machine.h
  * for PR4 — shared with path_state_machine.c. */
-#define SOCKET_BUF_SIZE (7 * 1024 * 1024) /* 7 MiB socket buffer */
+#define SOCKET_BUF_SIZE           (7 * 1024 * 1024) /* 7 MiB socket buffer */
+#define CALLBACK_PATH_FD_SENTINEL 0
 
 /* ─── Forward declarations ─── */
 
@@ -257,6 +258,11 @@ struct mqvpn_client_s {
 
     /* Multipath (Level 1) */
     path_entry_t paths[MQVPN_MAX_PATHS];
+    /* path_entry_t's lifecycle invariant uses fd >= 0 as the platform-
+     * attached sentinel. Callback-backed logical paths have no kernel fd,
+     * so they use an internal non-syscall sentinel in path_entry_t and this
+     * side table is the authoritative send-mode discriminator. */
+    uint8_t callback_paths[MQVPN_MAX_PATHS];
     int n_paths;
     int64_t next_path_handle;
     int multipath_ready; /* 1 after cb_ready_to_create_path */
@@ -582,6 +588,16 @@ first_active_idx(const mqvpn_client_t *c)
     return -1;
 }
 
+static int
+path_is_callback_backed(const mqvpn_client_t *c, const path_entry_t *p)
+{
+    if (!c || !p) return 0;
+    for (int i = 0; i < c->n_paths; i++) {
+        if (p == &c->paths[i]) return c->callback_paths[i] != 0;
+    }
+    return 0;
+}
+
 /* Returns the fd of the first active path slot, or -1 if none.
  *
  * cb_write_socket() (no path_id) and get_fd_for_path()'s fallback both
@@ -601,8 +617,11 @@ __attribute__((visibility("hidden")))
 int
 mqvpn_client_first_active_fd(const mqvpn_client_t *c)
 {
-    int idx = first_active_idx(c);
-    return idx >= 0 ? c->paths[idx].fd : -1;
+    if (!c) return -1;
+    for (int i = 0; i < c->n_paths; i++) {
+        if (c->paths[i].platform_attached && !c->callback_paths[i]) return c->paths[i].fd;
+    }
+    return -1;
 }
 
 /* Resolve the path slot used for sending on an xquic path_id, falling back
@@ -641,7 +660,7 @@ static int
 get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     path_entry_t *p = get_path_entry_for_send(c, xqc_path_id);
-    return p ? p->fd : -1;
+    return p && !path_is_callback_backed(c, p) ? p->fd : -1;
 }
 
 /* Pick the next active path index for the next handshake attempt.
@@ -931,6 +950,15 @@ client_validate_new_args(const mqvpn_config_t *cfg, const mqvpn_client_callbacks
     return 1;
 }
 
+static int
+client_callbacks_have_send_packet_ex(const mqvpn_client_callbacks_t *cbs)
+{
+    if (!cbs) return 0;
+    const size_t field_end =
+        offsetof(mqvpn_client_callbacks_t, send_packet_ex) + sizeof(cbs->send_packet_ex);
+    return cbs->struct_size >= field_end && cbs->send_packet_ex != NULL;
+}
+
 static void
 client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
                    const mqvpn_client_callbacks_t *cbs, void *user_ctx)
@@ -943,6 +971,9 @@ client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
                           ? cbs->struct_size
                           : sizeof(*cbs);
     memcpy(&c->cbs, cbs, cbs_size);
+    /* The field is ABI-appended. Even if a legacy caller happens to have
+     * nonzero bytes beyond its declared table, struct_size is authoritative. */
+    if (!client_callbacks_have_send_packet_ex(cbs)) c->cbs.send_packet_ex = NULL;
     c->user_ctx = user_ctx; // lgtm[cpp/stack-address-escape]
     c->log_level = cfg->log_level;
     c->state = MQVPN_STATE_IDLE;
@@ -1084,7 +1115,50 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 static ssize_t
 path_send_dead_retcode(const mqvpn_client_t *c)
 {
-    return (mqvpn_client_first_active_fd(c) >= 0) ? XQC_SOCKET_EAGAIN : XQC_SOCKET_ERROR;
+    return (first_active_idx(c) >= 0) ? XQC_SOCKET_EAGAIN : XQC_SOCKET_ERROR;
+}
+
+/* One datagram send boundary for fd-backed and callback-backed paths.
+ * Returns xquic's retry/hard-error sentinels or the full datagram length.
+ * All accounting happens here so callers cannot double-count a callback
+ * success or count a retry/partial/hard failure. */
+static ssize_t
+client_send_packet_on_path(mqvpn_client_t *c, path_entry_t *p, const unsigned char *buf,
+                           size_t size, const struct sockaddr *peer, socklen_t peerlen,
+                           ssize_t hard_error_retcode)
+{
+    if (!p || !p->platform_attached) return hard_error_retcode;
+
+    ssize_t res;
+    if (path_is_callback_backed(c, p)) {
+        if (c->cbs.send_packet_ex) {
+            res = c->cbs.send_packet_ex(p->handle, buf, size, peer, peerlen, c->user_ctx);
+        } else if (c->cbs.send_packet) {
+            c->cbs.send_packet(p->handle, buf, size, peer, peerlen, c->user_ctx);
+            res = (ssize_t)size;
+        } else {
+            return hard_error_retcode;
+        }
+
+        if (res == -(ssize_t)EAGAIN || res == -(ssize_t)EWOULDBLOCK)
+            return XQC_SOCKET_EAGAIN;
+    } else {
+        if (p->fd < 0) return hard_error_retcode;
+        do {
+            /* Winsock sendto() len is int; size is bounded by the path MTU. */
+            res = sendto(p->fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
+        } while (res < 0 && errno == EINTR);
+        if (res < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return XQC_SOCKET_EAGAIN;
+    }
+
+    if (res < 0 || (size_t)res != size) return hard_error_retcode;
+
+    c->bytes_tx += (uint64_t)size;
+    p->bytes_tx += (uint64_t)size;
+    c->tx_sends++;
+    c->tx_datagrams++;
+    return res;
 }
 
 static ssize_t
@@ -1104,23 +1178,9 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
         active_idx = pidx;
     else
         active_idx = first_active_idx(c);
-    int fd = (active_idx >= 0) ? c->paths[active_idx].fd : -1;
-    if (fd < 0) return XQC_SOCKET_ERROR;
-
-    ssize_t res;
-    do {
-        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
-        res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
-    } while (res < 0 && errno == EINTR);
-    if (res < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
-        return XQC_SOCKET_ERROR;
-    }
-    c->bytes_tx += (uint64_t)res;
-    c->paths[active_idx].bytes_tx += (uint64_t)res;
-    c->tx_sends++; /* one sendto = one datagram; keeps the batching factor */
-    c->tx_datagrams++;
-    return res;
+    if (active_idx < 0) return XQC_SOCKET_ERROR;
+    return client_send_packet_on_path(c, &c->paths[active_idx], buf, size, peer, peerlen,
+                                      XQC_SOCKET_ERROR);
 }
 
 static ssize_t
@@ -1129,26 +1189,9 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
-    int fd = get_fd_for_path(c, path_id);
-    if (fd < 0) return path_send_dead_retcode(c);
-
-    ssize_t res;
-    do {
-        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
-        res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
-    } while (res < 0 && errno == EINTR);
-    if (res < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
-        return path_send_dead_retcode(c);
-    }
-    c->bytes_tx += (uint64_t)res;
-    {
-        path_entry_t *p = find_path_by_xqc_id(c, path_id);
-        if (p) p->bytes_tx += (uint64_t)res;
-    }
-    c->tx_sends++; /* one sendto = one datagram; keeps the batching factor */
-    c->tx_datagrams++;
-    return res;
+    path_entry_t *p = get_path_entry_for_send(c, path_id);
+    return client_send_packet_on_path(c, p, buf, size, peer, peerlen,
+                                      path_send_dead_retcode(c));
 }
 
 #if defined(__linux__)
@@ -1159,7 +1202,18 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
     path_entry_t *p = get_path_entry_for_send(c, path_id);
-    if (!p || p->fd < 0) return path_send_dead_retcode(c);
+    if (!p) return path_send_dead_retcode(c);
+    if (path_is_callback_backed(c, p)) {
+        unsigned int sent = 0;
+        for (; sent < vlen; sent++) {
+            ssize_t r = client_send_packet_on_path(c, p, msg_iov[sent].iov_base,
+                                                   msg_iov[sent].iov_len, peer, peerlen,
+                                                   path_send_dead_retcode(c));
+            if (r < 0) return sent > 0 ? (ssize_t)sent : r;
+        }
+        return (ssize_t)sent;
+    }
+    if (p->fd < 0) return path_send_dead_retcode(c);
 
     mqvpn_tx_counters_t tx = {0};
     int was_gso = !p->gso_disabled;
@@ -1202,6 +1256,33 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
      * branch is rare — no spam risk. */
     LOG_E(c, "batch send: %s", strerror(send_errno));
     return path_send_dead_retcode(c); /* same downgrade policy as cb_write_socket_ex */
+}
+#endif
+
+#ifdef MQVPN_API_TEST_SEAM
+#  if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#  endif
+ssize_t
+mqvpn_client_test_write_socket_ex(mqvpn_client_t *c, uint64_t xqc_path_id,
+                                  const uint8_t *pkt, size_t len,
+                                  const struct sockaddr *peer, socklen_t peer_len)
+{
+    if (!c || !pkt) return XQC_SOCKET_ERROR;
+    cli_conn_t conn = {.client = c};
+    return cb_write_socket_ex(xqc_path_id, pkt, len, peer, peer_len, &conn);
+}
+
+#  if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#  endif
+ssize_t
+mqvpn_client_test_write_socket(mqvpn_client_t *c, const uint8_t *pkt, size_t len,
+                               const struct sockaddr *peer, socklen_t peer_len)
+{
+    if (!c || !pkt) return XQC_SOCKET_ERROR;
+    cli_conn_t conn = {.client = c};
+    return cb_write_socket(pkt, len, peer, peer_len, &conn);
 }
 #endif
 
@@ -3160,7 +3241,9 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
                                       const mqvpn_path_desc_t *desc,
                                       mqvpn_add_path_outcome_t *outcome)
 {
-    if (!c || fd < 0) return -1;
+    if (!c || fd < -1) return -1;
+    const int callback_backed = (fd == -1);
+    if (callback_backed && !c->cbs.send_packet_ex && !c->cbs.send_packet) return -1;
     ASSERT_TICK_THREAD(c);
 
     /* Reuse a CLOSED slot if available, otherwise append.
@@ -3192,18 +3275,26 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
      * applied inside path_on_add_fd. */
     path_entry_init(p);
     p->handle = c->next_path_handle++;
-    p->fd = fd;
+    c->callback_paths[idx] = (uint8_t)callback_backed;
+    /* The FSM's platform-attached invariant predates logical paths and uses
+     * fd >= 0 as its validity bit. The side table above prevents this
+     * sentinel from ever reaching sendto/get_fd_for_path. */
+    p->fd = callback_backed ? CALLBACK_PATH_FD_SENTINEL : fd;
     /* fd numbers are kernel-recycled; reset on every assignment */
     p->gso_disabled = 0;
 
     /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
-    int bufsize = SOCKET_BUF_SIZE;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bufsize, sizeof(bufsize));
+    if (!callback_backed) {
+        int bufsize = SOCKET_BUF_SIZE;
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bufsize, sizeof(bufsize));
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bufsize, sizeof(bufsize));
 #ifdef SO_SNDBUFFORCE
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, (const char *)&bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, (const char *)&bufsize, sizeof(bufsize));
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, (const char *)&bufsize,
+                   sizeof(bufsize));
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, (const char *)&bufsize,
+                   sizeof(bufsize));
 #endif
+    }
 
     if (desc) {
         memcpy(p->name, desc->iface, sizeof(p->name));
@@ -3270,6 +3361,7 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
     path_on_event(c, p, PATH_EVENT_REMOVE_API, &ctx);
+    if (path_is_callback_backed(c, p)) path_on_event(c, p, PATH_EVENT_FD_CLOSED, &ctx);
     return MQVPN_OK;
 }
 
@@ -3306,6 +3398,7 @@ mqvpn_client_on_platform_path_dropped(mqvpn_client_t *c, mqvpn_path_handle_t han
 
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
     path_on_event(c, p, PATH_EVENT_PLATFORM_DROP, &ctx);
+    if (path_is_callback_backed(c, p)) path_on_event(c, p, PATH_EVENT_FD_CLOSED, &ctx);
     return MQVPN_OK;
 }
 
