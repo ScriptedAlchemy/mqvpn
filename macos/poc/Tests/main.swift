@@ -261,14 +261,49 @@ if let listener = loopbackListener(),
     } else {
         check(false, "active relay exposes its production logical-send callback")
     }
-    let liveStop = DispatchSemaphore(value: 0)
-    liveBinder.stop {
-        check(liveBinder.snapshot() == .stopped && liveEngine.onLogicalPathSend == nil,
-              "Stop completion runs after state erasure and tick-thread hook cleanup")
-        liveStop.signal()
+    // Hold the real engine tick thread before calling Stop twice. Both calls
+    // therefore queue behind one actual pending cleanup fence, making an
+    // early second completion observable rather than timing-dependent.
+    let tickEntered = DispatchSemaphore(value: 0)
+    let releaseTick = DispatchSemaphore(value: 0)
+    check(liveEngine.perform {
+        tickEntered.signal()
+        _ = releaseTick.wait(timeout: .now() + 2)
+    }, "host test can place a real tick-thread fence before concurrent Stop")
+    check(tickEntered.wait(timeout: .now() + 1) == .success,
+          "engine tick thread reached the concurrent Stop fence")
+    let firstStop = DispatchSemaphore(value: 0)
+    let secondStop = DispatchSemaphore(value: 0)
+    let completionLock = NSLock()
+    var completionObservedLiveHook = false
+    let callers = DispatchGroup()
+    for done in [firstStop, secondStop] {
+        callers.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            liveBinder.stop {
+                let clean = liveBinder.snapshot() == .stopped && liveEngine.onLogicalPathSend == nil
+                completionLock.lock()
+                completionObservedLiveHook = completionObservedLiveHook || !clean
+                completionLock.unlock()
+                done.signal()
+            }
+            callers.leave()
+        }
     }
-    check(liveStop.wait(timeout: .now() + 3) == .success,
-          "active relay Stop waits for tick-thread teardown completion")
+    callers.wait()
+    _ = liveBinder.snapshot() // drains both stop jobs while the tick fence is held
+    check(firstStop.wait(timeout: .now()) == .timedOut &&
+          secondStop.wait(timeout: .now()) == .timedOut,
+          "neither concurrent Stop completion runs before the shared tick cleanup fence")
+    releaseTick.signal()
+    check(firstStop.wait(timeout: .now() + 3) == .success &&
+          secondStop.wait(timeout: .now() + 3) == .success,
+          "all concurrent Stop callers complete after one tick-thread teardown")
+    completionLock.lock()
+    let completionWasEarly = completionObservedLiveHook
+    completionLock.unlock()
+    check(!completionWasEarly,
+          "each Stop completion observes erased state and a cleared engine callback")
     check(raceFinished.wait(timeout: .now() + 1) == .success,
           "a concurrent real logical send cannot deadlock Stop teardown")
     if let capturedSend, let activeHandle = activeSnapshot.pathHandle {

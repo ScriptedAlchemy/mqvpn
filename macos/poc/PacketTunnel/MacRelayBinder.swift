@@ -25,7 +25,9 @@ final class MacRelayBinder {
     private var readSource: DispatchSourceRead?
     private var timer: DispatchSourceTimer?
     private var stopped = true
-    private var stopCompleted = false
+    private var teardownStarted = false
+    private var teardownComplete = false
+    private var stopWaiters: [() -> Void] = []
     private var acceptsCoreSends = false
 
     /// Called on the binder's serial queue. Consumers should copy the value;
@@ -61,7 +63,7 @@ final class MacRelayBinder {
 
     func start() {
         queue.async { [weak self] in
-            guard let self, self.stopped, !self.stopCompleted else { return }
+            guard let self, self.stopped, !self.teardownStarted else { return }
             self.stopped = false
             self.setCoreSendsEnabled(true)
             self.startTimer()
@@ -84,8 +86,13 @@ final class MacRelayBinder {
         setCoreSendsEnabled(false)
         queue.async { [weak self] in
             guard let self else { Self.finish(completion); return }
-            guard !self.stopCompleted else { Self.finish(completion); return }
-            self.stopCompleted = true
+            if self.teardownComplete {
+                Self.finish(completion)
+                return
+            }
+            self.stopWaiters.append(completion)
+            guard !self.teardownStarted else { return }
+            self.teardownStarted = true
             self.stopped = true
             self.timer?.cancel()
             self.timer = nil
@@ -93,8 +100,8 @@ final class MacRelayBinder {
             self.closeTransport()
             self.state.stop()
             self.publishSnapshot()
-            self.clearEngineRelayHooks(pathHandle: handle) {
-                Self.finish(completion)
+            self.clearEngineRelayHooks(pathHandle: handle) { [weak self] in
+                self?.queue.async { self?.finishStopWaiters() }
             }
         }
     }
@@ -385,6 +392,17 @@ final class MacRelayBinder {
 
     private static func finish(_ completion: @escaping () -> Void) {
         DispatchQueue.global(qos: .userInitiated).async(execute: completion)
+    }
+
+    /// Binder-queue-only fanout. Every Stop issued while the tick-thread
+    /// cleanup fence is pending shares this point; none can report success
+    /// before the logical path and callback are actually gone.
+    private func finishStopWaiters() {
+        guard !teardownComplete else { return }
+        teardownComplete = true
+        let waiters = stopWaiters
+        stopWaiters.removeAll()
+        for waiter in waiters { Self.finish(waiter) }
     }
 
     private func publishSnapshot() {
