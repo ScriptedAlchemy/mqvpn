@@ -465,7 +465,8 @@ final class RelayEngine {
         case .hello:
             validControlPayload = decoded.payload_length == 0
         case .keepalive:
-            validControlPayload = decoded.payload_length == 0 || decoded.payload_length == 8
+            validControlPayload = decoded.payload_length == 0 ||
+                decoded.payload_length == RelayPathChallenge.nonceSize
         case .helloAck, .dataToServer, .dataToMac:
             validControlPayload = true
         }

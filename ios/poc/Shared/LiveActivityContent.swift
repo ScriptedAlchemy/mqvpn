@@ -68,6 +68,17 @@ enum LiveActivitySessionPolicy {
     }
 }
 
+/// App and packet-provider processes can race asynchronous ActivityKit writes.
+/// Accept only a strictly newer sample so a delayed task cannot move the
+/// Dynamic Island backwards or extend the life of stale rates.
+enum LiveActivityUpdateOrder {
+    static func shouldApply(currentSampledAt: Double?,
+                            candidateSampledAt: Double) -> Bool {
+        guard let currentSampledAt else { return true }
+        return candidateSampledAt > currentSampledAt
+    }
+}
+
 /// Deterministic duplicate and mode-switch policy shared by the foreground
 /// requester and provider updater. There is exactly one current activity, and
 /// it must match the running mode.
@@ -87,8 +98,8 @@ enum LiveActivitySelection {
 /// synchronous scheduling closure, so the provider cannot await ActivityKit.
 enum LiveActivityStopSequence {
     static func perform(transportTeardown: () async -> Void,
-                        scheduleActivityCleanup: () -> Void) async {
+                        activityCleanup: () async -> Void) async {
         await transportTeardown()
-        scheduleActivityCleanup()
+        await activityCleanup()
     }
 }

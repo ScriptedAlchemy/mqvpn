@@ -74,6 +74,12 @@ enum MqvpnLiveActivityLifecycle {
             liveActivityLog.notice("no exact-mode foreground-created Live Activity to update")
             return false
         }
+        guard LiveActivityUpdateOrder.shouldApply(
+            currentSampledAt: current.content.state.sampledAt,
+            candidateSampledAt: state.sampledAt) else {
+            liveActivityLog.debug("discarded stale Live Activity update mode=\(mode.rawValue, privacy: .public)")
+            return false
+        }
         let final = ActivityContent(state: state, staleDate: nil)
         for activity in activities where plan.endIDs.contains(activity.id) {
             await activity.end(final, dismissalPolicy: .immediate)
@@ -115,7 +121,7 @@ enum MqvpnLiveActivityLifecycle {
 
 protocol MqvpnLiveActivityReporting: AnyObject {
     func start()
-    func stopBestEffort()
+    func stop() async
 }
 
 /// Packet-provider rate reporter. It reads only the lock-protected production
@@ -151,7 +157,7 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
         }
     }
 
-    func stopBestEffort() {
+    func stop() async {
         let shouldEnd: Bool = queue.sync {
             guard !stopped else { return false }
             stopped = true
@@ -161,11 +167,8 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
             return true
         }
         guard shouldEnd else { return }
-        // The foreground app already ends on user Stop. Provider-side cleanup
-        // covers system/error stops but is intentionally unawaited so
-        // ActivityKit can never hold up NetworkExtension teardown.
-        Task { await MqvpnLiveActivityLifecycle.endImmediately() }
-        liveActivityLog.notice("provider Live Activity cleanup scheduled after transport stop")
+        await MqvpnLiveActivityLifecycle.endImmediately()
+        liveActivityLog.notice("provider Live Activity cleanup completed after transport stop")
     }
 
     private func publish() {

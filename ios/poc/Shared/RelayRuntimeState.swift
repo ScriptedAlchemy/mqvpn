@@ -32,12 +32,19 @@ struct RelaySnapshot: Codable, Equatable {
 }
 
 enum RelayDashboard {
+    static let freshnessWindow: Double = 6
+
     static func statusLabel(tunnelStatus: TunnelStatus,
-                            snapshot: TunnelSnapshot?) -> String {
+                            snapshot: TunnelSnapshot?,
+                            now: Double = Date().timeIntervalSince1970) -> String {
         guard tunnelStatus == .connected || tunnelStatus == .reasserting else {
             return tunnelStatus == .connecting ? "Relay starting" : "Relay stopped"
         }
-        return snapshot?.relay?.isReady == true ? "Relay ready" : "Relay waiting"
+        guard let snapshot,
+              now - snapshot.timestamp <= freshnessWindow else {
+            return "Relay stale"
+        }
+        return snapshot.relay?.isReady == true ? "Relay ready" : "Relay waiting"
     }
 }
 
@@ -100,6 +107,29 @@ enum RelayFrameType: Equatable {
     case dataToServer
     case dataToMac
     case keepalive
+}
+
+/// Return-routability check for a migrated Mac endpoint, modelled on QUIC
+/// path validation (RFC 9000 s8.2). The nonce is echoed verbatim, so the
+/// comparison runs in constant time and the challenge has a bounded lifetime:
+/// an endpoint that never answers must not pin migration state forever.
+enum RelayPathChallenge {
+    static let nonceSize = 8
+    /// Long enough for several Mac HELLO retries on a busy LAN, short enough
+    /// that a silent endpoint is abandoned well inside the idle timeout.
+    static let timeout: Double = 5
+
+    static func matches(response: Data, expected: Data) -> Bool {
+        guard response.count == nonceSize, expected.count == nonceSize else { return false }
+        var difference: UInt8 = 0
+        for (lhs, rhs) in zip(response, expected) { difference |= lhs ^ rhs }
+        return difference == 0
+    }
+
+    static func isExpired(since: Double?, now: Double) -> Bool {
+        guard let since else { return false }
+        return now - since > timeout
+    }
 }
 
 enum RelayReplayEligibility {
@@ -169,6 +199,7 @@ struct RelaySessionState {
     private var peer: RelayPeerIdentity?
     private var pendingPeerIdentity: RelayPeerIdentity?
     private var pathChallengeNonce: Data?
+    private var pendingPeerSince: Double?
     private var lastAuthenticated: Double?
     private var lanRxBytes: UInt64 = 0
     private var lanTxBytes: UInt64 = 0
@@ -236,11 +267,23 @@ struct RelaySessionState {
             lastAuthenticated = now
             error = nil
             if peer == frame.peer {
+                pendingPeerIdentity = nil
+                pathChallengeNonce = nil
+                pendingPeerSince = nil
                 return [.sendHelloAck(sessionID: frame.sessionID)]
             }
+            // The Mac re-sends HELLO every second. Reusing the outstanding
+            // nonce for an unchanged pending peer keeps an in-flight response
+            // valid; minting a fresh one each retry would invalidate the
+            // answer already on the wire and never converge under loss.
+            if pendingPeerIdentity == frame.peer, let nonce = pathChallengeNonce {
+                return [.sendHelloAck(sessionID: frame.sessionID),
+                        .sendPathChallenge(nonce: nonce)]
+            }
             pendingPeerIdentity = frame.peer
-            let nonce = Data((0..<8).map { _ in UInt8.random(in: 0...255) })
+            let nonce = Data((0..<RelayPathChallenge.nonceSize).map { _ in UInt8.random(in: 0...255) })
             pathChallengeNonce = nonce
+            pendingPeerSince = now
             return [.sendHelloAck(sessionID: frame.sessionID),
                     .sendPathChallenge(nonce: nonce)]
 
@@ -262,6 +305,11 @@ struct RelaySessionState {
 
     @discardableResult
     mutating func expireIfIdle(now: Double) -> Bool {
+        if RelayPathChallenge.isExpired(since: pendingPeerSince, now: now) {
+            pendingPeerIdentity = nil
+            pathChallengeNonce = nil
+            pendingPeerSince = nil
+        }
         guard let lastAuthenticated,
               now - lastAuthenticated > idleTimeout else { return false }
         clearSession()
@@ -312,12 +360,14 @@ struct RelaySessionState {
         if frame.payload.isEmpty {
             return [.drop(.peer)]
         }
-        guard frame.payload.count == 8, frame.payload == pathChallengeNonce else {
+        guard let expected = pathChallengeNonce,
+              RelayPathChallenge.matches(response: frame.payload, expected: expected) else {
             return [.drop(.payload)]
         }
         peer = pendingPeerIdentity
         pendingPeerIdentity = nil
         pathChallengeNonce = nil
+        pendingPeerSince = nil
         lastAuthenticated = now
         error = nil
         return []
@@ -328,6 +378,7 @@ struct RelaySessionState {
         peer = nil
         pendingPeerIdentity = nil
         pathChallengeNonce = nil
+        pendingPeerSince = nil
         lastAuthenticated = nil
     }
 }

@@ -295,11 +295,16 @@ let relayWire = TunnelSnapshot(
 let relayWireRoundTrip = try! ProviderMessage.decode(ProviderMessage.encode(relayWire))
 check(relayWireRoundTrip.operatingMode == .macRelay && relayWireRoundTrip.relay?.isReady == true,
       "relay snapshot provider round-trip preserves readiness")
-check(RelayDashboard.statusLabel(tunnelStatus: .connected, snapshot: relayWireRoundTrip) == "Relay ready",
+check(RelayDashboard.statusLabel(tunnelStatus: .connected, snapshot: relayWireRoundTrip,
+                                 now: 10) == "Relay ready",
       "relay dashboard labels an authenticated ready relay")
 check(RelayDashboard.statusLabel(tunnelStatus: .connected,
-                                 snapshot: TunnelSnapshot.relayStopped(timestamp: 11)) == "Relay waiting",
+                                 snapshot: TunnelSnapshot.relayStopped(timestamp: 11),
+                                 now: 11) == "Relay waiting",
       "relay dashboard never labels a mere listener as ready")
+check(RelayDashboard.statusLabel(tunnelStatus: .connected, snapshot: relayWireRoundTrip,
+                                 now: 10 + RelayDashboard.freshnessWindow + 0.1) == "Relay stale",
+      "relay dashboard reports a snapshot older than the freshness window as stale")
 
 // ── Live Activity production-rate sampling ──
 // These catch displaying cumulative bytes as a speed, carrying a stale rate
@@ -476,11 +481,13 @@ runAsync {
             await Task.yield()
             stopEvents.append("transport-end")
         },
-        scheduleActivityCleanup: {
-            stopEvents.append("activity-scheduled")
+        activityCleanup: {
+            stopEvents.append("activity-begin")
+            await Task.yield()
+            stopEvents.append("activity-end")
         })
-    check(stopEvents == ["transport-begin", "transport-end", "activity-scheduled"],
-          "transport teardown completes before bounded ActivityKit cleanup is scheduled")
+    check(stopEvents == ["transport-begin", "transport-end", "activity-begin", "activity-end"],
+          "transport teardown completes before ActivityKit cleanup and Stop awaits both")
 }
 
 // ── Mac Relay authenticated session state ──
@@ -598,6 +605,53 @@ let competingHello = RelayInboundFrame(type: .hello, sessionID: 8, sequence: 1,
 check(relayState.handleMacFrame(competingHello, now: 3) == [.drop(.session)],
       "a second Mac session is rejected while the first is live")
 
+// The Mac re-sends HELLO once per second. A fresh nonce per retry would
+// invalidate the response already on the wire, so migration would never
+// converge on a lossy LAN.
+var retryState = RelaySessionState(idleTimeout: 15)
+retryState.updateInterfaces(wifi: "en0", cellular: "pdp_ip0")
+_ = retryState.handleMacFrame(hello, now: 1)
+let firstChallenge = pathChallengeNonce(in: retryState.handleMacFrame(migratedHello, now: 2))
+let retryHello = RelayInboundFrame(type: .hello, sessionID: 7, sequence: 3,
+                                   payload: Data(), peer: peerB,
+                                   authenticated: true, replayAccepted: true)
+let retryChallenge = pathChallengeNonce(in: retryState.handleMacFrame(retryHello, now: 3))
+check(firstChallenge != nil && firstChallenge == retryChallenge,
+      "a repeated HELLO from the same pending peer reuses the outstanding nonce")
+let lateEcho = RelayInboundFrame(type: .keepalive, sessionID: 7, sequence: 4,
+                                 payload: firstChallenge ?? Data(), peer: peerB,
+                                 authenticated: true, replayAccepted: true)
+check(retryState.handleMacFrame(lateEcho, now: 3.1) == [] && retryState.activePeer == peerB,
+      "an echo answering the first challenge still promotes after a HELLO retry")
+
+// A candidate that never answers must not pin migration state until the
+// whole session expires.
+var abandonState = RelaySessionState(idleTimeout: 15)
+abandonState.updateInterfaces(wifi: "en0", cellular: "pdp_ip0")
+_ = abandonState.handleMacFrame(hello, now: 1)
+let abandonedNonce = pathChallengeNonce(in: abandonState.handleMacFrame(migratedHello, now: 2))
+check(!abandonState.expireIfIdle(now: 2 + RelayPathChallenge.timeout + 0.1),
+      "abandoning an unanswered challenge does not expire the live session")
+check(abandonState.activePeer == peerA && abandonState.pendingPeer == nil,
+      "an unanswered path challenge is abandoned and the committed peer survives")
+let staleEcho = RelayInboundFrame(type: .keepalive, sessionID: 7, sequence: 9,
+                                  payload: abandonedNonce ?? Data(), peer: peerB,
+                                  authenticated: true, replayAccepted: true)
+check(abandonState.handleMacFrame(staleEcho, now: 8) == [.drop(.peer)],
+      "an echo arriving after the challenge is abandoned cannot promote the peer")
+
+check(RelayPathChallenge.matches(response: Data([1, 2, 3, 4, 5, 6, 7, 8]),
+                                 expected: Data([1, 2, 3, 4, 5, 6, 7, 8])),
+      "path challenge accepts the exact nonce")
+check(!RelayPathChallenge.matches(response: Data([1, 2, 3, 4, 5, 6, 7, 9]),
+                                  expected: Data([1, 2, 3, 4, 5, 6, 7, 8])),
+      "path challenge rejects a one-bit difference")
+check(!RelayPathChallenge.matches(response: Data([1, 2, 3, 4]),
+                                  expected: Data([1, 2, 3, 4, 5, 6, 7, 8])),
+      "path challenge rejects a truncated nonce")
+check(!RelayPathChallenge.matches(response: Data(), expected: Data()),
+      "path challenge rejects an empty nonce pair")
+
 let replayed = RelayInboundFrame(type: .dataToServer, sessionID: 7, sequence: 2,
                                  payload: Data([1, 2]), peer: peerB,
                                  authenticated: true, replayAccepted: false)
@@ -645,6 +699,27 @@ check(!LiveActivitySessionPolicy.shouldEnd(alreadyStarted: true, isTerminal: fal
       LiveActivitySessionPolicy.shouldEnd(alreadyStarted: true, isTerminal: true) &&
       !LiveActivitySessionPolicy.shouldEnd(alreadyStarted: false, isTerminal: true),
       "connecting retains the foreground activity and only a terminal state ends it")
+check(LiveActivityUpdateOrder.shouldApply(currentSampledAt: nil, candidateSampledAt: 10) &&
+      LiveActivityUpdateOrder.shouldApply(currentSampledAt: 10, candidateSampledAt: 11) &&
+      !LiveActivityUpdateOrder.shouldApply(currentSampledAt: 10, candidateSampledAt: 10) &&
+      !LiveActivityUpdateOrder.shouldApply(currentSampledAt: 11, candidateSampledAt: 10),
+      "Live Activity updates never let delayed app/provider tasks regress or duplicate state")
+
+let freshRelayDashboardSnapshot = TunnelSnapshot(
+    timestamp: 100, clientState: -1, connectedSince: 90, footprint: 0,
+    paths: [], operatingMode: .macRelay,
+    relay: RelaySnapshot(
+        wifiAvailable: true, cellularAvailable: true, authenticatedSession: true,
+        listenerInterface: "en0", cellularInterface: "pdp_ip0",
+        lanRxBytes: 1, lanTxBytes: 1, serverRxBytes: 1, serverTxBytes: 1,
+        lastAuthenticated: 100, error: nil))
+check(RelayDashboard.statusLabel(tunnelStatus: .connected,
+                                 snapshot: freshRelayDashboardSnapshot,
+                                 now: 104) == "Relay ready" &&
+      RelayDashboard.statusLabel(tunnelStatus: .connected,
+                                 snapshot: freshRelayDashboardSnapshot,
+                                 now: 107) == "Relay stale",
+      "an unanswered provider ages relay readiness instead of displaying an old ready snapshot")
 check(RelaySocketPlan.fixed.lanListener == .wifi &&
       RelaySocketPlan.fixed.fixedServer == .cellular,
       "LAN listener is Wi-Fi-only and the fixed server socket is cellular-only")
