@@ -93,6 +93,7 @@ struct RelayInboundFrame: Equatable {
 
 enum RelayDropReason: Equatable {
     case authentication
+    case unavailable
     case replay
     case session
     case peer
@@ -168,6 +169,9 @@ struct RelaySessionState {
 
         switch frame.type {
         case .hello:
+            guard wifiInterface != nil, cellularInterface != nil else {
+                return [.drop(.unavailable)]
+            }
             guard frame.payload.isEmpty else { return [.drop(.payload)] }
             if let current = sessionID {
                 guard current == frame.sessionID else { return [.drop(.session)] }

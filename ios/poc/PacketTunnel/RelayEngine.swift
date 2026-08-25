@@ -42,6 +42,7 @@ final class RelayEngine {
     private var outboundSequence: UInt64 = 1
     private var wifiMonitor: NWPathMonitor?
     private var cellularMonitor: NWPathMonitor?
+    private var interfaceProbeInFlight = false
     private var idleTimer: DispatchSourceTimer?
     private var lanFD: Int32 = -1
     private var serverFD: Int32 = -1
@@ -106,25 +107,14 @@ final class RelayEngine {
         let plan = RelaySocketPlan.fixed
         let wifi = NWPathMonitor(requiredInterfaceType: Self.networkType(plan.lanListener))
         let cellular = NWPathMonitor(requiredInterfaceType: Self.networkType(plan.fixedServer))
-        wifi.pathUpdateHandler = { [weak self] path in
-            guard let self, !self.stopped else { return }
-            let interface = path.status == .satisfied
-                ? path.availableInterfaces.first(where: { $0.type == .wifi }) : nil
-            self.reconcileInterfaces(wifi: interface,
-                                     cellular: self.currentCellularInterface())
-        }
-        cellular.pathUpdateHandler = { [weak self] path in
-            guard let self, !self.stopped else { return }
-            let interface = path.status == .satisfied
-                ? path.availableInterfaces.first(where: { $0.type == .cellular }) : nil
-            self.reconcileInterfaces(wifi: self.currentWifiInterface(),
-                                     cellular: interface)
-        }
+        wifi.pathUpdateHandler = { [weak self] _ in self?.probeInterfaces() }
+        cellular.pathUpdateHandler = { [weak self] _ in self?.probeInterfaces() }
         wifiMonitor = wifi
         cellularMonitor = cellular
         // Store both before start: either handler may run immediately.
         wifi.start(queue: queue)
         cellular.start(queue: queue)
+        probeInterfaces()
     }
 
     private static func networkType(_ interfaceClass: RelayInterfaceClass) -> NWInterface.InterfaceType {
@@ -134,14 +124,55 @@ final class RelayEngine {
         }
     }
 
-    private func currentWifiInterface() -> NWInterface? {
-        guard let path = wifiMonitor?.currentPath, path.status == .satisfied else { return nil }
-        return path.availableInterfaces.first { $0.type == .wifi }
+    /// Persistent NWPathMonitor deliveries are triggers only. Device evidence
+    /// showed both deliveries and currentPath can remain stale for minutes in
+    /// a packet-tunnel provider, so every trigger creates bounded one-shot
+    /// monitors whose first delivery is the fresh interface truth.
+    private func probeInterfaces() {
+        guard !stopped, !interfaceProbeInFlight else { return }
+        interfaceProbeInFlight = true
+        var wifiResult: NWInterface?
+        var cellularResult: NWInterface?
+        var pending = 2
+        let finish: () -> Void = { [weak self] in
+            guard let self else { return }
+            pending -= 1
+            guard pending == 0 else { return }
+            self.interfaceProbeInFlight = false
+            guard !self.stopped else { return }
+            self.reconcileInterfaces(wifi: wifiResult, cellular: cellularResult)
+        }
+        probeInterface(.wifi) { interface in
+            wifiResult = interface
+            finish()
+        }
+        probeInterface(.cellular) { interface in
+            cellularResult = interface
+            finish()
+        }
     }
 
-    private func currentCellularInterface() -> NWInterface? {
-        guard let path = cellularMonitor?.currentPath, path.status == .satisfied else { return nil }
-        return path.availableInterfaces.first { $0.type == .cellular }
+    private func probeInterface(_ type: NWInterface.InterfaceType,
+                                completion: @escaping (NWInterface?) -> Void) {
+        let probe = NWPathMonitor(requiredInterfaceType: type)
+        var fired = false
+        probe.pathUpdateHandler = { path in
+            guard !fired else { return }
+            fired = true
+            probe.cancel()
+            probe.pathUpdateHandler = nil
+            let interface = path.status == .satisfied
+                ? path.availableInterfaces.first(where: { $0.type == type }) : nil
+            completion(interface)
+        }
+        probe.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 3) {
+            guard !fired else { return }
+            fired = true
+            probe.cancel()
+            probe.pathUpdateHandler = nil
+            completion(nil)
+        }
     }
 
     private func reconcileInterfaces(wifi: NWInterface?, cellular: NWInterface?) {
@@ -173,8 +204,7 @@ final class RelayEngine {
                 self.eraseSessionSecurityState()
                 relayLog.notice("authenticated relay session expired")
             }
-            self.reconcileInterfaces(wifi: self.currentWifiInterface(),
-                                     cellular: self.currentCellularInterface())
+            self.probeInterfaces()
             self.publishSnapshot()
         }
         timer.resume()
@@ -338,7 +368,6 @@ final class RelayEngine {
             }
         }
         guard decodeResult == MQVPN_RELAY_OK else {
-            state.recordError("Relay authentication or frame validation failed")
             return
         }
 

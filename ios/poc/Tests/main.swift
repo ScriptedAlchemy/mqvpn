@@ -291,6 +291,15 @@ check(RelayDashboard.statusLabel(tunnelStatus: .connected,
 let peerA = RelayPeerIdentity(Data([192, 168, 1, 30, 0x15, 0x43]))
 let peerB = RelayPeerIdentity(Data([192, 168, 1, 31, 0x15, 0x43]))
 var relayState = RelaySessionState(idleTimeout: 15)
+relayState.updateInterfaces(wifi: "en0", cellular: nil)
+check(relayState.handleMacFrame(
+    RelayInboundFrame(type: .hello, sessionID: 7, sequence: 1,
+                      payload: Data(), peer: peerA,
+                      authenticated: true, replayAccepted: true),
+    now: 0.5) == [.drop(.unavailable)],
+    "authenticated HELLO cannot activate a relay without a connected cellular socket")
+check(!relayState.snapshot.authenticatedSession,
+      "unavailable relay sends no ACK and creates no session")
 relayState.updateInterfaces(wifi: "en0", cellular: "pdp_ip0")
 check(relayState.snapshot.wifiAvailable && relayState.snapshot.cellularAvailable,
       "relay reports both injected physical interfaces")
