@@ -30,6 +30,11 @@ final class MqvpnEngine: NSObject {
     var onTunOutput: ((Data) -> Void)?          // -> packetFlow.writePackets
     var onTunnelConfig: ((mqvpn_tunnel_info_t) -> Void)?
     var onTunnelClosed: ((Int32) -> Void)?
+    /// Called synchronously by libmqvpn on the tick thread for a callback-backed
+    /// path. Return the complete datagram length, -EAGAIN, or a hard errno.
+    var onLogicalPathSend: ((mqvpn_path_handle_t, Data) -> Int)?
+    /// Authoritative libmqvpn lifecycle events, delivered on the tick thread.
+    var onPathEvent: ((mqvpn_path_handle_t, mqvpn_path_status_t) -> Void)?
 
     /// Blocks until the client exists on the tick thread — callers may start
     /// PathBinder immediately after return without ordering assumptions.
@@ -154,9 +159,21 @@ final class MqvpnEngine: NSObject {
             engine.onTunnelConfig?(info!.pointee)
         }
         cbs.send_packet = nil                    // fd-path mode: core sends via sendto(fd)
+        cbs.send_packet_ex = { path, packet, length, _, _, ctx in
+            guard let ctx, let packet else { return -Int(ENODEV) }
+            let engine = Unmanaged<MqvpnEngine>.fromOpaque(ctx).takeUnretainedValue()
+            return MqvpnEngine.logicalPathSendResult(
+                engine.onLogicalPathSend, path: path,
+                packet: Data(bytes: packet, count: length))
+        }
         cbs.tunnel_closed = { reason, ctx in
             let engine = Unmanaged<MqvpnEngine>.fromOpaque(ctx!).takeUnretainedValue()
             engine.onTunnelClosed?(reason.rawValue)
+        }
+        cbs.path_event = { path, status, ctx in
+            guard let ctx else { return }
+            let engine = Unmanaged<MqvpnEngine>.fromOpaque(ctx).takeUnretainedValue()
+            engine.onPathEvent?(path, status)
         }
         cbs.log = { level, msg, _ in
             // msg is not documented NULL-safe by the header, but the JNI
@@ -247,6 +264,14 @@ final class MqvpnEngine: NSObject {
         let h = mqvpn_client_add_path_fd_with_outcome(c, fd, &desc, &outcome)
         return (h, outcome)
     }
+    /// Registers a callback-backed logical path. It has no kernel fd; core
+    /// outbound datagrams use `onLogicalPathSend` and inbound datagrams arrive
+    /// through `socketRecv`, exactly like an fd path's receive delivery.
+    func addLogicalPath(desc: inout mqvpn_path_desc_t)
+        -> (handle: mqvpn_path_handle_t, outcome: mqvpn_add_path_outcome_t) {
+        desc.fd = -1
+        return addPathFd(-1, desc: &desc)
+    }
     func removePath(_ handle: mqvpn_path_handle_t) {
         guard let c = client else { return }
         mqvpn_client_remove_path(c, handle)
@@ -279,6 +304,21 @@ final class MqvpnEngine: NSObject {
         // duration of the call) — matches the C signature exactly.
         mqvpn_client_get_paths(c, &out, Int32(out.count), &n)
         return Array(out.prefix(Int(n)))
+    }
+
+    /// Tick-thread-only authoritative count for the provider's fail-open
+    /// recovery gate. Pending, degraded, and closed paths are not active.
+    func activePathCount() -> Int {
+        Self.activePathCount(in: paths())
+    }
+
+    static func logicalPathSendResult(_ handler: ((mqvpn_path_handle_t, Data) -> Int)?,
+                                      path: mqvpn_path_handle_t, packet: Data) -> Int {
+        handler?(path, packet) ?? -Int(ENODEV)
+    }
+
+    static func activePathCount(in paths: [mqvpn_path_info_t]) -> Int {
+        paths.count { $0.status == MQVPN_PATH_ACTIVE }
     }
 
     /// Tick-thread only. nil when the ABI layout check failed (never misread)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 import Foundation
+import Darwin
 
 var failures = 0
 func check(_ cond: Bool, _ msg: String) { if !cond { failures += 1; print("FAIL: \(msg)") } }
@@ -541,5 +542,54 @@ check(RelayNetworkPlan.nonRouting.includedIPv4Routes.isEmpty && RelayNetworkPlan
 check(RelaySocketPlan.fixed.lanListener == .wifi &&
       RelaySocketPlan.fixed.fixedServer == .cellular,
       "LAN listener is Wi-Fi-only and the fixed server socket is cellular-only")
+
+// ── Callback-backed logical Engine paths ──
+// A regression to fd-path registration would make libmqvpn reject this -1
+// handle because the Engine previously supplied no result-bearing callback.
+let logicalEngine = MqvpnEngine()
+logicalEngine.start(
+    server: ServerSettings(host: "127.0.0.1", port: 443, serverName: "", authKey: "", insecure: true),
+    serverAddr: resolveServer("127.0.0.1", 443)!)
+let logicalPathReady = DispatchSemaphore(value: 0)
+var logicalPathHandle: mqvpn_path_handle_t = -1
+var logicalPathCount = -1
+var logicalActivePathCount = -1
+var logicalPathEvents: [(mqvpn_path_handle_t, mqvpn_path_status_t)] = []
+_ = logicalEngine.perform {
+    logicalEngine.onLogicalPathSend = { _, _ in -Int(EAGAIN) }
+    logicalEngine.onPathEvent = { handle, status in logicalPathEvents.append((handle, status)) }
+    var desc = mqvpn_path_desc_t()
+    desc.struct_size = UInt32(MemoryLayout<mqvpn_path_desc_t>.size)
+    logicalPathHandle = logicalEngine.addLogicalPath(desc: &desc).handle
+    logicalPathCount = logicalEngine.paths().count
+    logicalActivePathCount = logicalEngine.activePathCount()
+    logicalPathReady.signal()
+}
+logicalPathReady.wait()
+check(logicalPathHandle >= 0 && logicalPathCount == 1,
+      "callback path registration is accepted as a logical, not fd, path")
+check(logicalPathEvents.contains { $0.0 == logicalPathHandle && $0.1 == MQVPN_PATH_PENDING },
+      "libmqvpn path events are delivered authoritatively during logical registration")
+check(logicalActivePathCount == 0,
+      "a pending logical path reports zero active paths")
+
+var inactivePath = mqvpn_path_info_t()
+inactivePath.status = MQVPN_PATH_PENDING
+var activePath = mqvpn_path_info_t()
+activePath.status = MQVPN_PATH_ACTIVE
+check(MqvpnEngine.activePathCount(in: [inactivePath]) == 0 &&
+      MqvpnEngine.activePathCount(in: [inactivePath, activePath]) == 1,
+      "path-event recovery distinguishes zero from nonzero active paths")
+
+let logicalPayload = Data([0x11, 0x22, 0x33, 0x44])
+for result in [logicalPayload.count, -Int(EAGAIN), -Int(EIO)] {
+    check(MqvpnEngine.logicalPathSendResult({ handle, packet in
+        handle == logicalPathHandle && packet == logicalPayload ? result : -Int(EINVAL)
+    }, path: logicalPathHandle, packet: logicalPayload) == result,
+          "logical send preserves full length, EAGAIN, and hard errno")
+}
+let logicalShutdown = DispatchSemaphore(value: 0)
+_ = logicalEngine.perform { logicalEngine.shutdown(); logicalShutdown.signal() }
+logicalShutdown.wait()
 
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
