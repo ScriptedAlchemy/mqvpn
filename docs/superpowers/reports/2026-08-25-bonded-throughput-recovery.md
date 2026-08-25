@@ -59,9 +59,9 @@ downlink 180.8 ≈ line-rate parity through the tunnel.
 
 ## Adaptive throughput scheduler — implementation receipts (2026-08-25)
 
-**Branch / HEAD:** `codex/lan-relay` at `cbb9fc3` (`docs: plan adaptive throughput scheduler`).
-All implementation below is **uncommitted** (`git diff --stat`: 36 files, +393/−23;
-`third_party/xquic` dirty at `06f676f`).
+**Branch / HEAD:** `codex/lan-relay` at `397e9e6` (core hardening `4468da3`,
+xquic pin `29fb1ca`). Apple Settings/engine leftovers and the three
+reviewer follow-ups below are still uncommitted.
 
 **Official spec:** `docs/superpowers/specs/2026-08-25-adaptive-throughput-scheduler-design.md`
 **Official plan:** `docs/superpowers/plans/2026-08-25-adaptive-throughput-scheduler.md`
@@ -80,16 +80,17 @@ All implementation below is **uncommitted** (`git diff --stat`: 36 files, +393/�
   `OptimizeFor` config key; `tests/test_api.c` + `tests/test_config.c` extended (previously GREEN). |
 | **2** | xquic WLB pinned at `29fb1ca` (parent `ddfc196`): application-only **confirmed**
   ACK goodput, warm-up **3 s \| 1 MiB**, floors **20% / 5%**. |
-| **3** | Client emits `mqvpn-performance: throughput\|latency` on CONNECT-IP after auth path;
-  server applies WLB policy post-PSK and records **effective** mode only on `XQC_OK`;
-  live duplicate → **409** and must not mutate policy (`test_server_double_connectip`, Linux). |
+| **3** | Auth before policy; invalid PSK asks for latency and must be exact **403**
+  with zero sessions; duplicate **409** cannot mutate live latency;
+  omitted header on a later authenticated CONNECT-IP defaults to throughput
+  (`test_server_double_connectip` PASS on this host). |
 | **4–6** | `SchedulerSettings.policy` is `let`; dashboards show **Requested**; iOS hides
   Optimize For in Mac Relay; `EnginePerformanceApply` always `MQVPN_SCHED_WLB`
   and calls the C performance setter; unused MinRTT `coreScheduler` mapping removed;
   host tests GREEN. |
 | **7** | 9090 JSON: effective `"performance"` plus per-path WLB fields; CLI reads 257 KiB
-  and prints goodput as **B/s**; control socket `ctrl_write_all`; **SOVERSION 4**
-  for `mqvpn_client_info_t.performance[]`. |
+  and prints goodput as **B/s**; **SOVERSION 4**; `ctrl_socket_destroy` now
+  owns/closes in-flight connections (`test_destroy_closes_in_flight_write`). |
 | **8** | **PENDING** — no signed deploy, no physical throughput matrix, no acceptance gates claimed. |
 
 ## Final acceptance receipts — probe-recovery build (2026-08-25, `397e9e6`)
@@ -119,3 +120,23 @@ revival attempts. Uplink airtime splits differently and the relay
 contributed up to 37% of upload bytes. A wired-only Mac (en0 + relay,
 Wi-Fi direct disabled) is the topology where relay downlink can
 contribute; that variant remains unmeasured.
+
+## Failover matrix + relay-only isolation (2026-08-25 afternoon, `397e9e6`)
+
+- Wired-only + relay bond: 158.1 down / 37.2 up; relay carried 13.6 MB up
+  (22% of upload), ~0.5 MB down.
+- Ethernet pulled mid-session: **session survived** (same extension PID) —
+  old paths closed, a fresh relay path re-established at 100% and carried
+  a live measurement. Interface-loss failover gate: PASS.
+- Relay-only measurement during the outage: **29.0 down / 2.4 up**, uplink
+  responsiveness 5.2 s under load — the cellular link was genuinely
+  degraded at this hour (vs 193.8 down relay-only in the morning). The
+  scheduler's daytime relay-downlink evictions were therefore correct
+  adaptive behavior against a weak path, with 500 ms probes standing by to
+  re-admit it; not a scheduler defect.
+- Ethernet re-plugged: the session did NOT rejoin the returning interface;
+  the tunnel dropped and required a restart (fresh session then bonded
+  en0 + relay at 48/52 within 5 s). Interface-return recovery is the one
+  remaining lifecycle gap. Wi-Fi-off mid-session earlier behaved the same
+  way. Filed as follow-up: path addition after interface return should
+  reuse the live session the way loss-side failover already does.
