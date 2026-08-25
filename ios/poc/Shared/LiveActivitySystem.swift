@@ -1,0 +1,182 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
+import Foundation
+import ActivityKit
+import os
+
+private let liveActivityLog = Logger(subsystem: "mqvpn.poc", category: "live-activity")
+
+/// App-process lifecycle entry points. ActivityKit requires a foreground app
+/// to create a standard Live Activity, so Start requests it before launching
+/// the packet tunnel. The provider process subsequently updates that same
+/// activity from real counters while the app is backgrounded.
+@available(iOS 16.2, *)
+enum MqvpnLiveActivityLifecycle {
+    @discardableResult
+    static func begin(mode: OperatingMode, timestamp: Double = Date().timeIntervalSince1970) -> Bool {
+        let state = LiveActivityContentState.lifecycle(.connecting, timestamp: timestamp)
+        let content = ActivityContent(state: state, staleDate: Date(timeIntervalSince1970: timestamp + 10))
+        let activities = Activity<MqvpnNetworkActivityAttributes>.activities
+        let plan = selectionPlan(activities: activities, desiredMode: mode.rawValue)
+        if let currentID = plan.currentID,
+           let activity = activities.first(where: { $0.id == currentID }) {
+            Task { await activity.update(content) }
+            endActivities(activities, ids: plan.endIDs, state: state)
+            liveActivityLog.notice("reusing exact-mode Live Activity mode=\(mode.rawValue, privacy: .public) extras=\(plan.endIDs.count)")
+            return true
+        }
+
+        // A prior-mode or crash-duplicate activity is never allowed to pose as
+        // the new session if the new request fails.
+        endActivities(activities, ids: plan.endIDs, state: state)
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            liveActivityLog.notice("Live Activities unavailable or disabled")
+            return false
+        }
+        do {
+            let activity = try Activity.request(
+                attributes: MqvpnNetworkActivityAttributes(mode: mode.rawValue),
+                content: content,
+                pushType: nil)
+            endExtras(keeping: activity.id, state: state)
+            liveActivityLog.notice("requested Live Activity mode=\(mode.rawValue, privacy: .public)")
+            return true
+        } catch {
+            liveActivityLog.error("Live Activity request failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    static func markStopping(timestamp: Double = Date().timeIntervalSince1970) {
+        let state = LiveActivityContentState.lifecycle(.stopping, timestamp: timestamp)
+        let content = ActivityContent(state: state, staleDate: Date(timeIntervalSince1970: timestamp + 3))
+        for activity in Activity<MqvpnNetworkActivityAttributes>.activities {
+            Task { await activity.update(content) }
+        }
+    }
+
+    static func endImmediately(timestamp: Double = Date().timeIntervalSince1970) async {
+        let state = LiveActivityContentState.lifecycle(.stopping, timestamp: timestamp)
+        let content = ActivityContent(state: state, staleDate: nil)
+        for activity in Activity<MqvpnNetworkActivityAttributes>.activities {
+            await activity.end(content, dismissalPolicy: .immediate)
+        }
+    }
+
+    static func updateExisting(mode: OperatingMode,
+                               state: LiveActivityContentState,
+                               staleDate: Date) async -> Bool {
+        let activities = Activity<MqvpnNetworkActivityAttributes>.activities
+        let plan = selectionPlan(activities: activities, desiredMode: mode.rawValue)
+        guard let currentID = plan.currentID,
+              let current = activities.first(where: { $0.id == currentID }) else {
+            liveActivityLog.notice("no exact-mode foreground-created Live Activity to update")
+            return false
+        }
+        let final = ActivityContent(state: state, staleDate: nil)
+        for activity in activities where plan.endIDs.contains(activity.id) {
+            await activity.end(final, dismissalPolicy: .immediate)
+        }
+        await current.update(ActivityContent(state: state, staleDate: staleDate))
+        liveActivityLog.debug("provider Live Activity update completed mode=\(mode.rawValue, privacy: .public) phase=\(state.phase.rawValue, privacy: .public) extras=\(plan.endIDs.count)")
+        return true
+    }
+
+    private static func selectionPlan(
+        activities: [Activity<MqvpnNetworkActivityAttributes>],
+        desiredMode: String
+    ) -> LiveActivitySelectionPlan {
+        LiveActivitySelection.plan(
+            activities: activities.map {
+                LiveActivityDescriptor(id: $0.id, mode: $0.attributes.mode)
+            }, desiredMode: desiredMode)
+    }
+
+    private static func endExtras(keeping activityID: String,
+                                  state: LiveActivityContentState) {
+        let activities = Activity<MqvpnNetworkActivityAttributes>.activities
+        let ids = activities.compactMap { $0.id == activityID ? nil : $0.id }
+        endActivities(activities, ids: ids, state: state)
+    }
+
+    private static func endActivities(
+        _ activities: [Activity<MqvpnNetworkActivityAttributes>],
+        ids: [String],
+        state: LiveActivityContentState
+    ) {
+        let ids = Set(ids)
+        let content = ActivityContent(state: state, staleDate: nil)
+        for activity in activities where ids.contains(activity.id) {
+            Task { await activity.end(content, dismissalPolicy: .immediate) }
+        }
+    }
+}
+
+protocol MqvpnLiveActivityReporting: AnyObject {
+    func start()
+    func stopBestEffort()
+}
+
+/// Packet-provider rate reporter. It reads only the lock-protected production
+/// snapshot, samples at a bounded cadence, and updates an activity that the
+/// foreground app already created. It never fabricates an activity in the
+/// background if ActivityKit has none to update.
+@available(iOS 16.2, *)
+final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
+    private let queue = DispatchQueue(label: "mqvpn.live-activity")
+    private let snapshotProvider: () -> TunnelSnapshot?
+    private let mode: OperatingMode
+    private var sampler = LiveActivityRateSampler()
+    private var timer: DispatchSourceTimer?
+    private var stopped = false
+
+    init(mode: OperatingMode,
+         snapshotProvider: @escaping () -> TunnelSnapshot?) {
+        self.mode = mode
+        self.snapshotProvider = snapshotProvider
+    }
+
+    func start() {
+        queue.async { [weak self] in
+            guard let self, !self.stopped, self.timer == nil else { return }
+            self.publish()
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            // Two seconds is responsive enough for a glanceable speed display
+            // without mirroring every provider packet into ActivityKit.
+            timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .milliseconds(250))
+            timer.setEventHandler { [weak self] in self?.publish() }
+            self.timer = timer
+            timer.resume()
+        }
+    }
+
+    func stopBestEffort() {
+        let shouldEnd: Bool = queue.sync {
+            guard !stopped else { return false }
+            stopped = true
+            timer?.setEventHandler {}
+            timer?.cancel()
+            timer = nil
+            return true
+        }
+        guard shouldEnd else { return }
+        // The foreground app already ends on user Stop. Provider-side cleanup
+        // covers system/error stops but is intentionally unawaited so
+        // ActivityKit can never hold up NetworkExtension teardown.
+        Task { await MqvpnLiveActivityLifecycle.endImmediately() }
+        liveActivityLog.notice("provider Live Activity cleanup scheduled after transport stop")
+    }
+
+    private func publish() {
+        guard !stopped, let snapshot = snapshotProvider() else { return }
+        let counters = LiveActivityCounterSource.counters(from: snapshot)
+        let rates = sampler.sample(timestamp: snapshot.timestamp, counters: counters)
+        let state = LiveActivityContentFactory.make(snapshot: snapshot, rates: rates)
+        let staleDate = Date(timeIntervalSince1970: snapshot.timestamp + 6)
+        Task {
+            _ = await MqvpnLiveActivityLifecycle.updateExisting(
+                mode: mode, state: state, staleDate: staleDate)
+        }
+    }
+}

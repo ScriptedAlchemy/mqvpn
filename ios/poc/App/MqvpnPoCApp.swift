@@ -54,6 +54,7 @@ final class TunnelController: ObservableObject {
     /// Ordering key for accepted poll responses, reset at each session boundary.
     private var lastIngestedSeq: UInt64 = 0
     private var lastIngestedTimestamp: Double = 0
+    private var liveActivityStarted = false
 
     var isEditable: Bool { manager != nil && status == .disconnected }
     var isConnectable: Bool {
@@ -160,15 +161,28 @@ final class TunnelController: ObservableObject {
             lastIngestedSeq = 0
             lastIngestedTimestamp = 0
         }
+        if liveActivityStarted && (s == .disconnected || s == .invalid) {
+            liveActivityStarted = false
+            if #available(iOS 16.2, *) {
+                Task { await MqvpnLiveActivityLifecycle.endImmediately() }
+            }
+        }
         reconcilePolling()
     }
 
     func start() {
         guard isConnectable, let manager else { return }
+        if #available(iOS 16.2, *) {
+            liveActivityStarted = MqvpnLiveActivityLifecycle.begin(mode: operatingMode)
+        }
         do {
             try manager.connection.startVPNTunnel()
         } catch {
             statusText = "start error: \(error.localizedDescription)"
+            if liveActivityStarted, #available(iOS 16.2, *) {
+                liveActivityStarted = false
+                Task { await MqvpnLiveActivityLifecycle.endImmediately() }
+            }
         }
     }
 
@@ -178,6 +192,11 @@ final class TunnelController: ObservableObject {
         guard request == .requested else { return }
         status = .disconnecting
         statusText = Self.describe(status)
+        if liveActivityStarted, #available(iOS 16.2, *) {
+            liveActivityStarted = false
+            MqvpnLiveActivityLifecycle.markStopping()
+            Task { await MqvpnLiveActivityLifecycle.endImmediately() }
+        }
         // The immediate display is an acknowledged user intent; all terminal
         // reconciliation remains exclusively driven by NEVPNStatusDidChange.
         manager.connection.stopVPNTunnel()
