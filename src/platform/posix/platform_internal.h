@@ -22,6 +22,8 @@
 
 #include <event2/event.h>
 
+struct darwin_relay_adapter_s;
+
 typedef struct {
     mqvpn_client_t *client;
 
@@ -82,6 +84,17 @@ typedef struct {
     int server_port;
     int has_v6;
 
+    /* Optional authenticated iPhone relay endpoint. Its LAN route is owned
+     * separately from the server and catch-all routes so cleanup can remove
+     * only what this process installed. */
+    int relay_enabled;
+    char relay_ip[INET_ADDRSTRLEN];
+    int relay_port;
+    char relay_iface[IFNAMSIZ];
+    char relay_route_gateway[INET_ADDRSTRLEN];
+    char relay_route_iface[IFNAMSIZ];
+    int relay_route_configured;
+
     /* DNS */
     mqvpn_dns_t dns;
 
@@ -102,6 +115,7 @@ typedef struct {
 #elif defined(__APPLE__)
     int rt_fd; /* PF_ROUTE socket, -1 if unavailable */
     struct event *ev_route;
+    struct darwin_relay_adapter_s *relay_adapter;
 #endif
 } platform_ctx_t;
 
@@ -136,6 +150,8 @@ int iface_has_route_to_server(const char *ifname, const struct sockaddr_storage 
  * Darwin-only (Linux never compiles darwin/routing.c; declaration here is
  * inert on Linux). */
 int darwin_scoped_server_pin(platform_ctx_t *p, const char *ifname);
+int darwin_setup_relay_route(platform_ctx_t *p);
+void darwin_cleanup_relay_route(platform_ctx_t *p);
 
 /* per-OS socket-to-interface pinning (platform_linux.c / platform_darwin.c) */
 #if defined(__linux__)

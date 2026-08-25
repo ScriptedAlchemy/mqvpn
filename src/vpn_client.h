@@ -44,6 +44,11 @@ typedef struct mqvpn_client_cfg_s {
     uint64_t recv_rate_limit;     /* [Advanced] RecvRateLimit, bytes/sec; 0 = off */
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
+    int relay_enabled;            /* [Relay] Enabled */
+    const char *relay_ip;         /* validated numeric private IPv4 */
+    int relay_port;
+    const char *relay_interface;  /* optional LAN interface */
+    const uint8_t *relay_key;     /* exactly 32 decoded bytes */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */

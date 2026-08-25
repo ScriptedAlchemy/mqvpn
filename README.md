@@ -293,6 +293,33 @@ sudo mqvpn --config /etc/mqvpn/server.conf
 sudo mqvpn --config /etc/mqvpn/client.conf
 ```
 
+### macOS iPhone cellular relay
+
+The macOS CLI can add an iPhone's cellular interface as a second path while
+the Mac remains the only mqvpn client. Put the iPhone app in **Mac Relay**
+mode, keep both devices on the same Wi-Fi LAN, and add:
+
+```ini
+[Relay]
+Enabled = true
+Endpoint = 192.168.1.195:5443
+KeyFile = /etc/mqvpn/relay.key
+Interface = en0
+```
+
+`Endpoint` is the iPhone's numeric private Wi-Fi IPv4 address and relay listen
+port. `Interface` is optional. `KeyFile` must contain a Base64-encoded 32-byte
+relay key, must not be group/world readable (`chmod 600`), and must use a
+different key from `[Auth] Key`. The key is read from the file only; it is not
+accepted on the command line or written to logs.
+
+After the authenticated relay handshake, the existing Mac-owned QUIC session
+has its normal direct path plus one callback-backed iPhone cellular path.
+Only opaque mqvpn UDP datagrams are relayed to the already configured server;
+the iPhone is not a general router or proxy. The Mac installs a scoped host
+route for the iPhone outside `utun`, and the optional kill switch allows only
+UDP to that exact LAN address and port.
+
 ## Schedulers
 
 | Scheduler       | TCP        | UDP        | Typical use                                     |

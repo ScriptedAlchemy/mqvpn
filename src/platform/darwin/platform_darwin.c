@@ -28,6 +28,7 @@
 #  include "platform_internal.h"
 #  include "platform_darwin.h"
 #  include "route_mon.h"
+#  include "relay_adapter.h"
 #  include "vpn_client.h"
 #  include "log.h"
 #  include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
@@ -50,6 +51,15 @@
 #  define TUN_BUF_SIZE        65536
 #  define SOCK_BUF_SIZE       65536
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
+
+static void
+relay_activity_cb(void *context)
+{
+    platform_ctx_t *p = context;
+    if (!p || !p->client || !p->ev_tick) return;
+    mqvpn_client_tick(p->client);
+    schedule_next_tick(p);
+}
 
 /* ================================================================
  *  Socket pinning to a specific egress interface
@@ -257,6 +267,8 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
      * that stale fd events don't fire ("tun read: Bad file descriptor").
      * The TUN will be recreated in cb_tunnel_config_ready on reconnect. */
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
+        if (new_state == MQVPN_STATE_RECONNECTING && p->relay_adapter)
+            darwin_relay_adapter_reconnect(p->relay_adapter);
         /* PR5: path lifecycle state is owned by libmqvpn — no state mirror
          * to reset here. Library handles slot recycling across reconnects.
          * path_recover_failures IS reset — Level-2 reconnect creates a
@@ -323,6 +335,17 @@ cb_reconnect_scheduled(int delay_sec, void *user_ctx)
     LOG_INF("reconnect scheduled in %d seconds", delay_sec);
 }
 
+static ssize_t
+cb_send_packet_ex(mqvpn_path_handle_t path, const uint8_t *packet, size_t length,
+                  const struct sockaddr *peer, socklen_t peer_length, void *user_ctx)
+{
+    (void)peer;
+    (void)peer_length;
+    platform_ctx_t *p = user_ctx;
+    if (!p || !p->relay_adapter) return -ENODEV;
+    return darwin_relay_adapter_send_packet(p->relay_adapter, path, packet, length);
+}
+
 static void
 status_log_cb(evutil_socket_t fd, short what, void *arg)
 {
@@ -355,6 +378,14 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
         LOG_INF("[STATUS]   path%d=%s srtt=%dms tx=%" PRIu64 " rx=%" PRIu64 " %s", i,
                 paths[i].name, paths[i].srtt_ms, paths[i].bytes_tx, paths[i].bytes_rx,
                 st_str);
+    }
+
+    if (p->relay_adapter) {
+        darwin_relay_adapter_status_t relay;
+        darwin_relay_adapter_get_status(p->relay_adapter, &relay);
+        LOG_INF("[STATUS]   iphone-relay=%s lan_tx=%" PRIu64 " lan_rx=%" PRIu64,
+                relay.active ? "authenticated" : "pairing", relay.bytes_to_iphone,
+                relay.bytes_from_iphone);
     }
 
     /* Re-arm timer */
@@ -476,6 +507,7 @@ on_signal(evutil_socket_t sig, short what, void *arg)
 
     LOG_INF("received signal, shutting down...");
     p->shutting_down = 1;
+    if (p->relay_adapter) darwin_relay_adapter_stop(p->relay_adapter);
     mqvpn_client_disconnect(p->client);
     /* state_changed callback will call event_base_loopbreak on CLOSED */
 }
@@ -539,6 +571,14 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.manage_routes = cfg->manage_routes;
+    ctx.relay_enabled = cfg->relay_enabled;
+    if (cfg->relay_enabled) {
+        snprintf(ctx.relay_ip, sizeof(ctx.relay_ip), "%s", cfg->relay_ip);
+        ctx.relay_port = cfg->relay_port;
+        if (cfg->relay_interface)
+            snprintf(ctx.relay_iface, sizeof(ctx.relay_iface), "%s",
+                     cfg->relay_interface);
+    }
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -586,6 +626,7 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
      * destination, i.e. a silent kill-switch bypass. */
     mqvpn_sa_ntop(&ctx.server_addr, ctx.server_ip_str, sizeof(ctx.server_ip_str));
 
+
     /* Create libmqvpn config */
     mqvpn_config_t *lib_cfg = mqvpn_config_new();
     if (!lib_cfg) {
@@ -598,7 +639,9 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
         mqvpn_config_set_tls_server_name(lib_cfg, cfg->tls_server_name);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
-    mqvpn_config_set_multipath(lib_cfg, cfg->n_paths > 1 ? 1 : 0);
+    int direct_path_count = cfg->n_paths > 0 ? cfg->n_paths : 1;
+    mqvpn_config_set_multipath(lib_cfg,
+                               direct_path_count + (cfg->relay_enabled ? 1 : 0) > 1);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
     mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
@@ -630,7 +673,8 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cbs.tun_output = cb_tun_output;
     cbs.tunnel_config_ready = cb_tunnel_config_ready;
-    cbs.send_packet = NULL; /* fd-only mode */
+    cbs.send_packet = NULL;
+    cbs.send_packet_ex = cfg->relay_enabled ? cb_send_packet_ex : NULL;
     cbs.tunnel_closed = cb_tunnel_closed;
     cbs.ready_for_tun = cb_ready_for_tun;
     cbs.state_changed = cb_state_changed;
@@ -710,6 +754,41 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
         event_add(ctx.ev_udp[i], NULL);
     }
 
+    if (cfg->relay_enabled && darwin_setup_relay_route(&ctx) < 0) {
+        LOG_ERR("failed to pin iPhone relay endpoint outside the tunnel");
+        goto cleanup;
+    }
+
+    if (cfg->relay_enabled) {
+        if (!cfg->relay_key) {
+            LOG_ERR("relay enabled without decoded key");
+            goto cleanup;
+        }
+        darwin_relay_adapter_config_t relay_cfg;
+        memset(&relay_cfg, 0, sizeof(relay_cfg));
+        relay_cfg.client = ctx.client;
+        relay_cfg.event_base = ctx.eb;
+        relay_cfg.endpoint.sin_family = AF_INET;
+        relay_cfg.endpoint.sin_port = htons((uint16_t)cfg->relay_port);
+        if (inet_pton(AF_INET, cfg->relay_ip, &relay_cfg.endpoint.sin_addr) != 1) {
+            LOG_ERR("invalid relay IPv4 after config validation");
+            goto cleanup;
+        }
+        memcpy(&relay_cfg.server_peer, &ctx.server_addr, ctx.server_addrlen);
+        relay_cfg.server_peer_length = ctx.server_addrlen;
+        snprintf(relay_cfg.interface_name, sizeof(relay_cfg.interface_name), "%s",
+                 ctx.relay_iface);
+        memcpy(relay_cfg.key, cfg->relay_key, MQVPN_RELAY_KEY_SIZE);
+        relay_cfg.on_activity = relay_activity_cb;
+        relay_cfg.activity_context = &ctx;
+        ctx.relay_adapter = darwin_relay_adapter_create(&relay_cfg, NULL);
+        memset(relay_cfg.key, 0, sizeof(relay_cfg.key));
+        if (!ctx.relay_adapter) {
+            LOG_ERR("failed to create iPhone relay adapter");
+            goto cleanup;
+        }
+    }
+
     /* PF_ROUTE path recovery accelerator (non-fatal if fails) */
     setup_route_socket(&ctx);
 
@@ -728,6 +807,11 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
         goto cleanup;
     }
 
+    if (ctx.relay_adapter && darwin_relay_adapter_start(ctx.relay_adapter) < 0) {
+        LOG_ERR("failed to start iPhone relay adapter");
+        goto cleanup;
+    }
+
     /* Schedule initial tick */
     schedule_next_tick(&ctx);
 
@@ -737,8 +821,13 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
 cleanup:
     /* Clean up platform resources */
+    if (ctx.relay_adapter) {
+        darwin_relay_adapter_destroy(ctx.relay_adapter);
+        ctx.relay_adapter = NULL;
+    }
     cleanup_killswitch(&ctx);
     if (ctx.manage_routes) cleanup_routes(&ctx);
+    darwin_cleanup_relay_route(&ctx);
     mqvpn_dns_restore(&ctx.dns);
 
     if (ctx.tun_up) {

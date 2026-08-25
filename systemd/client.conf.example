@@ -24,3 +24,11 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 # Path = eth0
 # Path = wlan0
+
+# macOS only: add an iPhone cellular path to this same client session.
+# The file contains a separate Base64 32-byte relay key and must be chmod 600.
+# [Relay]
+# Enabled = true
+# Endpoint = 192.168.1.195:5443
+# KeyFile = /etc/mqvpn/relay.key
+# Interface = en0

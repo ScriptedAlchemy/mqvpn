@@ -298,6 +298,14 @@ build_pf_rules(const platform_ctx_t *p, char *buf, size_t buflen)
     if (!is_v6)
         APPEND("pass out quick inet proto udp to %s port = %d\n", p->server_ip_str,
                p->server_port);
+    if (p->relay_enabled) {
+        if (p->relay_iface[0] != '\0')
+            APPEND("pass out quick on %s inet proto udp to %s port = %d\n",
+                   p->relay_iface, p->relay_ip, p->relay_port);
+        else
+            APPEND("pass out quick inet proto udp to %s port = %d\n", p->relay_ip,
+                   p->relay_port);
+    }
     APPEND("block drop out quick inet\n");
 
     if (is_v6 || p->has_v6) {

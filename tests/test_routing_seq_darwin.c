@@ -246,6 +246,43 @@ test_onlink_no_pin(fake_cmd_env_t *e)
                 "onlink-no-pin cleanup: no pin route to delete");
 }
 
+static void
+test_relay_route_is_scoped_idempotent_and_owned(fake_cmd_env_t *e)
+{
+    fake_cmd_reset(e);
+    set_route_get_output(e, "   gateway: link#4\n   interface: en0\n");
+
+    platform_ctx_t p;
+    init_ctx(&p);
+    p.relay_enabled = 1;
+    snprintf(p.relay_ip, sizeof(p.relay_ip), "192.168.1.195");
+    snprintf(p.relay_iface, sizeof(p.relay_iface), "en0");
+
+    ASSERT_EQ_INT(darwin_setup_relay_route(&p), 0, "relay route setup succeeds");
+    ASSERT_EQ_INT(darwin_setup_relay_route(&p), 0, "relay route setup idempotent");
+    ASSERT_EQ_INT(p.relay_route_configured, 1, "relay route ownership recorded");
+
+    char log[4096];
+    fake_cmd_read_log(e, log, sizeof(log));
+    ASSERT_TRUE(strstr(log,
+                       "route|-n|add|-ifscope|en0|192.168.1.195/32|-interface|en0") !=
+                    NULL,
+                "relay endpoint pinned outside utun on LAN interface");
+    const char *second = strstr(log, "192.168.1.195/32");
+    second = second ? strstr(second + 1, "192.168.1.195/32") : NULL;
+    ASSERT_TRUE(second == NULL, "relay route idempotence avoids duplicate command");
+
+    fake_cmd_reset(e);
+    darwin_cleanup_relay_route(&p);
+    darwin_cleanup_relay_route(&p);
+    ASSERT_EQ_INT(p.relay_route_configured, 0, "relay route ownership cleared");
+    fake_cmd_read_log(e, log, sizeof(log));
+    ASSERT_TRUE(strstr(log, "route|-n|delete|-ifscope|en0|192.168.1.195/32") != NULL,
+                "relay cleanup removes owned host route");
+    ASSERT_TRUE(strstr(log, "203.0.113.9") == NULL,
+                "relay cleanup does not remove server route");
+}
+
 int
 main(void)
 {
@@ -260,6 +297,7 @@ main(void)
     test_pin_change_fallback(&e);
     test_catchall_failure_rollback(&e);
     test_onlink_no_pin(&e);
+    test_relay_route_is_scoped_idempotent_and_owned(&e);
 
     fake_cmd_env_cleanup(&e);
 

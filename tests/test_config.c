@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int g_pass = 0, g_fail = 0;
@@ -74,6 +75,19 @@ write_tmp(const char *content)
     return path;
 }
 
+static char *
+write_tmp_mode(const char *content, mode_t mode)
+{
+    char *path = write_tmp(content);
+    char *owned = path ? strdup(path) : NULL;
+    if (owned && chmod(owned, mode) < 0) {
+        perror("chmod");
+        free(owned);
+        return NULL;
+    }
+    return owned;
+}
+
 /* ---- Tests ---- */
 
 static void
@@ -105,6 +119,124 @@ test_defaults(void)
     ASSERT_EQ_STR(cfg.server_addr, "", "default server_addr");
     ASSERT_EQ_STR(cfg.auth_key, "", "default auth_key");
     ASSERT_EQ_STR(cfg.server_auth_key, "", "default server_auth_key");
+    ASSERT_EQ_INT(cfg.relay_enabled, 0, "default relay disabled");
+    ASSERT_EQ_STR(cfg.relay_endpoint, "", "default relay endpoint empty");
+    ASSERT_EQ_STR(cfg.relay_key_file, "", "default relay key file empty");
+    ASSERT_EQ_STR(cfg.relay_interface, "", "default relay interface empty");
+    ASSERT_EQ_INT(cfg.relay_key_loaded, 0, "default relay key not loaded");
+}
+
+static void
+test_relay_valid_ini(void)
+{
+    char *key_path = write_tmp_mode(
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0600);
+    ASSERT_TRUE(key_path != NULL, "relay valid key file created");
+    if (!key_path) return;
+
+    char ini[1024];
+    snprintf(ini, sizeof(ini),
+             "[Server]\nAddress = 198.51.100.10:443\n"
+             "[Relay]\nEnabled = true\nEndpoint = 192.168.1.195:5443\n"
+             "KeyFile = %s\nInterface = en1\n",
+             key_path);
+    char *cfg_path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, cfg_path);
+    unlink(cfg_path);
+    unlink(key_path);
+
+    ASSERT_EQ_INT(rc, 0, "valid relay config accepted");
+    ASSERT_EQ_INT(cfg.relay_enabled, 1, "relay enabled parsed");
+    ASSERT_EQ_STR(cfg.relay_endpoint, "192.168.1.195:5443", "relay endpoint parsed");
+    ASSERT_EQ_STR(cfg.relay_interface, "en1", "relay interface parsed");
+    ASSERT_EQ_INT(cfg.relay_key_loaded, 1, "relay key loaded");
+    for (size_t i = 0; i < sizeof(cfg.relay_key); i++)
+        ASSERT_EQ_INT(cfg.relay_key[i], 0, "relay key decoded exactly");
+    free(key_path);
+}
+
+static int
+load_relay_ini(const char *endpoint, const char *key_path, int duplicate)
+{
+    char ini[1400];
+    snprintf(ini, sizeof(ini),
+             "[Server]\nAddress = 198.51.100.10:443\n"
+             "[Relay]\nEnabled = true\nEndpoint = %s\nKeyFile = %s\n%s",
+             endpoint, key_path,
+             duplicate ? "[Relay]\nEnabled = true\n" : "");
+    char *cfg_path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, cfg_path);
+    unlink(cfg_path);
+    return rc;
+}
+
+static void
+test_relay_rejects_invalid_config(void)
+{
+    char *good_key = write_tmp_mode(
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0600);
+    ASSERT_TRUE(good_key != NULL, "relay invalid-case key file created");
+    if (!good_key) return;
+
+    ASSERT_EQ_INT(load_relay_ini("iphone.local:5443", good_key, 0), -1,
+                  "relay hostname rejected");
+    ASSERT_EQ_INT(load_relay_ini("192.168.1.195:0", good_key, 0), -1,
+                  "relay zero port rejected");
+    ASSERT_EQ_INT(load_relay_ini("192.168.1.195:65536", good_key, 0), -1,
+                  "relay oversized port rejected");
+    ASSERT_EQ_INT(load_relay_ini("192.168.1.195:5443", good_key, 1), -1,
+                  "duplicate relay section rejected");
+    unlink(good_key);
+    free(good_key);
+
+    ASSERT_EQ_INT(load_relay_ini("192.168.1.195:5443", "/no/such/relay.key", 0), -1,
+                  "missing relay key rejected");
+
+    char *public_key = write_tmp_mode(
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0644);
+    ASSERT_EQ_INT(load_relay_ini("192.168.1.195:5443", public_key, 0), -1,
+                  "group/world-readable relay key rejected");
+    unlink(public_key);
+    free(public_key);
+
+    char *short_key = write_tmp_mode("c2hvcnQ=\n", 0600);
+    ASSERT_EQ_INT(load_relay_ini("192.168.1.195:5443", short_key, 0), -1,
+                  "wrong decoded relay key size rejected");
+    unlink(short_key);
+    free(short_key);
+}
+
+static void
+test_relay_valid_json(void)
+{
+    char *key_path = write_tmp_mode(
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0600);
+    ASSERT_TRUE(key_path != NULL, "relay JSON key file created");
+    if (!key_path) return;
+
+    char json[1024];
+    snprintf(json, sizeof(json),
+             "{\"mode\":\"client\",\"server_addr\":\"198.51.100.10:443\","
+             "\"relay\":{\"enabled\":true,\"endpoint\":\"10.0.0.4:5443\","
+             "\"key_file\":\"%s\",\"interface\":\"en0\"}}",
+             key_path);
+    char *cfg_path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, cfg_path);
+    unlink(cfg_path);
+    unlink(key_path);
+
+    ASSERT_EQ_INT(rc, 0, "valid relay JSON accepted");
+    ASSERT_EQ_INT(cfg.relay_enabled, 1, "relay JSON enabled parsed");
+    ASSERT_EQ_STR(cfg.relay_endpoint, "10.0.0.4:5443", "relay JSON endpoint parsed");
+    ASSERT_EQ_STR(cfg.relay_interface, "en0", "relay JSON interface parsed");
+    ASSERT_EQ_INT(cfg.relay_key_loaded, 1, "relay JSON key loaded");
+    free(key_path);
 }
 
 static void
@@ -2209,6 +2341,9 @@ int
 main(void)
 {
     test_defaults();
+    test_relay_valid_ini();
+    test_relay_rejects_invalid_config();
+    test_relay_valid_json();
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();

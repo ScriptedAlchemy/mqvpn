@@ -21,6 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#ifndef _WIN32
+#  include <fcntl.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
 
 #ifdef _MSC_VER
 #  define strcasecmp _stricmp
@@ -95,6 +100,7 @@ enum {
     SEC_REORDER_RULE,
     SEC_HYBRID,
     SEC_ADVANCED,
+    SEC_RELAY,
 };
 
 static int
@@ -110,6 +116,7 @@ parse_section(const char *name)
     if (strcasecmp(name, "ReorderRule") == 0) return SEC_REORDER_RULE;
     if (strcasecmp(name, "Hybrid") == 0) return SEC_HYBRID;
     if (strcasecmp(name, "Advanced") == 0) return SEC_ADVANCED;
+    if (strcasecmp(name, "Relay") == 0) return SEC_RELAY;
     return -1;
 }
 
@@ -127,6 +134,7 @@ section_name(int section)
     case SEC_REORDER_RULE: return "ReorderRule";
     case SEC_HYBRID: return "Hybrid";
     case SEC_ADVANCED: return "Advanced";
+    case SEC_RELAY: return "Relay";
     default: return "?";
     }
 }
@@ -638,6 +646,11 @@ static const cfg_key_desc_t cfg_keys[] = {
             MQVPN_RECV_RATE_LIMIT_MAX),
     CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso),
     CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro),
+    /* [Relay] — JSON side lives inside the bounded "relay" object. */
+    CFG_BOOL(SEC_RELAY, "Enabled", "enabled", relay_enabled),
+    CFG_STR(SEC_RELAY, "Endpoint", "endpoint", relay_endpoint),
+    CFG_STR(SEC_RELAY, "KeyFile", "key_file", relay_key_file),
+    CFG_STR(SEC_RELAY, "Interface", "interface", relay_interface),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller
@@ -760,7 +773,8 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
 static void
 cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *ro_raw,
                    const char *ro_end, const char *hy_raw, const char *hy_end,
-                   const char *adv_raw, const char *adv_end)
+                   const char *adv_raw, const char *adv_end, const char *relay_raw,
+                   const char *relay_end)
 {
     /* Must cover the largest CFGK_STR destination (listen/server_addr/
      * control_listen, all char[280]) or JSON strings would truncate
@@ -780,6 +794,9 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         } else if (d->section == SEC_ADVANCED) {
             if (!adv_raw || !adv_end) continue;
             v = json_find_key_bounded(adv_raw, adv_end, d->json_key);
+        } else if (d->section == SEC_RELAY) {
+            if (!relay_raw || !relay_end) continue;
+            v = json_find_key_bounded(relay_raw, relay_end, d->json_key);
         } else {
             v = json_find_key(json_text, d->json_key);
         }
@@ -825,6 +842,7 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
                     d->section == SEC_REORDER    ? "reorder "
                     : d->section == SEC_HYBRID   ? "hybrid "
                     : d->section == SEC_ADVANCED ? "advanced "
+                    : d->section == SEC_RELAY    ? "relay "
                                                  : "",
                     d->json_key, d->has_invalid_fallback ? "using default" : "ignoring");
     }
@@ -1146,8 +1164,14 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     const char *adv_raw = json_find_key(json_text, "advanced");
     const char *adv_end = (adv_raw && *adv_raw == '{') ? json_object_end(adv_raw) : NULL;
 
+    /* [Relay] equivalent: a bounded nested object, like reorder/hybrid. */
+    const char *relay_raw = json_find_key(json_text, "relay");
+    const char *relay_end =
+        (relay_raw && *relay_raw == '{') ? json_object_end(relay_raw) : NULL;
+
     /* All scalar keys — one walk of the shared descriptor table. */
-    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end, hy_raw, hy_end, adv_raw, adv_end);
+    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end, hy_raw, hy_end, adv_raw, adv_end,
+                       relay_raw, relay_end);
 
     /* [Hybrid] EgressAllow/EgressDeny — hand-coded like "users" below,
      * bounded to the "hybrid" object span like every other hybrid key. */
@@ -1229,6 +1253,130 @@ split_addr_port(const char *str, char *host, size_t host_len, int *port)
     if (*end != '\0' || p <= 0 || p > 65535) return -1;
     *port = (int)p;
     return 0;
+}
+
+static int
+parse_private_ipv4(const char *text)
+{
+    unsigned int a, b, c, d;
+    char tail;
+    if (!text || sscanf(text, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4 ||
+        a > 255 || b > 255 || c > 255 || d > 255)
+        return -1;
+    char canonical[16];
+    snprintf(canonical, sizeof(canonical), "%u.%u.%u.%u", a, b, c, d);
+    if (strcmp(canonical, text) != 0) return -1;
+    if (a == 10 || (a == 172 && b >= 16 && b <= 31) ||
+        (a == 192 && b == 168) || (a == 169 && b == 254))
+        return 0;
+    return -1;
+}
+
+static int
+base64_value(unsigned char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static int
+decode_relay_key(const char *encoded, size_t encoded_len, unsigned char out[32])
+{
+    char compact[96];
+    size_t n = 0;
+    for (size_t i = 0; i < encoded_len; i++) {
+        unsigned char c = (unsigned char)encoded[i];
+        if (isspace(c)) continue;
+        if (n >= sizeof(compact)) return -1;
+        compact[n++] = (char)c;
+    }
+    if (n == 0 || n % 4 != 0) return -1;
+
+    size_t out_n = 0;
+    for (size_t i = 0; i < n; i += 4) {
+        int v0 = base64_value((unsigned char)compact[i]);
+        int v1 = base64_value((unsigned char)compact[i + 1]);
+        int v2 = compact[i + 2] == '=' ? -2 : base64_value((unsigned char)compact[i + 2]);
+        int v3 = compact[i + 3] == '=' ? -2 : base64_value((unsigned char)compact[i + 3]);
+        int last = (i + 4 == n);
+        if (v0 < 0 || v1 < 0 || v2 == -1 || v3 == -1 ||
+            (!last && (v2 == -2 || v3 == -2)) || (v2 == -2 && v3 != -2))
+            return -1;
+        if (out_n >= 32) return -1;
+        out[out_n++] = (unsigned char)((v0 << 2) | (v1 >> 4));
+        if (v2 != -2) {
+            if (out_n >= 32) return -1;
+            out[out_n++] = (unsigned char)(((v1 & 15) << 4) | (v2 >> 2));
+            if (v3 != -2) {
+                if (out_n >= 32) return -1;
+                out[out_n++] = (unsigned char)(((v2 & 3) << 6) | v3);
+            }
+        }
+    }
+    return out_n == 32 ? 0 : -1;
+}
+
+static int
+validate_relay_config(mqvpn_file_config_t *cfg)
+{
+    if (!cfg->relay_enabled) return 0;
+
+    char host[64];
+    int port = 0;
+    if (split_addr_port(cfg->relay_endpoint, host, sizeof(host), &port) < 0 ||
+        parse_private_ipv4(host) < 0) {
+        LOG_ERR("config: [Relay] Endpoint must be a numeric private IPv4:port");
+        return -1;
+    }
+    snprintf(cfg->relay_ip, sizeof(cfg->relay_ip), "%s", host);
+    cfg->relay_port = port;
+    if (strlen(cfg->relay_interface) >= 16) {
+        LOG_ERR("config: [Relay] Interface is too long");
+        return -1;
+    }
+
+    if (cfg->relay_key_file[0] == '\0') {
+        LOG_ERR("config: [Relay] KeyFile is required when relay is enabled");
+        return -1;
+    }
+#ifdef _WIN32
+    LOG_ERR("config: [Relay] is supported only by the macOS client");
+    return -1;
+#else
+    int fd = open(cfg->relay_key_file, O_RDONLY | O_CLOEXEC
+#  ifdef O_NOFOLLOW
+                                         | O_NOFOLLOW
+#  endif
+    );
+    if (fd < 0) {
+        LOG_ERR("config: cannot open relay key file");
+        return -1;
+    }
+    struct stat st;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
+        (st.st_mode & (S_IRGRP | S_IROTH)) != 0) {
+        LOG_ERR("config: relay key file must be regular and not group/world readable");
+        close(fd);
+        return -1;
+    }
+    char encoded[96];
+    ssize_t got = read(fd, encoded, sizeof(encoded));
+    unsigned char extra;
+    ssize_t more = got >= 0 ? read(fd, &extra, 1) : -1;
+    close(fd);
+    if (got <= 0 || more != 0 ||
+        decode_relay_key(encoded, (size_t)got, cfg->relay_key) < 0) {
+        memset(cfg->relay_key, 0, sizeof(cfg->relay_key));
+        LOG_ERR("config: relay key file must contain exactly one Base64 32-byte key");
+        return -1;
+    }
+    cfg->relay_key_loaded = 1;
+    return 0;
+#endif
 }
 
 int
@@ -1320,11 +1468,13 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
     if (*s == '{') {
         int rc = mqvpn_config_load_json_filecfg(cfg, s);
         free(buf);
-        return rc;
+        return rc == 0 ? validate_relay_config(cfg) : rc;
     }
 
     int lineno = 0;
     int section = SEC_NONE;
+    int relay_sections = 0;
+    int fatal = 0;
     char *line = strtok(buf, "\n");
     while (line) {
         lineno++;
@@ -1349,6 +1499,11 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
                 section = SEC_NONE;
             } else {
                 section = sec;
+                if (section == SEC_RELAY && ++relay_sections > 1) {
+                    LOG_ERR("%s:%d: duplicate [Relay] section", path, lineno);
+                    fatal = 1;
+                    section = SEC_NONE;
+                }
                 /* Each [ReorderRule] occurrence pushes a fresh rule slot that
                  * its keys then fill (mirrors WireGuard repeated [Peer]). */
                 if (section == SEC_REORDER_RULE) {
@@ -1377,5 +1532,5 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
     }
 
     free(buf);
-    return 0;
+    return fatal ? -1 : validate_relay_config(cfg);
 }

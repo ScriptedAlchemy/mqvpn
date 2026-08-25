@@ -48,6 +48,18 @@ typedef struct mqvpn_file_config_s {
     /* [Auth] — client */
     char auth_key[256];
 
+    /* [Relay] — optional macOS iPhone cellular relay path. The key file
+     * contains one Base64-encoded 32-byte key and is decoded at load time;
+     * neither the encoded nor decoded key is ever logged. */
+    int relay_enabled;
+    char relay_endpoint[280]; /* numeric private IPv4:port */
+    char relay_key_file[256];
+    char relay_interface[32];
+    char relay_ip[16];
+    int relay_port;
+    unsigned char relay_key[32];
+    int relay_key_loaded;
+
     /* [TLS] — server */
     char cert_file[256];
     char key_file[256];

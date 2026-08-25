@@ -570,6 +570,11 @@ main(int argc, char *argv[])
             .udp_gso = file_cfg.udp_gso,
             /* [Advanced] UdpGro; default 1. Applies to client and server. */
             .udp_gro = file_cfg.udp_gro,
+            .relay_enabled = file_cfg.relay_enabled,
+            .relay_ip = file_cfg.relay_ip,
+            .relay_port = file_cfg.relay_port,
+            .relay_interface = file_cfg.relay_interface,
+            .relay_key = file_cfg.relay_key_loaded ? file_cfg.relay_key : NULL,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];

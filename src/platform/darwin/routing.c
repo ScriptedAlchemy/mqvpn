@@ -343,6 +343,75 @@ scoped_server_pin_delete(platform_ctx_t *p, const char *ifname)
 }
 
 int
+darwin_setup_relay_route(platform_ctx_t *p)
+{
+    if (!p || !p->relay_enabled) return 0;
+    if (p->relay_route_configured) return 0;
+    if (p->relay_ip[0] == '\0') return -1;
+
+    char gateway[INET_ADDRSTRLEN];
+    char iface[IFNAMSIZ];
+    if (discover_route(p->relay_ip, AF_INET, gateway, sizeof(gateway), iface,
+                       sizeof(iface)) < 0) {
+        LOG_WRN("relay route: no route to %s", p->relay_ip);
+        return -1;
+    }
+    if (p->relay_iface[0] != '\0' && strcmp(p->relay_iface, iface) != 0) {
+        LOG_WRN("relay route: endpoint %s resolves via %s, not configured %s",
+                p->relay_ip, iface, p->relay_iface);
+        return -1;
+    }
+    if (p->relay_iface[0] == '\0')
+        snprintf(p->relay_iface, sizeof(p->relay_iface), "%s", iface);
+
+    char host_cidr[INET_ADDRSTRLEN + 4];
+    snprintf(host_cidr, sizeof(host_cidr), "%s/32", p->relay_ip);
+    const char *argv[10];
+    int n = 0;
+    argv[n++] = "route";
+    argv[n++] = "-n";
+    argv[n++] = "add";
+    argv[n++] = "-ifscope";
+    argv[n++] = p->relay_iface;
+    argv[n++] = host_cidr;
+    if (gateway[0] != '\0') {
+        argv[n++] = gateway;
+    } else {
+        argv[n++] = "-interface";
+        argv[n++] = p->relay_iface;
+    }
+    argv[n] = NULL;
+
+    int ok = run_route_cmd(argv) == 0;
+    if (!ok) {
+        argv[2] = "change";
+        ok = run_route_cmd(argv) == 0;
+    }
+    if (!ok) return -1;
+
+    snprintf(p->relay_route_gateway, sizeof(p->relay_route_gateway), "%s", gateway);
+    snprintf(p->relay_route_iface, sizeof(p->relay_route_iface), "%s", p->relay_iface);
+    p->relay_route_configured = 1;
+    LOG_INF("relay route: %s via %s dev %s", p->relay_ip,
+            gateway[0] ? gateway : "on-link", p->relay_iface);
+    return 0;
+}
+
+void
+darwin_cleanup_relay_route(platform_ctx_t *p)
+{
+    if (!p || !p->relay_route_configured) return;
+    char host_cidr[INET_ADDRSTRLEN + 4];
+    snprintf(host_cidr, sizeof(host_cidr), "%s/32", p->relay_ip);
+    const char *argv[] = {"route", "-n", "delete", "-ifscope",
+                          p->relay_route_iface, host_cidr, NULL};
+    (void)run_route_cmd(argv);
+    p->relay_route_configured = 0;
+    p->relay_route_gateway[0] = '\0';
+    p->relay_route_iface[0] = '\0';
+}
+
+int
 setup_routes(platform_ctx_t *p)
 {
     sa_family_t af = p->server_addr.ss_family;

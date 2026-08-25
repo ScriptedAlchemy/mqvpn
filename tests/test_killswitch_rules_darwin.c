@@ -185,6 +185,26 @@ test_build_pf_rules_empty_server_ip(void)
     ASSERT_EQ_INT(build_pf_rules(&p, buf, sizeof(buf)), -1, "empty-server-ip v6 rc");
 }
 
+static void
+test_build_pf_rules_allows_only_relay_udp_endpoint(void)
+{
+    char buf[1024];
+    platform_ctx_t p;
+    init_ctx_v4(&p, 0);
+    p.relay_enabled = 1;
+    p.relay_port = 5443;
+    snprintf(p.relay_ip, sizeof(p.relay_ip), "192.168.1.195");
+    snprintf(p.relay_iface, sizeof(p.relay_iface), "en0");
+
+    ASSERT_EQ_INT(build_pf_rules(&p, buf, sizeof(buf)), 0, "relay pf rules build");
+    ASSERT_TRUE(strstr(buf,
+                       "pass out quick on en0 inet proto udp to 192.168.1.195 port = "
+                       "5443\n") != NULL,
+                "relay pf allowance is interface/IP/UDP/port scoped");
+    ASSERT_TRUE(strstr(buf, "proto tcp to 192.168.1.195") == NULL,
+                "relay pf allowance does not permit TCP");
+}
+
 /* ================================================================
  * 2. setup happy path: stdin ruleset captured verbatim, token parsed
  * ================================================================ */
@@ -294,6 +314,7 @@ main(void)
 {
     test_build_pf_rules_truth_table();
     test_build_pf_rules_empty_server_ip();
+    test_build_pf_rules_allows_only_relay_udp_endpoint();
 
     fake_cmd_env_t e;
     if (fake_cmd_env_init(&e) < 0) {

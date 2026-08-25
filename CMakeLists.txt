@@ -514,6 +514,7 @@ elseif(APPLE)
 add_executable(mqvpn
     src/main.c
     src/platform/darwin/platform_darwin.c
+    src/platform/darwin/relay_adapter.c
     src/platform/darwin/route_mon.c
     src/platform/darwin/tun_utun.c
     src/platform/darwin/routing.c
@@ -551,6 +552,7 @@ target_link_libraries(mqvpn
 # .github/workflows/ci.yml darwin job.
 add_library(mqvpn_darwin_platform OBJECT
     src/platform/darwin/platform_darwin.c
+    src/platform/darwin/relay_adapter.c
     src/platform/darwin/route_mon.c
     src/platform/darwin/tun_utun.c
     src/platform/darwin/routing.c
@@ -712,6 +714,15 @@ if(BUILD_TESTING)
     set_target_properties(test_relay_protocol PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_relay_protocol COMMAND test_relay_protocol)
+
+    add_executable(test_relay_adapter_darwin tests/test_relay_adapter_darwin.c
+        src/platform/darwin/relay_adapter.c)
+    target_link_libraries(test_relay_adapter_darwin mqvpn_lib ${CRYPTO_LIB}
+        ${EVENT_LIB} c++)
+    target_include_directories(test_relay_adapter_darwin PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/platform/darwin ${EVENT_INCLUDE_DIR})
+    add_test(NAME test_relay_adapter_darwin COMMAND test_relay_adapter_darwin)
 endif()
 
 else() # NOT WIN32, NOT APPLE — Linux
@@ -961,6 +972,17 @@ if(BUILD_TESTING)
     set_target_properties(test_relay_protocol PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_relay_protocol COMMAND test_relay_protocol)
+
+    add_executable(test_relay_adapter_darwin tests/test_relay_adapter_darwin.c
+        src/platform/darwin/relay_adapter.c)
+    target_link_libraries(test_relay_adapter_darwin mqvpn_lib ${CRYPTO_LIB}
+        ${EVENT_LIB} stdc++)
+    target_include_directories(test_relay_adapter_darwin PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/platform/darwin ${EVENT_INCLUDE_DIR})
+    set_target_properties(test_relay_adapter_darwin PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_relay_adapter_darwin COMMAND test_relay_adapter_darwin)
 
     # Server API test (links libmqvpn + xquic)
     add_executable(test_server tests/test_server.c)
