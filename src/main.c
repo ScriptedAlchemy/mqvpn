@@ -458,12 +458,6 @@ main(int argc, char *argv[])
         return 1;
     }
     int scheduler = sched_lookup;
-    mqvpn_performance_mode_t perf_mode = MQVPN_PERF_MAX_THROUGHPUT;
-    if (mqvpn_performance_mode_parse(file_cfg.optimize_for, strlen(file_cfg.optimize_for),
-                                     &perf_mode) != MQVPN_OK) {
-        fprintf(stderr, "error: OptimizeFor must be 'throughput' or 'latency'\n");
-        return 1;
-    }
     if (scheduler == MQVPN_SCHED_BACKUP_FEC) {
 #if !(defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR))
         fprintf(stderr, "error: --scheduler 'backup_fec' requires rebuild with "
@@ -521,6 +515,13 @@ main(int argc, char *argv[])
     }
 
     if (strcmp(eff_mode, "client") == 0) {
+        mqvpn_performance_mode_t perf_mode = MQVPN_PERF_MAX_THROUGHPUT;
+        if (mqvpn_performance_mode_parse(file_cfg.optimize_for,
+                                         strlen(file_cfg.optimize_for),
+                                         &perf_mode) != MQVPN_OK) {
+            fprintf(stderr, "error: OptimizeFor must be 'throughput' or 'latency'\n");
+            return 1;
+        }
         if (!eff_server || eff_server[0] == '\0') {
             fprintf(stderr, "error: --server is required for client mode\n");
             return 1;
@@ -622,7 +623,6 @@ main(int argc, char *argv[])
             .key_file = eff_key,
             .log_level = log_level,
             .scheduler = scheduler,
-            .performance_mode = (int)perf_mode,
             .auth_key = eff_auth_key,
             .n_users = eff_n_users,
             .max_clients = eff_max_clients,

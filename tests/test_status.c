@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <unistd.h>
 
 /* Pull in static functions from status.c */
 #include "../src/platform/posix/status.c"
@@ -297,6 +298,36 @@ TEST(json_find_key_empty_object)
     ASSERT_EQ((long long)(uintptr_t)val, 0);
 }
 
+TEST(print_client_goodput_bytes_per_second)
+{
+    static const char client[] =
+        "{\"user\":\"alice\",\"endpoint\":\"127.0.0.1:443\","
+        "\"connected_sec\":1,\"bytes_tx\":0,\"bytes_rx\":0,"
+        "\"performance\":\"throughput\",\"n_paths\":1,\"paths\":[{"
+        "\"path_id\":7,\"srtt_ms\":1,\"min_rtt_ms\":1,\"cwnd\":1,"
+        "\"state_label\":\"active\",\"goodput_Bps\":123456,"
+        "\"warmup\":false,\"weight_pct\":20}]}";
+
+    int capture[2];
+    ASSERT_EQ(pipe(capture), 0);
+    int saved_stdout = dup(STDOUT_FILENO);
+    ASSERT_EQ(saved_stdout >= 0, 1);
+    fflush(stdout);
+    ASSERT_EQ(dup2(capture[1], STDOUT_FILENO), STDOUT_FILENO);
+    close(capture[1]);
+
+    print_client(client);
+    fflush(stdout);
+    ASSERT_EQ(dup2(saved_stdout, STDOUT_FILENO), STDOUT_FILENO);
+    close(saved_stdout);
+
+    char output[4096] = {0};
+    ssize_t n = read(capture[0], output, sizeof(output) - 1);
+    close(capture[0]);
+    ASSERT_EQ(n > 0, 1);
+    ASSERT_EQ(strstr(output, "goodput=123456B/s") != NULL, 1);
+}
+
 /* ── Main ── */
 
 int
@@ -346,6 +377,7 @@ main(void)
     /* JSON edge case tests */
     run_json_find_key_escaped_quotes();
     run_json_find_key_empty_object();
+    run_print_client_goodput_bytes_per_second();
 
     printf("\n  %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return g_tests_passed == g_tests_run ? 0 : 1;

@@ -177,17 +177,17 @@ print_client(const char *obj)
             const char *sl = json_find_key(path_obj, "state_label");
             if (sl) json_read_string(sl, state_str, sizeof(state_str));
 
-            const char *goodput_v = json_find_key(path_obj, "goodput_bps");
+            const char *goodput_v = json_find_key(path_obj, "goodput_Bps");
             const char *warmup_v = json_find_key(path_obj, "warmup");
             const char *weight_v = json_find_key(path_obj, "weight_pct");
             if (goodput_v || warmup_v || weight_v) {
-                uint64_t goodput_bps = (uint64_t)json_read_int64(goodput_v);
+                uint64_t goodput_Bps = (uint64_t)json_read_int64(goodput_v);
                 unsigned weight_pct = (unsigned)json_read_int64(weight_v);
                 int warmup = warmup_v && strncmp(warmup_v, "true", 4) == 0;
 
                 printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64
                        "ms cwnd=%s %s goodput=%" PRIu64 "B/s warmup=%s weight=%u%%\n",
-                       idx, srtt, min_rtt, cwnd_str, state_str, goodput_bps,
+                       idx, srtt, min_rtt, cwnd_str, state_str, goodput_Bps,
                        warmup ? "true" : "false", weight_pct);
             } else {
                 printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64 "ms cwnd=%s %s\n",

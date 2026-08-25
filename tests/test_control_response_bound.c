@@ -35,7 +35,7 @@ per_path_entry_bytes(void)
         ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
         ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
         ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
-        "\"reinject_tx_bytes\":%" PRIu64 ",\"goodput_bps\":%" PRIu64
+        "\"reinject_tx_bytes\":%" PRIu64 ",\"goodput_Bps\":%" PRIu64
         ",\"warmup\":%s,\"weight_pct\":%u}",
         UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
         UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT32_MAX, "validating",

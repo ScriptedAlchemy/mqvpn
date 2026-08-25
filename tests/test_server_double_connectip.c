@@ -30,8 +30,8 @@
  *
  * What this test does
  * --------------------
- * Stands up a REAL mqvpn server on a loopback UDP socket (no PSK
- * configured, so no auth token is needed) and drives it with a RAW xquic
+ * Stands up a REAL mqvpn server with a PSK on a loopback UDP socket and
+ * drives it with a RAW xquic
  * H3 client — built directly on the xquic public API, NOT the mqvpn
  * client, because the mqvpn client API has no way to open a second
  * connect-ip request on an already-tunneled connection. The raw client
@@ -46,6 +46,11 @@
  *      re-establishment path instead, which ALSO leaves n_clients==1, so
  *      the status pair is what actually discriminates the two), and the
  *      callback counts (on_client_connected==1, on_client_disconnected==0).
+ *      Also pins live performance policy: request #1 sends
+ *      mqvpn-performance: latency; after 200, get_client_info must report
+ *      latency. Request #2 then sends mqvpn-performance: throughput; after
+ *      409, get_client_info must still report latency with n_clients==1 —
+ *      a rejected duplicate must not mutate the live WLB policy.
  *   2. Re-establishment (a): closes request #1's stream
  *      (xqc_h3_request_close) and asserts n_clients drops to 0 and
  *      on_client_disconnected fires exactly once — pins the EAGER release
@@ -54,7 +59,11 @@
  *   3. Re-establishment (b): sends a THIRD connect-ip request on the same
  *      connection and asserts it succeeds (:status 200, n_clients==1,
  *      on_client_connected total 2) — pins the re-establishment path in
- *      svr_connect_ip_on_request.
+ *      svr_connect_ip_on_request. Request #3 sends an unknown performance
+ *      value and must receive the compatibility default, throughput. After
+ *      200, get_client_info must report that effective default:
+ *      re-establishment MAY replace the policy the rejected duplicate could
+ *      not.
  *   4. qsid fence: frames one inner IPv4 packet (source = the second
  *      tunnel's assigned IP, to pass forward_inner_ip's anti-spoof check)
  *      as an HTTP Datagram twice — once under request #1's closed
@@ -86,8 +95,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <poll.h>
+#include <fcntl.h>
 
 #include "libmqvpn.h"
+#include "performance_mode.h"
 
 #include <xquic/xquic.h>
 #include <xquic/xquic_typedef.h>
@@ -107,6 +118,7 @@ typedef struct {
     int closed; /* h3_request_close_notify fired */
 } cli_req_ctx_t;
 
+static cli_req_ctx_t g_req0 = {.status = -1}; /* invalid-PSK preflight */
 static cli_req_ctx_t g_req1 = {.status = -1};
 static cli_req_ctx_t g_req2 = {.status = -1};
 /* Third connect-ip request, sent in the re-establishment phase (§3b) after
@@ -250,16 +262,20 @@ cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
 
 /* Send the RFC 9484 Extended CONNECT connect-ip headers on a fresh H3
  * request already created on the shared connection. Mirrors
- * src/mqvpn_client.c's cli_masque_start_tunnel — the server has no PSK
- * configured, so no authorization header is sent, and reorder is off by
- * default server-side, so no mqvpn-reorder header either. */
+ * src/mqvpn_client.c's cli_masque_start_tunnel. Reorder is off by default
+ * server-side, so no mqvpn-reorder header is needed.
+ *
+ * perf: optional mqvpn-performance value (MQVPN_PERFORMANCE_LATENCY /
+ * MQVPN_PERFORMANCE_THROUGHPUT). NULL omits the header (server default
+ * is throughput). Header name is exactly MQVPN_PERFORMANCE_HDR_NAME. */
 static int
-cli_send_connect_ip(xqc_h3_request_t *req, int svr_port)
+cli_send_connect_ip(xqc_h3_request_t *req, int svr_port, const char *auth,
+                    const char *perf)
 {
     char authority[64];
     snprintf(authority, sizeof(authority), "127.0.0.1:%d", svr_port);
 
-    xqc_http_header_t hdrs[6] = {
+    xqc_http_header_t hdrs[8] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -279,12 +295,60 @@ cli_send_connect_ip(xqc_h3_request_t *req, int svr_port)
          .value = {.iov_base = "?1", .iov_len = 2},
          .flags = 0},
     };
-    xqc_http_headers_t headers = {.headers = hdrs, .count = 6, .capacity = 6};
+    int hdr_count = 6;
+    char auth_value[128];
+    if (auth) {
+        snprintf(auth_value, sizeof(auth_value), "Bearer %s", auth);
+        hdrs[hdr_count].name =
+            (struct iovec){.iov_base = "authorization", .iov_len = 13};
+        hdrs[hdr_count].value =
+            (struct iovec){.iov_base = auth_value, .iov_len = strlen(auth_value)};
+        hdrs[hdr_count].flags = 0;
+        hdr_count++;
+    }
+    if (perf) {
+        hdrs[hdr_count].name =
+            (struct iovec){.iov_base = (void *)MQVPN_PERFORMANCE_HDR_NAME,
+                           .iov_len = sizeof(MQVPN_PERFORMANCE_HDR_NAME) - 1};
+        hdrs[hdr_count].value =
+            (struct iovec){.iov_base = (void *)perf, .iov_len = strlen(perf)};
+        hdrs[hdr_count].flags = 0;
+        hdr_count++;
+    }
+    xqc_http_headers_t headers = {
+        .headers = hdrs, .count = (size_t)hdr_count, .capacity = 8};
 
     /* fin=0: a real connect-ip tunnel keeps the stream open for capsules
      * (and would carry DATAGRAMs); the rejected duplicate never gets a
      * chance to send a body either way. */
     return xqc_h3_request_send_headers(req, &headers, 0) < 0 ? -1 : 0;
+}
+
+/* Snapshot the live session's advertised performance via
+ * mqvpn_server_get_client_info. Returns 0 if the API succeeded (*n_out
+ * and buf filled; n==0 leaves buf empty); -1 if the API failed. */
+static int
+cli_get_live_performance(const mqvpn_server_t *svr, char *buf, size_t buflen,
+                         int *n_out)
+{
+    mqvpn_client_info_t info;
+    memset(&info, 0, sizeof(info));
+    int n = -1;
+    if (mqvpn_server_get_client_info(svr, &info, 1, &n) != MQVPN_OK) return -1;
+    if (n_out) *n_out = n;
+    if (buf && buflen > 0) {
+        if (n >= 1)
+            snprintf(buf, buflen, "%s", info.performance);
+        else
+            buf[0] = '\0';
+    }
+    return 0;
+}
+
+static int
+perf_is(const char *got, const char *want)
+{
+    return got && want && strcmp(got, want) == 0;
 }
 
 static int
@@ -379,8 +443,13 @@ svr_on_client_disconnected(uint32_t session_id, mqvpn_error_t reason, void *user
 static int
 make_udp_loopback(struct sockaddr_in *out_addr)
 {
-    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(fd);
+        return -1;
+    }
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
@@ -525,12 +594,12 @@ main(void)
     }
     g_cli_fd = cli_fd;
 
-    /* 2. mqvpn server bound to svr_fd — insecure (no PSK configured, so no
-     * auth token is required from the client). */
+    /* 2. mqvpn server bound to svr_fd with real request-level PSK auth. */
     mqvpn_config_t *cfg = mqvpn_config_new();
     mqvpn_config_set_listen(cfg, "127.0.0.1", ntohs(svr_addr.sin_port));
     mqvpn_config_set_subnet(cfg, "10.0.0.0/24");
     mqvpn_config_set_tls_cert(cfg, TEST_CERT_FILE, TEST_KEY_FILE);
+    mqvpn_config_set_auth_key(cfg, "correct-test-psk");
     mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR);
 
     mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
@@ -657,8 +726,67 @@ main(void)
         printf("FAIL: handshake never finished\n");
         rc = 1;
     } else {
+        xqc_h3_request_t *req0 =
+            xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req0);
+        if (!req0 ||
+            cli_send_connect_ip(req0, ntohs(svr_addr.sin_port), "wrong-test-psk",
+                                MQVPN_PERFORMANCE_THROUGHPUT) != 0) {
+            printf("FAIL: send invalid-PSK request\n");
+            rc = 1;
+        } else {
+            pump_cond_ctx_t rejected_auth = {
+                .svr = svr,
+                .min_clients = -1,
+                .eq_clients = 0,
+                .req = &g_req0,
+                .counter = NULL,
+                .counter_target = 0,
+            };
+            pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS,
+                       &rejected_auth);
+            int rejected = g_req0.status == 403 ||
+                           (g_req0.status == -1 && g_req0.closed);
+            if (!rejected || mqvpn_server_get_n_clients(svr) != 0 ||
+                g_client_connected_calls != 0) {
+                printf("  invalid PSK: status=%d closed=%d clients=%d "
+                       "connected_calls=%d (expected reject/0/0) FAIL\n",
+                       g_req0.status, g_req0.closed,
+                       mqvpn_server_get_n_clients(svr), g_client_connected_calls);
+                rc = 1;
+            } else {
+                printf("  invalid PSK rejected before tunnel policy (clients=0) PASS\n");
+            }
+        }
+    }
+
+    if (rc == 0) {
+        /* The server closes the unauthenticated H3 connection after rejecting
+         * its request. Establish a fresh real connection for the authenticated
+         * duplicate/re-establishment phases below. */
+        g_handshake_finished = 0;
+        const xqc_cid_t *authed_cid =
+            xqc_h3_connect(g_cli_engine, &cs, NULL, 0, "mqvpn-test.invalid", 0,
+                           &ssl_cfg, (struct sockaddr *)&svr_addr, sizeof(svr_addr),
+                           NULL);
+        if (!authed_cid) {
+            printf("FAIL: reconnect after invalid PSK\n");
+            rc = 1;
+        } else {
+            memcpy(&g_cli_cid, (const void *)authed_cid, sizeof(g_cli_cid));
+            pump_wait(svr, svr_fd, &cli_addr, cli_fd, 2000,
+                      &g_handshake_finished);
+            if (!g_handshake_finished) {
+                printf("FAIL: authenticated connection handshake never finished\n");
+                rc = 1;
+            }
+        }
+    }
+
+    if (rc == 0) {
         req1 = xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req1);
-        if (!req1 || cli_send_connect_ip(req1, ntohs(svr_addr.sin_port)) != 0) {
+        if (!req1 ||
+            cli_send_connect_ip(req1, ntohs(svr_addr.sin_port), "correct-test-psk",
+                                MQVPN_PERFORMANCE_LATENCY) != 0) {
             printf("FAIL: send request #1\n");
             rc = 1;
         } else {
@@ -685,21 +813,44 @@ main(void)
         pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &est1_cond);
 
         n_after_first = mqvpn_server_get_n_clients(svr);
-        fprintf(stderr,
-                "[phase1] n_clients=%d req1_status=%d assigned_ip=%d.%d.%d.%d "
-                "on_client_connected_calls=%d\n",
-                n_after_first, g_req1.status, g_assigned_ip[0], g_assigned_ip[1],
-                g_assigned_ip[2], g_assigned_ip[3], g_client_connected_calls);
+        {
+            char perf[16] = {0};
+            int n_info = -1;
+            (void)cli_get_live_performance(svr, perf, sizeof(perf), &n_info);
+            fprintf(stderr,
+                    "[phase1] n_clients=%d req1_status=%d assigned_ip=%d.%d.%d.%d "
+                    "on_client_connected_calls=%d performance=%s n_info=%d\n",
+                    n_after_first, g_req1.status, g_assigned_ip[0], g_assigned_ip[1],
+                    g_assigned_ip[2], g_assigned_ip[3], g_client_connected_calls, perf,
+                    n_info);
+        }
         if (n_after_first != 1) {
             printf("  first CONNECT-IP did not establish exactly one session   FAIL\n");
             rc = 1;
+        }
+        /* After 200: live policy must exactly match the requested latency mode. */
+        if (g_req1.status == 200) {
+            char perf[16] = {0};
+            int n_info = -1;
+            if (cli_get_live_performance(svr, perf, sizeof(perf), &n_info) != 0 ||
+                n_info != 1 || !perf_is(perf, MQVPN_PERFORMANCE_LATENCY)) {
+                printf("  req1=200 live performance=%s n=%d (expected latency/1) "
+                       "FAIL\n",
+                       perf, n_info);
+                rc = 1;
+            } else {
+                printf("  req1=200 live performance is latency                   "
+                       "PASS\n");
+            }
         }
     }
 
     if (rc == 0) {
         xqc_h3_request_t *req2 =
             xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req2);
-        if (!req2 || cli_send_connect_ip(req2, ntohs(svr_addr.sin_port)) != 0) {
+        if (!req2 ||
+            cli_send_connect_ip(req2, ntohs(svr_addr.sin_port), "correct-test-psk",
+                                MQVPN_PERFORMANCE_THROUGHPUT) != 0) {
             printf("FAIL: send request #2\n");
             rc = 1;
         }
@@ -721,11 +872,17 @@ main(void)
     pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &req2_cond);
 
     int n_clients = mqvpn_server_get_n_clients(svr);
-    fprintf(stderr,
-            "[phase2] n_clients=%d req1_status=%d req2_status=%d req2_closed=%d "
-            "on_client_connected_calls=%d on_client_disconnected_calls=%d\n",
-            n_clients, g_req1.status, g_req2.status, g_req2.closed,
-            g_client_connected_calls, g_client_disconnected_calls);
+    {
+        char perf[16] = {0};
+        int n_info = -1;
+        (void)cli_get_live_performance(svr, perf, sizeof(perf), &n_info);
+        fprintf(stderr,
+                "[phase2] n_clients=%d req1_status=%d req2_status=%d req2_closed=%d "
+                "on_client_connected_calls=%d on_client_disconnected_calls=%d "
+                "performance=%s n_info=%d\n",
+                n_clients, g_req1.status, g_req2.status, g_req2.closed,
+                g_client_connected_calls, g_client_disconnected_calls, perf, n_info);
+    }
 
     /* 7. Core security assertion: exactly one session survives the
      * duplicate request — the second was rejected, not admitted. On its
@@ -767,6 +924,26 @@ main(void)
                "(expected 1/0/1)                                              FAIL\n",
                g_client_connected_calls, g_client_disconnected_calls, n_clients);
         rc = 1;
+    }
+
+    /* A rejected duplicate that asked for throughput must not mutate the
+     * live latency policy. Not gated on 409: a 409-guard regression that
+     * silently re-establishes would also leave n_clients==1 but flip
+     * performance to throughput — that is the hole this pin closes. */
+    {
+        char perf[16] = {0};
+        int n_info = -1;
+        if (cli_get_live_performance(svr, perf, sizeof(perf), &n_info) != 0 ||
+            n_info != 1 || n_clients != 1 ||
+            !perf_is(perf, MQVPN_PERFORMANCE_LATENCY)) {
+            printf("  duplicate mutated live performance: n=%d perf=%s "
+                   "n_clients=%d (expected latency/1/1)                   FAIL\n",
+                   n_info, perf, n_clients);
+            rc = 1;
+        } else {
+            printf("  live performance still latency after duplicate (n=1)       "
+                   "PASS\n");
+        }
     }
 
     /* 8. Re-establishment phase (a): close request #1's stream from the
@@ -814,7 +991,9 @@ main(void)
     uint64_t req3_stream_id = 0;
     if (rc == 0) {
         req3 = xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req3);
-        if (!req3 || cli_send_connect_ip(req3, ntohs(svr_addr.sin_port)) != 0) {
+        if (!req3 ||
+            cli_send_connect_ip(req3, ntohs(svr_addr.sin_port), "correct-test-psk",
+                                "unknown") != 0) {
             printf("FAIL: send request #3\n");
             rc = 1;
         } else {
@@ -834,11 +1013,17 @@ main(void)
         pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &reest_cond);
 
         int n_after_reest = mqvpn_server_get_n_clients(svr);
-        fprintf(stderr,
-                "[phase3b] n_clients=%d req3_status=%d on_client_connected_calls=%d "
-                "assigned_ip2=%d.%d.%d.%d\n",
-                n_after_reest, g_req3.status, g_client_connected_calls, g_assigned_ip2[0],
-                g_assigned_ip2[1], g_assigned_ip2[2], g_assigned_ip2[3]);
+        {
+            char perf[16] = {0};
+            int n_info = -1;
+            (void)cli_get_live_performance(svr, perf, sizeof(perf), &n_info);
+            fprintf(stderr,
+                    "[phase3b] n_clients=%d req3_status=%d on_client_connected_calls=%d "
+                    "assigned_ip2=%d.%d.%d.%d performance=%s n_info=%d\n",
+                    n_after_reest, g_req3.status, g_client_connected_calls,
+                    g_assigned_ip2[0], g_assigned_ip2[1], g_assigned_ip2[2],
+                    g_assigned_ip2[3], perf, n_info);
+        }
         if (g_req3.status == 200 && n_after_reest == 1 && g_client_connected_calls == 2) {
             printf("  re-establishment: req3=200, n_clients=1, connected_calls=2     "
                    "PASS\n");
@@ -847,6 +1032,22 @@ main(void)
                    "(expected 200/1/2)                                          FAIL\n",
                    g_req3.status, n_after_reest, g_client_connected_calls);
             rc = 1;
+        }
+        /* Unknown wire value selects the throughput compatibility default.
+         * Re-establishment may replace what the rejected duplicate could not. */
+        if (g_req3.status == 200) {
+            char perf[16] = {0};
+            int n_info = -1;
+            if (cli_get_live_performance(svr, perf, sizeof(perf), &n_info) != 0 ||
+                n_info != 1 || !perf_is(perf, MQVPN_PERFORMANCE_THROUGHPUT)) {
+                printf("  re-establishment performance=%s n=%d (expected "
+                       "throughput/1)                                        FAIL\n",
+                       perf, n_info);
+                rc = 1;
+            } else {
+                printf("  re-establishment live performance is throughput        "
+                       "PASS\n");
+            }
         }
     }
 

@@ -24,7 +24,12 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 
 /* ── Configurable stub state ──────────────────────────────────────────────── */
 
@@ -263,6 +268,131 @@ call(const char *req)
     dispatch(req, g_resp, sizeof(g_resp) - 2, &cs);
 }
 
+static struct timespec g_timer_started;
+static uint64_t g_timer_elapsed_ms;
+
+static void
+record_timer_latency(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd;
+    (void)what;
+    (void)arg;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    g_timer_elapsed_ms =
+        (uint64_t)(now.tv_sec - g_timer_started.tv_sec) * 1000 +
+        (uint64_t)(now.tv_nsec - g_timer_started.tv_nsec) / 1000000;
+}
+
+/* A maximum get_status response must not monopolize the libevent thread when
+ * the local peer applies backpressure. The child deliberately waits 400 ms
+ * before reading. A 20 ms event-loop timer must still run while the response
+ * is blocked, and the complete newline-terminated JSON must eventually arrive. */
+static void
+test_large_response_does_not_stall_event_loop(void)
+{
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (g_failed) return;
+
+    int sndbuf = 4096;
+    CHECK(setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) == 0);
+    int flags = fcntl(sv[0], F_GETFL, 0);
+    CHECK(flags >= 0 && fcntl(sv[0], F_SETFL, flags | O_NONBLOCK) == 0);
+
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    memset(&g_wlb_tmpl, 0, sizeof(g_wlb_tmpl));
+    memset(g_client_info_tmpl.username, 'u', sizeof(g_client_info_tmpl.username) - 1);
+    memset(g_client_info_tmpl.endpoint, 'e', sizeof(g_client_info_tmpl.endpoint) - 1);
+    g_client_info_tmpl.n_paths = MQVPN_MAX_PATHS;
+    for (int p = 0; p < MQVPN_MAX_PATHS; p++) {
+        g_client_info_tmpl.paths[p].path_id = (uint64_t)p;
+        g_client_info_tmpl.paths[p].state = 2;
+    }
+    g_client_info_n = MQVPN_MAX_USERS;
+
+    static const char request[] = "{\"cmd\":\"get_status\"}";
+    CHECK(write(sv[1], request, sizeof(request) - 1) == (ssize_t)(sizeof(request) - 1));
+
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        close(sv[0]);
+        usleep(400000);
+        char *response = calloc(1, CTRL_MAX_RESP_BYTES);
+        size_t used = 0;
+        ssize_t n;
+        while (response && used < CTRL_MAX_RESP_BYTES - 1 &&
+               (n = read(sv[1], response + used, CTRL_MAX_RESP_BYTES - 1 - used)) > 0) {
+            used += (size_t)n;
+        }
+        int ok = response && used > 0 && response[used - 1] == '\n' &&
+                 strstr(response, "\"n_clients\":64") != NULL;
+        free(response);
+        close(sv[1]);
+        _exit(ok ? 0 : 1);
+    }
+    if (child < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        return;
+    }
+    close(sv[1]);
+
+    struct event_base *base = event_base_new();
+    CHECK(base != NULL);
+    ctrl_socket_t cs = {
+        .eb = base,
+        .server = (mqvpn_server_t *)&g_dummy_server,
+        .gro_receives = &g_gro_receives,
+        .gro_datagrams = &g_gro_datagrams,
+        .n_conns = 1,
+    };
+    ctrl_conn_t *conn = calloc(1, sizeof(*conn));
+    CHECK(conn != NULL);
+    if (!base || !conn) {
+        if (conn) free(conn);
+        if (base) event_base_free(base);
+        close(sv[0]);
+        (void)waitpid(child, NULL, 0);
+        return;
+    }
+    conn->fd = sv[0];
+    conn->cs = &cs;
+    conn->ev = event_new(base, sv[0], EV_READ | EV_PERSIST, ctrl_on_read, conn);
+    CHECK(conn->ev != NULL);
+    struct event *timer = evtimer_new(base, record_timer_latency, NULL);
+    CHECK(timer != NULL);
+
+    g_timer_elapsed_ms = UINT64_MAX;
+    clock_gettime(CLOCK_MONOTONIC, &g_timer_started);
+    struct timeval timer_delay = {.tv_usec = 20000};
+    event_add(conn->ev, NULL);
+    evtimer_add(timer, &timer_delay);
+    CHECK(event_base_dispatch(base) == 1);
+
+    int status = 0;
+    CHECK(waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(g_timer_elapsed_ms < 250);
+    CHECK(cs.n_conns == 0);
+
+    event_free(timer);
+    event_base_free(base);
+    g_client_info_n = 0;
+}
+
+static void
+test_control_listener_accepts_loopback_only(void)
+{
+    CHECK(ctrl_addr_is_loopback("127.0.0.1"));
+    CHECK(ctrl_addr_is_loopback("::1"));
+    CHECK(!ctrl_addr_is_loopback("0.0.0.0"));
+    CHECK(!ctrl_addr_is_loopback("192.168.1.10"));
+    CHECK(!ctrl_addr_is_loopback("not-an-address"));
+}
+
 /* ── Envelope / routing ───────────────────────────────────────────────────── */
 
 static void
@@ -412,7 +542,7 @@ test_get_status_one_client_with_path(void)
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"state_label\":\"active\"");
     CHECK_HAS("\"reinject_tx_bytes\":0");
-    CHECK_HAS("\"goodput_bps\":0");
+    CHECK_HAS("\"goodput_Bps\":0");
     CHECK_HAS("\"warmup\":false");
     CHECK_HAS("\"weight_pct\":0");
 }
@@ -489,15 +619,30 @@ test_get_status_wlb_matched_path_id(void)
 
     g_wlb_tmpl.n_paths = 1;
     g_wlb_tmpl.paths[0].path_id = 7;
-    g_wlb_tmpl.paths[0].goodput_bps = 123456;
+    g_wlb_tmpl.paths[0].goodput_Bps = 123456;
     g_wlb_tmpl.paths[0].warmup = 1;
     g_wlb_tmpl.paths[0].weight_pct = 20;
 
     call("{\"cmd\":\"get_status\"}");
     CHECK_HAS("\"path_id\":7");
-    CHECK_HAS("\"goodput_bps\":123456");
+    CHECK_HAS("\"goodput_Bps\":123456");
     CHECK_HAS("\"warmup\":true");
     CHECK_HAS("\"weight_pct\":20");
+}
+
+static void
+test_get_status_effective_policy_failures_are_explicit(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.performance, "admin_override");
+    g_client_info_n = 1;
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"performance\":\"admin_override\"");
+
+    strcpy(g_client_info_tmpl.performance, "unavailable");
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"performance\":\"unavailable\"");
 }
 
 /* ── get_build_info ───────────────────────────────────────────────────────── */
@@ -609,6 +754,8 @@ test_get_reorder_stats_internal_error(void)
 int
 main(void)
 {
+    test_large_response_does_not_stall_event_loop();
+    test_control_listener_accepts_loopback_only();
     test_missing_cmd();
     test_unknown_cmd();
 
@@ -631,6 +778,7 @@ main(void)
     test_get_status_reinject_matched_path_id();
     test_get_status_reinject_mismatched_path_id();
     test_get_status_wlb_matched_path_id();
+    test_get_status_effective_policy_failures_are_explicit();
 
     test_get_build_info();
 

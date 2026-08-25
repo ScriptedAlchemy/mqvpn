@@ -357,7 +357,9 @@ typedef struct {
     uint64_t bytes_rx;
     mqvpn_path_stats_t paths[MQVPN_MAX_PATHS];
     int n_paths;
-    char performance[16]; /* "throughput" | "latency" */
+    /* Effective connection policy: "throughput", "latency",
+     * "admin_override", or "unavailable". */
+    char performance[16];
 } mqvpn_client_info_t;
 
 typedef struct {

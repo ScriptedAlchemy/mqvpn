@@ -340,10 +340,8 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->scheduler = sched;
     }
 
-    /* Canonical key is optimize_for (INI OptimizeFor). `performance` is a
-     * request-local alias for the same enum used on CONNECT-IP / 9090. */
+    /* Canonical public JSON key matching INI [Multipath] OptimizeFor. */
     v = json_find_key(json_text, "optimize_for");
-    if (!v) v = json_find_key(json_text, "performance");
     if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
         mqvpn_performance_mode_t mode = MQVPN_PERF_MAX_THROUGHPUT;
         if (mqvpn_performance_mode_parse(tmp, strlen(tmp), &mode) != MQVPN_OK) {

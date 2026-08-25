@@ -73,6 +73,12 @@
 typedef struct svr_conn_s svr_conn_t;
 typedef struct svr_stream_s svr_stream_t;
 
+typedef enum {
+    SVR_PERF_UNAVAILABLE = 0,
+    SVR_PERF_APPLIED,
+    SVR_PERF_ADMIN_OVERRIDE,
+} svr_performance_status_t;
+
 /* ─── Internal types ─── */
 
 struct svr_conn_s {
@@ -114,6 +120,7 @@ struct svr_conn_s {
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
     mqvpn_performance_mode_t performance_mode;
+    svr_performance_status_t performance_status;
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     int tcp_flow_count; /* per-session cap enforcement lands with the
@@ -1414,13 +1421,16 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
         int rc = xqc_conn_set_wlb_policy(s->engine, &stream->conn->cid, pol);
         if (rc == XQC_OK) {
             stream->conn->performance_mode = hdrs->performance_mode;
+            stream->conn->performance_status = SVR_PERF_APPLIED;
         } else if (rc == -XQC_EPARAM) {
+            stream->conn->performance_status = SVR_PERF_ADMIN_OVERRIDE;
             LOG_I(s,
                   "performance mode %s left administrative scheduler unchanged",
                   mqvpn_performance_mode_name(hdrs->performance_mode)
                       ? mqvpn_performance_mode_name(hdrs->performance_mode)
                       : MQVPN_PERFORMANCE_THROUGHPUT);
         } else {
+            stream->conn->performance_status = SVR_PERF_UNAVAILABLE;
             LOG_W(s, "xqc_conn_set_wlb_policy failed rc=%d", rc);
         }
     }
@@ -2953,10 +2963,14 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
         memset(ci, 0, sizeof(*ci));
         ci->struct_size = sizeof(*ci);
         snprintf(ci->username, sizeof(ci->username), "%s", conn->username);
-        snprintf(ci->performance, sizeof(ci->performance), "%s",
-                 mqvpn_performance_mode_name(conn->performance_mode)
-                     ? mqvpn_performance_mode_name(conn->performance_mode)
-                     : MQVPN_PERFORMANCE_THROUGHPUT);
+        const char *effective = "unavailable";
+        if (conn->performance_status == SVR_PERF_APPLIED) {
+            const char *applied = mqvpn_performance_mode_name(conn->performance_mode);
+            if (applied) effective = applied;
+        } else if (conn->performance_status == SVR_PERF_ADMIN_OVERRIDE) {
+            effective = "admin_override";
+        }
+        snprintf(ci->performance, sizeof(ci->performance), "%s", effective);
 
         /* Format endpoint. peer_addr is sockaddr_storage because xquic may
          * deliver either sockaddr_in (IPv4 socket → 16 B) or sockaddr_in6
@@ -3081,7 +3095,7 @@ mqvpn_server_get_client_wlb(const mqvpn_server_t *s,
             if (n > (size_t)MQVPN_MAX_PATHS) n = (size_t)MQVPN_MAX_PATHS;
             for (size_t p = 0; p < n; p++) {
                 e->paths[e->n_paths].path_id = snap[p].path_id;
-                e->paths[e->n_paths].goodput_bps = snap[p].goodput_Bps;
+                e->paths[e->n_paths].goodput_Bps = snap[p].goodput_Bps;
                 e->paths[e->n_paths].weight_pct = snap[p].weight_pct;
                 e->paths[e->n_paths].warmup = snap[p].warmup;
                 e->n_paths++;

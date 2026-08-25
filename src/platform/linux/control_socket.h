@@ -35,7 +35,7 @@ struct event_base;
 
 typedef struct ctrl_socket_s ctrl_socket_t;
 
-/* addr defaults to "127.0.0.1" when NULL.
+/* addr defaults to "127.0.0.1" when NULL. Non-loopback addresses are rejected.
  *
  * gro_receives / gro_datagrams point at the platform's live receive-side UDP
  * offload counters, reported by get_stats as udp_rx_*. They are borrowed, not

@@ -285,7 +285,6 @@ TEST(config_load_json_performance_mode)
         mqvpn_performance_mode_t want;
     } ok_cases[] = {
         {"{\"optimize_for\":\"latency\"}", MQVPN_PERF_LOW_LATENCY},
-        {"{\"performance\":\"throughput\"}", MQVPN_PERF_MAX_THROUGHPUT},
         {"{\"optimize_for\":\"LaTeNcY\"}", MQVPN_PERF_LOW_LATENCY},
     };
 
@@ -299,6 +298,13 @@ TEST(config_load_json_performance_mode)
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"optimize_for\":\"invalid\"}"),
               MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+
+    /* `performance` was never a documented config key. It must not become a
+     * second spelling that silently changes the client preference. */
+    cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"performance\":\"latency\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->performance_mode, MQVPN_PERF_MAX_THROUGHPUT);
     mqvpn_config_free(cfg);
 }
 

@@ -65,6 +65,7 @@
 #include <ctype.h>
 #include <inttypes.h>
 #include <sys/time.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -72,6 +73,9 @@
 #define CTRL_MAX_REQ          4096 /* per-connection request buffer */
 #define CTRL_MAX_CONNS        8    /* max concurrent control connections */
 #define CTRL_READ_TIMEOUT_SEC 5    /* close idle connections after 5s */
+#define CTRL_WRITE_TIMEOUT_SEC 5   /* fail closed when a peer does not drain */
+#define CTRL_WRITE_BUDGET_BYTES (64 * 1024) /* preserve UDP/libevent fairness */
+#define CTRL_WRITE_BUDGET_CALLS 16
 /* CTRL_MAX_RESP_BYTES moved to control_socket.h so test_control_response_bound
  * can verify the worst-case JSON size fits. */
 
@@ -83,8 +87,13 @@
 typedef struct {
     int fd;
     struct event *ev;
+    struct event *ev_write;
     char req[CTRL_MAX_REQ + 1];
     size_t req_len;
+    char *resp;
+    size_t resp_len;
+    size_t resp_off;
+    uint64_t write_deadline_ms;
     ctrl_socket_t *cs;
 } ctrl_conn_t;
 
@@ -285,14 +294,14 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                 }
             }
 
-            uint64_t goodput_bps = 0;
+            uint64_t goodput_Bps = 0;
             int warmup = 0;
             unsigned weight_pct = 0;
             if (i < n_wlb) {
                 mqvpn_internal_client_wlb_t *wl = &wlb[i];
                 for (int wp = 0; wp < wl->n_paths; wp++) {
                     if (wl->paths[wp].path_id == ps->path_id) {
-                        goodput_bps = wl->paths[wp].goodput_bps;
+                        goodput_Bps = wl->paths[wp].goodput_Bps;
                         warmup = wl->paths[wp].warmup ? 1 : 0;
                         weight_pct = wl->paths[wp].weight_pct;
                         break;
@@ -305,12 +314,12 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                 ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
                 ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
                 ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
-                "\"reinject_tx_bytes\":%" PRIu64 ",\"goodput_bps\":%" PRIu64
+                "\"reinject_tx_bytes\":%" PRIu64 ",\"goodput_Bps\":%" PRIu64
                 ",\"warmup\":%s,\"weight_pct\":%u}",
                 ps->path_id, ps->srtt_us / 1000, ps->min_rtt_us / 1000, ps->cwnd,
                 ps->bytes_in_flight, ps->bytes_tx, ps->bytes_rx, ps->pkt_sent,
                 ps->pkt_recv, ps->pkt_lost, ps->state, mqvpn_path_state_label(ps->state),
-                reinject_tx_bytes, goodput_bps, warmup ? "true" : "false", weight_pct);
+                reinject_tx_bytes, goodput_Bps, warmup ? "true" : "false", weight_pct);
         }
 
         APPEND("]}");
@@ -529,36 +538,82 @@ dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 static void
 ctrl_conn_close(ctrl_conn_t *conn)
 {
-    event_del(conn->ev);
-    event_free(conn->ev);
+    if (conn->ev) {
+        event_del(conn->ev);
+        event_free(conn->ev);
+    }
+    if (conn->ev_write) {
+        event_del(conn->ev_write);
+        event_free(conn->ev_write);
+    }
     close(conn->fd);
     conn->cs->n_conns--;
+    free(conn->resp);
     free(conn);
 }
 
-/* Write the full buffer. The control fd is O_NONBLOCK for reads; one
- * write() can truncate a large get_status body. Drop O_NONBLOCK for the
- * response (callers close immediately after) and retry EINTR. */
 static void
-ctrl_write_all(int fd, const void *buf, size_t len)
+ctrl_on_write(evutil_socket_t fd, short what, void *arg)
 {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0 && (flags & O_NONBLOCK))
-        (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-
-    const char *p = buf;
-    size_t off = 0;
-    while (off < len) {
-        ssize_t n = write(fd, p + off, len - off);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            break;
-        }
-        if (n == 0)
-            break;
-        off += (size_t)n;
+    ctrl_conn_t *conn = (ctrl_conn_t *)arg;
+    struct timespec now;
+    uint64_t now_ms = 0;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
+        now_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+    if ((what & EV_TIMEOUT) ||
+        (conn->write_deadline_ms > 0 && now_ms >= conn->write_deadline_ms)) {
+        LOG_WRN("control: response write timed out after %d seconds",
+                CTRL_WRITE_TIMEOUT_SEC);
+        ctrl_conn_close(conn);
+        return;
     }
+
+    size_t callback_bytes = 0;
+    int calls = 0;
+    while (conn->resp_off < conn->resp_len &&
+           callback_bytes < CTRL_WRITE_BUDGET_BYTES &&
+           calls++ < CTRL_WRITE_BUDGET_CALLS) {
+        size_t remaining = conn->resp_len - conn->resp_off;
+        size_t allowance = CTRL_WRITE_BUDGET_BYTES - callback_bytes;
+        if (remaining > allowance) remaining = allowance;
+        ssize_t n = send(fd, conn->resp + conn->resp_off, remaining, MSG_NOSIGNAL);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            ctrl_conn_close(conn);
+            return;
+        }
+        if (n == 0) {
+            ctrl_conn_close(conn);
+            return;
+        }
+        conn->resp_off += (size_t)n;
+        callback_bytes += (size_t)n;
+    }
+
+    if (conn->resp_off == conn->resp_len) {
+        ctrl_conn_close(conn);
+    }
+}
+
+static int
+ctrl_start_response(ctrl_conn_t *conn, size_t len)
+{
+    conn->resp_len = len;
+    conn->resp_off = 0;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+        conn->write_deadline_ms =
+            (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000 +
+            CTRL_WRITE_TIMEOUT_SEC * 1000;
+    }
+    event_del(conn->ev);
+    conn->ev_write = event_new(conn->cs->eb, conn->fd,
+                               EV_WRITE | EV_PERSIST | EV_TIMEOUT,
+                               ctrl_on_write, conn);
+    if (!conn->ev_write) return -1;
+    struct timeval tv = {.tv_sec = CTRL_WRITE_TIMEOUT_SEC};
+    return event_add(conn->ev_write, &tv);
 }
 
 static void
@@ -622,23 +677,30 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
 
     conn->req[conn->req_len] = '\0';
 
-    char resp[CTRL_MAX_RESP_BYTES];
-    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs);
+    conn->resp = malloc(CTRL_MAX_RESP_BYTES);
+    if (!conn->resp) {
+        ctrl_conn_close(conn);
+        return;
+    }
+    int rlen = dispatch(conn->req, conn->resp, CTRL_MAX_RESP_BYTES - 2, conn->cs);
     if (rlen <= 0) {
         /* dispatch failed to format anything — close silently. */
-    } else if ((size_t)rlen >= sizeof(resp) - 2) {
+        ctrl_conn_close(conn);
+        return;
+    } else if ((size_t)rlen >= CTRL_MAX_RESP_BYTES - 2) {
         /* snprintf would have truncated. Send a small error JSON instead so the
          * client doesn't see a malformed body, and emit a warning. */
         static const char too_large[] =
             "{\"ok\":false,\"error\":\"response too large\"}\n";
-        ctrl_write_all(fd, too_large, sizeof(too_large) - 1);
+        memcpy(conn->resp, too_large, sizeof(too_large) - 1);
+        if (ctrl_start_response(conn, sizeof(too_large) - 1) == 0) return;
         LOG_WRN(
             "control: dispatch response truncated (would have been %d bytes, max %zu)",
-            rlen, sizeof(resp) - 2);
+            rlen, (size_t)CTRL_MAX_RESP_BYTES - 2);
     } else {
-        resp[rlen] = '\n';
-        resp[rlen + 1] = '\0';
-        ctrl_write_all(fd, resp, (size_t)rlen + 1);
+        conn->resp[rlen] = '\n';
+        conn->resp[rlen + 1] = '\0';
+        if (ctrl_start_response(conn, (size_t)rlen + 1) == 0) return;
     }
 
     ctrl_conn_close(conn);
@@ -656,7 +718,9 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
         int cfd = accept(fd, NULL, NULL);
         if (cfd >= 0) {
             const char *msg = "{\"ok\":false,\"error\":\"too many connections\"}\n";
-            ctrl_write_all(cfd, msg, strlen(msg));
+            int flags = fcntl(cfd, F_GETFL, 0);
+            if (flags >= 0) (void)fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
+            (void)send(cfd, msg, strlen(msg), MSG_NOSIGNAL);
             close(cfd);
         }
         return;
@@ -693,6 +757,19 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
+static int
+ctrl_addr_is_loopback(const char *addr)
+{
+    struct in_addr v4;
+    struct in6_addr v6;
+    if (!addr) return 0;
+    if (inet_pton(AF_INET, addr, &v4) == 1)
+        return v4.s_addr == htonl(INADDR_LOOPBACK);
+    if (inet_pton(AF_INET6, addr, &v6) == 1)
+        return IN6_IS_ADDR_LOOPBACK(&v6);
+    return 0;
+}
+
 ctrl_socket_t *
 ctrl_socket_create(struct event_base *eb, const char *addr, int port,
                    mqvpn_server_t *server, const uint64_t *gro_receives,
@@ -702,11 +779,10 @@ ctrl_socket_create(struct event_base *eb, const char *addr, int port,
 
     if (!addr || addr[0] == '\0') addr = "127.0.0.1";
 
-    /* Warn if exposed beyond loopback — the control API has no auth */
-    if (strcmp(addr, "127.0.0.1") != 0 && strcmp(addr, "::1") != 0)
-        LOG_WRN("control API: binding to non-loopback address %s — "
-                "the control API has no authentication",
-                addr);
+    if (!ctrl_addr_is_loopback(addr)) {
+        LOG_ERR("control API: refusing non-loopback address %s", addr);
+        return NULL;
+    }
 
     ctrl_socket_t *cs = calloc(1, sizeof(*cs));
     if (!cs) return NULL;
