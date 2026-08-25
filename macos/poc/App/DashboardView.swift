@@ -23,9 +23,11 @@ struct DashboardView: View {
                 Button("Stop") { controller.stop() }
                     .disabled(!controller.isStoppable)
             }
-            if let direct = controller.directRow {
-                labeledRow("Direct \(direct.name)",
-                           "\(Self.rate(direct.mbps)) · \(direct.bytes) B")
+            if !controller.directRows.isEmpty {
+                ForEach(controller.directRows) { direct in
+                    labeledRow("Direct \(direct.pathID)",
+                               "\(Self.rate(direct.megabitsPerSecond)) · \(direct.totalBytes) B")
+                }
             } else {
                 labeledRow("Direct", "waiting for a bound Wi-Fi or Ethernet path")
             }

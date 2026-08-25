@@ -24,12 +24,16 @@ final class TunnelController: ObservableObject {
     private var pathRates: [MacPathRate] = []
     private var lastSnapshotReceivedAt: TimeInterval?
     private var relayConfigurationIsValid = true
+    private var profileIsCurrent = true
+    private var relayRateSample: (timestamp: Double, totalBytes: UInt64)?
+    private var relayMegabitsPerSecond: Double?
 
     var isEditable: Bool { manager != nil && status == .disconnected }
     var isConnectable: Bool {
         MacConnectGuard.canStart(isEditable: isEditable, isSaving: isSaving,
                                  server: serverSettings, relay: relaySettings,
-                                 relayConfigurationIsValid: relayConfigurationIsValid)
+                                 relayConfigurationIsValid: relayConfigurationIsValid,
+                                 profileIsCurrent: profileIsCurrent)
     }
     var isStoppable: Bool {
         StopLifecycle.canStop(hasManager: manager != nil,
@@ -41,17 +45,15 @@ final class TunnelController: ObservableObject {
                                      now: Date().timeIntervalSince1970) ? snapshot : nil
     }
 
-    var directRow: (name: String, mbps: Double?, bytes: UInt64)? {
-        guard let path = displayedSnapshot?.paths.first(where: { $0.name != "iphone-relay" })
-        else { return nil }
-        let rate = pathRates.first { $0.pathID == path.name }
-        return (path.name, rate?.megabitsPerSecond, rate?.totalBytes ?? 0)
+    var directRows: [MacPathRate] {
+        guard let snapshot = displayedSnapshot else { return [] }
+        let liveIDs = Set(snapshot.paths.map(\.name).filter { $0 != "iphone-relay" })
+        return pathRates.filter { $0.pathID != "iphone-relay" && liveIDs.contains($0.pathID) }
     }
 
     var relayRow: (active: Bool, mbps: Double?, lastError: String?)? {
         guard let relay = displayedSnapshot?.relay else { return nil }
-        let rate = pathRates.first { $0.pathID == "iphone-relay" }?.megabitsPerSecond
-        return (relay.active, rate, relay.lastError)
+        return (relay.active, relayMegabitsPerSecond, relay.lastError)
     }
 
     init() {
@@ -91,8 +93,10 @@ final class TunnelController: ObservableObject {
             }
             try await read(from: loaded)
             manager = loaded
+            profileIsCurrent = true
             applyStatus(loaded.connection.status)
         } catch {
+            profileIsCurrent = false
             statusText = "load error"
             lastError = error.localizedDescription
         }
@@ -107,7 +111,8 @@ final class TunnelController: ObservableObject {
             statusText = "starting"
         } catch {
             lastError = error.localizedDescription
-            statusText = "start error"
+            applyStatus(manager.connection.status)
+            statusText = "start error: \(error.localizedDescription)"
         }
     }
 
@@ -121,7 +126,8 @@ final class TunnelController: ObservableObject {
         statusText = "stopping"
     }
 
-    func save(server: ServerSettings, relay: MacRelaySettings) async {
+    func save(server: ServerSettings, relay: MacRelaySettings,
+              hybrid: HybridSettings) async {
         guard let manager,
               saveGuard(isSaving: isSaving, isEditable: isEditable,
                         hasManager: true) == nil else { return }
@@ -129,10 +135,14 @@ final class TunnelController: ObservableObject {
         defer { isSaving = false }
         do {
             let merged = MacProviderConfiguration.make(server: server, relay: relay,
-                                                       hybrid: hybridSettings)
+                                                       hybrid: hybrid)
             try await applyProtocol(to: manager, configuration: merged)
             try await read(from: manager)
+            profileIsCurrent = true
             if relayConfigurationIsValid { configError = nil }
+        } catch MacSaveFailure.refresh {
+            profileIsCurrent = false
+            configError = "VPN profile was saved but could not be reloaded. Reopen mqvpn before starting."
         } catch {
             configError = error.localizedDescription
         }
@@ -140,31 +150,40 @@ final class TunnelController: ObservableObject {
 
     private func applyProtocol(to manager: NETunnelProviderManager,
                                configuration: [String: Any]) async throws {
-        let backupProtocol = manager.protocolConfiguration
-        let backupEnabled = manager.isEnabled
-        let backupName = manager.localizedDescription
-        let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol)
-            ?? NETunnelProviderProtocol()
+        let previousProtocol = manager.protocolConfiguration
+        let previousEnabled = manager.isEnabled
+        let previousName = manager.localizedDescription
+        // A new protocol object, never the live manager's instance. Mutating
+        // that shared object would make rollback a no-op.
+        let proto = NETunnelProviderProtocol()
+        if let current = previousProtocol as? NETunnelProviderProtocol {
+            proto.providerConfiguration = current.providerConfiguration
+        }
         proto.providerBundleIdentifier = TunnelProviderConfiguration.providerBundleID
         proto.serverAddress = (configuration["serverHost"] as? String)
             ?? serverSettings?.host ?? "mqvpn"
         proto.includeAllNetworks = TunnelProviderConfiguration.includeAllNetworks
         proto.excludeLocalNetworks = TunnelProviderConfiguration.excludeLocalNetworks
         proto.enforceRoutes = TunnelProviderConfiguration.enforceRoutes
-        var next = proto.providerConfiguration ?? [:]
-        for (key, value) in configuration { next[key] = value }
-        proto.providerConfiguration = next
-        manager.protocolConfiguration = proto
         manager.localizedDescription = TunnelProviderConfiguration.localizedName
         manager.isEnabled = true
         do {
-            try await manager.saveToPreferences()
-            try await manager.loadFromPreferences()
-        } catch {
-            manager.protocolConfiguration = backupProtocol
-            manager.isEnabled = backupEnabled
-            manager.localizedDescription = backupName
+            try await performAtomicSave(MacNEConfigStore(manager: manager, proto: proto),
+                                        merge: configuration)
+        } catch MacSaveFailure.commit(let error) {
+            manager.protocolConfiguration = previousProtocol
+            manager.isEnabled = previousEnabled
+            manager.localizedDescription = previousName
             throw error
+        } catch MacSaveFailure.refresh {
+            // Prefs already committed. Retry the reload; only disable Start if
+            // that retry also fails. Never restore the pre-save protocol.
+            do {
+                try await manager.loadFromPreferences()
+            } catch {
+                manager.protocolConfiguration = proto
+                throw MacSaveFailure.refresh(error)
+            }
         }
     }
 
@@ -173,7 +192,8 @@ final class TunnelController: ObservableObject {
         let config = proto?.providerConfiguration
         if let server = ServerSettings(providerConfiguration: config) {
             serverSettings = server
-        } else if serverSettings == nil {
+        } else {
+            serverSettings = nil
             configError = "server config invalid — re-enter in Settings"
         }
         hybridSettings = HybridSettings(providerConfiguration: config) ?? .disabled
@@ -223,6 +243,8 @@ final class TunnelController: ObservableObject {
         pathRates = []
         lastSnapshotReceivedAt = nil
         rateSampler = MacSnapshotRateSampler()
+        relayRateSample = nil
+        relayMegabitsPerSecond = nil
     }
 
     private func expireIfStale() {
@@ -230,6 +252,8 @@ final class TunnelController: ObservableObject {
                                          now: Date().timeIntervalSince1970) {
             snapshot = nil
             pathRates = []
+            relayRateSample = nil
+            relayMegabitsPerSecond = nil
         }
     }
 
@@ -242,12 +266,39 @@ final class TunnelController: ObservableObject {
                     guard let data, let next = try? MacProviderSnapshot.decode(data) else { return }
                     self.snapshot = next
                     self.pathRates = self.rateSampler.ingest(next)
+                    self.ingestRelayRate(from: next)
                     self.lastSnapshotReceivedAt = Date().timeIntervalSince1970
                     if let error = next.lastError, !error.isEmpty { self.lastError = error }
                 }
             }
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    private func ingestRelayRate(from snapshot: MacProviderSnapshot) {
+        guard let relay = snapshot.relay else {
+            relayRateSample = nil
+            relayMegabitsPerSecond = nil
+            return
+        }
+        let total = relay.lanTxBytes.addingReportingOverflow(relay.lanRxBytes)
+        guard !total.overflow else {
+            relayRateSample = nil
+            relayMegabitsPerSecond = nil
+            return
+        }
+        if let prior = relayRateSample, snapshot.timestamp > prior.timestamp,
+           total.partialValue >= prior.totalBytes {
+            let elapsed = snapshot.timestamp - prior.timestamp
+            relayMegabitsPerSecond = elapsed >= 0.05 && elapsed <= MacSnapshotFreshness.maxAge
+                ? Double(total.partialValue - prior.totalBytes) * 8 / elapsed / 1_000_000
+                : nil
+        } else {
+            relayMegabitsPerSecond = nil
+        }
+        if relayRateSample?.timestamp ?? -.infinity <= snapshot.timestamp {
+            relayRateSample = (snapshot.timestamp, total.partialValue)
         }
     }
 
@@ -261,5 +312,40 @@ final class TunnelController: ObservableObject {
         case .disconnecting: return "disconnecting"
         @unknown default: return "unknown"
         }
+    }
+}
+
+private final class MacNEConfigStore: MacConfigStore {
+    private let manager: NETunnelProviderManager
+    private var proto: NETunnelProviderProtocol
+
+    init(manager: NETunnelProviderManager, proto: NETunnelProviderProtocol) {
+        self.manager = manager
+        self.proto = proto
+    }
+
+    var providerConfiguration: [String: Any]? {
+        get { proto.providerConfiguration }
+        set { proto.providerConfiguration = newValue }
+    }
+
+    func commit() async throws {
+        manager.protocolConfiguration = proto
+        try await manager.saveToPreferences()
+    }
+
+    func refresh() async throws {
+        do {
+            try await manager.loadFromPreferences()
+        } catch {
+            // A save succeeded, so give preferences one immediate retry before
+            // declaring the UI unable to reconcile its committed state.
+            try await manager.loadFromPreferences()
+        }
+        guard let refreshed = manager.protocolConfiguration as? NETunnelProviderProtocol else {
+            throw NSError(domain: "mqvpn.mac", code: 30,
+                          userInfo: [NSLocalizedDescriptionKey: "saved VPN protocol missing"])
+        }
+        proto = refreshed
     }
 }

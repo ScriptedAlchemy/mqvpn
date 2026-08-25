@@ -16,6 +16,8 @@ struct SettingsView: View {
     @State private var relayHostText: String
     @State private var relayPortText: String
     @State private var relayKeyText: String
+    @State private var hybridEnabled: Bool
+    @State private var hybridMode: Int
 
     init(controller: TunnelController) {
         self.controller = controller
@@ -31,6 +33,8 @@ struct SettingsView: View {
         _relayHostText = State(initialValue: relay.host)
         _relayPortText = State(initialValue: String(relay.port))
         _relayKeyText = State(initialValue: relay.keyBase64)
+        _hybridEnabled = State(initialValue: controller.hybridSettings.enabled)
+        _hybridMode = State(initialValue: controller.hybridSettings.tcpMode)
     }
 
     private var serverDraft: ServerSettings {
@@ -44,6 +48,10 @@ struct SettingsView: View {
                          host: relayHostText,
                          port: Int(relayPortText.trimmingCharacters(in: .whitespaces)) ?? -1,
                          keyBase64: relayKeyText)
+    }
+
+    private var hybridDraft: HybridSettings {
+        HybridSettings(enabled: hybridEnabled, tcpMode: hybridMode)
     }
 
     private var formValid: Bool {
@@ -66,12 +74,22 @@ struct SettingsView: View {
                 .disabled(!relayEnabled)
             SecureField("Relay key (base64, 32 bytes)", text: $relayKeyText)
                 .disabled(!relayEnabled)
+            Divider()
+            Toggle("Hybrid TCP", isOn: $hybridEnabled)
+            if hybridEnabled {
+                Picker("TCP mode", selection: $hybridMode) {
+                    Text("Auto").tag(HybridSettings.modeAuto)
+                    Text("Stream").tag(HybridSettings.modeStream)
+                    Text("Raw").tag(HybridSettings.modeRaw)
+                }
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
                     Task {
-                        await controller.save(server: serverDraft, relay: relayDraft)
+                        await controller.save(server: serverDraft, relay: relayDraft,
+                                              hybrid: hybridDraft)
                         if controller.configError == nil { dismiss() }
                     }
                 }

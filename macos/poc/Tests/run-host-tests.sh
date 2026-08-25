@@ -39,7 +39,6 @@ swiftc -o "$OUT" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
     "$ROOT/macos/poc/Shared/MacProviderSnapshot.swift" \
     "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
-    "$ROOT/macos/poc/Shared/TunnelProviderConfiguration.swift" \
     "$ROOT/macos/poc/PacketTunnel/SnapshotCache.swift" \
     "$ROOT/macos/poc/PacketTunnel/MacRelayBinder.swift" \
     "$TMPD/mqvpn_clock_shim.o" "$TMPD/reorder_layout_shim.o" \
