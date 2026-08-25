@@ -759,6 +759,8 @@ if let listener = loopbackListener(),
     liveBinder.start()
     check(waitUntil({ liveBinder.snapshot().active }),
           "real interface-bound UDP HELLO/ACK activates the logical relay path")
+    check(liveBinder.usesNetworkTransport,
+          "the live relay round trip ran on the Network.framework transport, not the socket fallback")
     let activeSnapshot = liveBinder.snapshot()
     check(activeSnapshot.helloSent >= 1 && activeSnapshot.lanTxBytes > 0 &&
           activeSnapshot.ackReceived >= 1,

@@ -36,6 +36,16 @@ final class MacRelayBinder {
     /// default-route change can pick utun as the source and break the iPhone peer.
     private var pinnedLocalAddress = sockaddr_storage()
     private var pinnedLocalAddressLength: socklen_t = 0
+    /// Network.framework transport for the LAN hop. When present it owns the
+    /// datagrams and `fd` stays -1; the socket path below is the fallback for
+    /// a host that cannot enumerate the relay endpoint as an NWEndpoint.
+    private var nwTransport: MacRelayNWTransport?
+
+    /// True while the LAN hop is carried by Network.framework rather than the
+    /// fallback socket. Exposed so tests can prove which transport ran.
+    var usesNetworkTransport: Bool {
+        queue.sync { nwTransport?.isOpen == true }
+    }
 
     /// Called on the binder's serial queue. Consumers should copy the value;
     /// snapshots contain counters/errors, never the relay key or payloads.
@@ -81,7 +91,7 @@ final class MacRelayBinder {
                     _ = self.sendFrame(type: MQVPN_RELAY_HELLO, payload: Data(),
                                        nowMs: self.nowMs())
                 }
-            } else if self.fd >= 0 {
+            } else if self.fd >= 0 || self.nwTransport != nil {
                 macRelayLog.error("relay connect refresh after routes failed: \(self.errnoMessage(), privacy: .public)")
             }
         }
@@ -200,6 +210,7 @@ final class MacRelayBinder {
     }
 
     private func openTransport() -> Bool {
+        if openNetworkTransport() { return true }
         let family = endpointFamily
         guard family == AF_INET || family == AF_INET6 else { return false }
         let socketFD = socket(family, SOCK_DGRAM, 0)
@@ -252,8 +263,40 @@ final class MacRelayBinder {
         return true
     }
 
+    /// Returns false when the relay address cannot be expressed as an
+    /// NWEndpoint, leaving the socket path to handle it.
+    private func openNetworkTransport() -> Bool {
+        guard let transport = MacRelayNWTransport(relayEndpoint: relayEndpoint,
+                                                  interfaceName: interfaceName,
+                                                  queue: queue) else { return false }
+        let opened = transport.open(
+            onDatagram: { [weak self] datagram in
+                guard let self, !self.stopped else { return }
+                self.processInbound(datagram)
+            },
+            onRebind: { [weak self] in
+                // A rebind can change our source address. HELLO re-authenticates
+                // and, if the address moved, drives the iPhone's path challenge.
+                guard let self, !self.stopped, self.state.shouldHelloAfterRouteRefresh()
+                else { return }
+                _ = self.sendFrame(type: MQVPN_RELAY_HELLO, payload: Data(), nowMs: self.nowMs())
+            },
+            onFailure: { [weak self] message in
+                guard let self, !self.stopped else { return }
+                self.recordSocketFailure(message)
+            })
+        guard opened else { return false }
+        nwTransport = transport
+        transportGeneration &+= 1
+        return true
+    }
+
     @discardableResult
     private func refreshConnectedRouteLocked() -> Bool {
+        if let nwTransport {
+            guard !stopped, !teardownStarted else { return false }
+            return nwTransport.rebind(reason: "tunnel routes installed")
+        }
         guard fd >= 0, !stopped, !teardownStarted else { return false }
         var endpoint = scopedEndpoint()
         return withUnsafePointer(to: &endpoint.0) {
@@ -336,6 +379,8 @@ final class MacRelayBinder {
     }
 
     private func closeTransport() {
+        nwTransport?.close()
+        nwTransport = nil
         // Invalidate the captured token before closing. Darwin can reuse a
         // descriptor number immediately; fd equality alone is not enough to
         // distinguish a stale read event from a newly opened socket.
@@ -484,7 +529,7 @@ final class MacRelayBinder {
 
     private func sendFrame(type: mqvpn_relay_message_type_t, payload: Data,
                            nowMs: UInt64) -> SendResult {
-        guard fd >= 0 else {
+        guard fd >= 0 || nwTransport?.isOpen == true else {
             state.recordSendFailure()
             recordSocketFailure("relay socket is unavailable")
             return .failed(Int(EIO))
@@ -500,6 +545,20 @@ final class MacRelayBinder {
             }
             recordSocketFailure("relay frame encoding failed")
             return .failed(Int(EIO))
+        }
+        if let nwTransport {
+            switch nwTransport.send(datagram) {
+            case .sent:
+                state.recordSuccessfulSend(type: type, datagramLength: datagram.count)
+                return .sent
+            case .again:
+                state.recordSendAgain()
+                return .again
+            case let .failed(code):
+                state.recordSendFailure()
+                recordSocketFailure("relay send failed: \(String(cString: strerror(code)))")
+                return .failed(Int(code))
+            }
         }
         var sent = datagram.withUnsafeBytes {
             Darwin.send(fd, $0.baseAddress, datagram.count, 0)
