@@ -1,0 +1,12 @@
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+log_level_in: nolog
+log_level_out: nolog
+macfilter: 1
+ipfilter: 1
+
+[RULES]
+IN ACCEPT -i net0 -p udp -dport 443 -log nolog # public-mqvpn
+IN ACCEPT -i net0 -source 10.10.10.1 -p icmp -log nolog # host-health

@@ -1,0 +1,26 @@
+ZeroFS production CT198 (10.10.10.55).
+
+Exact deployed commit: cd2cc423f73269899b74af3fa31b3b4726b6fa23. Optimized release cd2cc423f732-a64b69a6510b2606, binary SHA-256 51eabf46b0857095f891f6cb257c7e7bcb42057444e12195c30f6057f4c8ed86. Hotpath profile enabled; loopback-only diagnostics at 127.0.0.1:9477. 16 cores, 160 GiB RAM, 500 GB SSD writeback journal, 1000 GB clean cache.
+
+Remote upload/download prefers VM104 single-hop Mullvad at metric 50; normal WAN remains metric 200 fallback. Private LAN stays direct.
+
+Full guest notes: /etc/zerofs-network/README.md
+Host runbook and rollback: /root/CT198-MULLVAD-ROUTING.md
+Release receipts: /var/lib/zerofs-lxc/prod-198/receipts
+
+MQVPN PRIVATE ACCESS
+- ZeroFS WebSocket/HTTP endpoint listens privately on 10.10.10.55:8080; `/ws/9p` is the CLI upload/download endpoint.
+- NFS listens on 10.10.10.55:2049 and metrics on 10.10.10.55:9567. Those ports are not part of the mqvpn alias.
+- CT 212 (`mqvpn-server`, 10.10.10.212) is on the same vmbr1 subnet and reaches this CT directly; Tailscale is not required inside either CT for this path.
+- CT 212 exposes tunnel-only alias 10.77.77.55:8080 -> 10.10.10.55:8080 through `mqvpn-zerofs-alias.service`.
+- The alias is not public. It accepts only authenticated mqvpn tunnel traffic entering CT 212 on mqvpn0.
+- CT 212 SNAT means mqvpn-originated ZeroFS connections appear here as source 10.10.10.212. Account for that address in diagnostics or rate attribution.
+- Direct CT212 -> this endpoint returned HTTP 200 on 2026-08-24. Mac-client alias access and a durable audiobook upload remain separate end-to-end gates.
+- VM104 remains this CT's outbound Mullvad policy gateway for remote backend traffic. Incoming mqvpn-to-ZeroFS traffic does not traverse VM104.
+
+MQVPN UPLOADER TARGET
+`ws://10.77.77.55:8080/ws/9p` while the Mac mqvpn client is connected.
+
+Do not store ZeroFS, mqvpn, Tailscale, or relay keys in Proxmox Notes.
+
+Updated 2026-08-24 for private mqvpn alias routing.

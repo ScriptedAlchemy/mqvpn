@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew mqvpn trusted TLS certificate and install it in CT 212
+After=tailscaled.service pve-cluster.service
+Requires=tailscaled.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mqvpn-renew-ts-cert

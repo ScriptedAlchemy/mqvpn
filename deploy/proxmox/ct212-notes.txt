@@ -1,0 +1,53 @@
+mqvpn production endpoint — CT 212 (`mqvpn-server`)
+
+ROLE AND TOPOLOGY
+- Offsite public mqvpn server for the physical iPhone client and the macOS CLI.
+- Private address: 10.10.10.212/24 on vmbr1; gateway 10.10.10.1.
+- Public endpoint: 208.69.79.206 UDP 443, forwarded by the Proxmox host/firewall to this CT.
+- Tunnel: mqvpn0, IPv4 client subnet 10.77.77.0/24.
+- Hybrid TCP aggregation is enabled server-side. Clients must also enable Hybrid for one TCP flow to span paths.
+- Control API: TCP 9090 bound to 127.0.0.1 only. Never expose it publicly.
+
+CONTAINER SECURITY
+- Debian 12, unprivileged LXC, 2 vCPU, 1 GiB RAM, 8 GiB root disk, start at boot.
+- `/dev/net/tun` passed as `dev0`; nesting disabled; no Docker; no privileged mode.
+- Publicly required service is UDP 443 only. TCP 443, TCP 9090, SSH, and Proxmox management are not intentionally exposed by this CT.
+- Server authentication material is root-readable in `/etc/mqvpn/server.conf`; never copy it into this Notes field.
+- Trusted TLS certificate uses the Proxmox node's Tailscale HTTPS name. Renewal is managed on the host by `mqvpn-ts-cert-renew.timer`.
+- Public UDP 443 still exposes the pre-auth QUIC/TLS parser and a possible DoS surface; private/tunnel access requires the configured authentication key.
+
+SERVICES AND CHECKS
+- Main service: `mqvpn-server.service`.
+- Expected listener: UDP 0.0.0.0:443.
+- Expected interface: `mqvpn0` at 10.77.77.1.
+- IPv4 forwarding must equal 1.
+- Installer-managed FORWARD/MASQUERADE rules provide client internet and vmbr1 access.
+- Local status: `mqvpn --status --control-port 9090`.
+- Useful checks:
+  `systemctl --no-pager --full status mqvpn-server`
+  `ss -lunp | grep ':443'`
+  `ip addr show mqvpn0`
+  `iptables -t nat -S POSTROUTING | grep mqvpn`
+
+PRIVATE ZEROFS ALIAS
+- `mqvpn-zerofs-alias.service` is enabled and active.
+- Tunnel-only alias: 10.77.77.55:8080/TCP -> CT 198 at 10.10.10.55:8080/TCP.
+- DNAT matches only traffic entering mqvpn0 from 10.77.77.0/24. No public listener was added.
+- Existing mqvpn SNAT makes CT 198 see source 10.10.10.212, so replies return through CT 212.
+- Alias service owns exactly one DNAT rule and two stateful FORWARD rules marked `mqvpn-zerofs-alias`.
+- Direct CT212 -> CT198 HTTP returned 200. End-to-end alias validation from the authenticated Mac client remains a separate physical acceptance gate.
+- The current installer also has broad mqvpn0 forwarding to vmbr1. The alias is narrow, but the authentication key currently gates broader private-subnet reachability too.
+
+CLIENT DEVELOPMENT STATUS
+- iOS VPN client is signed as `com.zackjackson.mqvpn` with Packet Tunnel extension `com.zackjackson.mqvpn.PacketTunnel`.
+- macOS already has a native root-run CLI client using utun, route/DNS management, pf kill switch, direct interface paths, and Hybrid mode.
+- LAN relay work is in branch `codex/lan-relay`: Mac owns one mqvpn session; iPhone relay mode will forward one opaque QUIC path over cellular. It is not a second mqvpn client or a general router.
+- Relay credentials are separate from the mqvpn server key and must never be placed in Proxmox Notes.
+
+FAILURE BOUNDARIES
+- If `/dev/net/tun` is missing, repair CT device passthrough; do not make the CT privileged or disable AppArmor globally.
+- If UDP 443 is unreachable, check provider, Datacenter, node, and CT firewall layers plus the host DNAT rule.
+- If tunnel connects without internet/private access, check forwarding, MASQUERADE, FORWARD rules, and the CT default route.
+- If the ZeroFS alias fails, verify CT 198 is listening on 10.10.10.55:8080 before changing mqvpn.
+
+Updated 2026-08-24 for Mac-main + iPhone-cellular relay and private ZeroFS routing.
