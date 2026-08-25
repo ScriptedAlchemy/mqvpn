@@ -914,12 +914,6 @@ check(MacRelayTransportPolicy.prohibitedInterfaceTypes.contains(.other),
       "relay transport refuses .other, the interface type Network.framework uses for utun")
 check(MacRelayTransportPolicy.prohibitedInterfaceTypes.contains(.cellular),
       "relay transport refuses cellular; the Mac hop is the shared LAN")
-check(MacRelayTransportPolicy.isUsableRelayInterface(.wifi) &&
-      MacRelayTransportPolicy.isUsableRelayInterface(.wiredEthernet),
-      "relay transport accepts the two real LAN interface types")
-check(!MacRelayTransportPolicy.isUsableRelayInterface(.other) &&
-      !MacRelayTransportPolicy.isUsableRelayInterface(.loopback),
-      "relay transport rejects virtual and loopback interfaces")
 
 check(!MacRelayTransportPolicy.shouldApplyBackpressure(outstandingBytes: 0, pendingBytes: 1400),
       "a single datagram never triggers backpressure")
@@ -1050,6 +1044,20 @@ _ = recoveringClose.networkSettingsApplied(error: false, activePathCount: 1)
 _ = recoveringClose.activePathCountChanged(0, nowMs: 100)
 guard case .beginReconnect = recoveringClose.tunnelClosed(permanent: false, nowMs: 200)
 else { check(false, "a transient close during path recovery upgrades to reconnect"); exit(1) }
+
+// MacProviderCloseReason and iOS's ProviderCloseReason both hardcode these
+// codes: each is compiled into an App target that cannot import libmqvpn.h.
+// The host suite can, so it is the only place the copies can be pinned to
+// the real enum. A new permanent error code added in C without updating the
+// Swift copies would otherwise leave a provider reconnecting forever.
+check(MacProviderCloseReason.isPermanent(MQVPN_ERR_TLS.rawValue) &&
+      MacProviderCloseReason.isPermanent(MQVPN_ERR_AUTH.rawValue) &&
+      MacProviderCloseReason.isPermanent(MQVPN_ERR_PROTOCOL.rawValue) &&
+      MacProviderCloseReason.isPermanent(MQVPN_ERR_ABI_MISMATCH.rawValue),
+      "every unrecoverable mqvpn error is classified permanent")
+check(!MacProviderCloseReason.isPermanent(MQVPN_ERR_CLOSED.rawValue) &&
+      !MacProviderCloseReason.isPermanent(MQVPN_ERR_TIMEOUT.rawValue),
+      "recoverable closes stay transient so the core's reconnect can land")
 
 if failures != 0 {
     print("macOS relay host tests: \(failures) failure(s)")

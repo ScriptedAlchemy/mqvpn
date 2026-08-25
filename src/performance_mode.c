@@ -21,34 +21,26 @@ mqvpn_performance_mode_name(mqvpn_performance_mode_t mode)
 int
 mqvpn_performance_mode_parse(const char *text, size_t len, mqvpn_performance_mode_t *out)
 {
+    static const struct {
+        const char *name;
+        mqvpn_performance_mode_t mode;
+    } modes[] = {
+        {MQVPN_PERFORMANCE_THROUGHPUT, MQVPN_PERF_MAX_THROUGHPUT},
+        {MQVPN_PERFORMANCE_LATENCY, MQVPN_PERF_LOW_LATENCY},
+    };
+
     if (!text || !out || len == 0) return MQVPN_ERR_INVALID_ARG;
 
-    if (len == strlen(MQVPN_PERFORMANCE_THROUGHPUT)) {
-        int match = 1;
-        for (size_t i = 0; i < len; i++) {
-            if (tolower((unsigned char)text[i]) !=
-                (unsigned char)MQVPN_PERFORMANCE_THROUGHPUT[i]) {
-                match = 0;
-                break;
-            }
+    for (size_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m++) {
+        size_t name_len = strlen(modes[m].name);
+        if (len != name_len) continue;
+        size_t i = 0;
+        while (i < len
+               && tolower((unsigned char)text[i]) == (unsigned char)modes[m].name[i]) {
+            i++;
         }
-        if (match) {
-            *out = MQVPN_PERF_MAX_THROUGHPUT;
-            return MQVPN_OK;
-        }
-    }
-
-    if (len == strlen(MQVPN_PERFORMANCE_LATENCY)) {
-        int match = 1;
-        for (size_t i = 0; i < len; i++) {
-            if (tolower((unsigned char)text[i]) !=
-                (unsigned char)MQVPN_PERFORMANCE_LATENCY[i]) {
-                match = 0;
-                break;
-            }
-        }
-        if (match) {
-            *out = MQVPN_PERF_LOW_LATENCY;
+        if (i == len) {
+            *out = modes[m].mode;
             return MQVPN_OK;
         }
     }

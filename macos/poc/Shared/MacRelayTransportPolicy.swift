@@ -29,12 +29,6 @@ enum MacRelayTransportPolicy {
         outstandingBytes + pendingBytes > sendHighWaterBytes
     }
 
-    /// A relay LAN hop is only ever Wi-Fi or wired. Loopback would mean the
-    /// configured relay address is this Mac, which the binder already rejects.
-    static func isUsableRelayInterface(_ type: NWInterface.InterfaceType) -> Bool {
-        type == .wifi || type == .wiredEthernet
-    }
-
     /// Map a Network.framework failure onto the errno the mqvpn core expects.
     /// Route-scoped failures keep the recovery behaviour the socket path had:
     /// refresh and retry rather than tearing the authenticated session down.
