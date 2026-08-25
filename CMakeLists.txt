@@ -244,6 +244,11 @@ set(MQVPN_LIB_SOURCES
     src/reorder_rx.c
     src/hybrid/classifier.c
 )
+if(APPLE)
+    list(APPEND MQVPN_LIB_SOURCES src/apple_tls_verify.c)
+    find_library(SECURITY_FRAMEWORK Security REQUIRED)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+endif()
 
 # ---------- lwIP (hybrid mode TCP lane — see MQVPN_HYBRID_TCP_LANE_BUILD) ----------
 # Deliberately single-mode: no pre-built LWIP_BUILD_DIR variant (unlike
@@ -415,6 +420,9 @@ elseif(WIN32)
     target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} ws2_32)
 else()
     target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} pthread)
+    if(APPLE)
+        target_link_libraries(mqvpn_lib ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    endif()
 endif()
 if(MQVPN_HYBRID_TCP_LANE_BUILD)
     target_link_libraries(mqvpn_lib lwip_core)
@@ -581,7 +589,8 @@ target_include_directories(mqvpn_shared
 # Shared lib links shared xquic, same as Linux (static .a is unusable there
 # for -fPIC reasons; kept symmetric here even though clang on Darwin emits
 # PIC by default).
-target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread c++)
+target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread c++
+                      ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
 
 # Keep in sync with the Linux twin (the mqvpn_shared lane block in the
 # Linux branch below).

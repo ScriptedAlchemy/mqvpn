@@ -18,6 +18,19 @@
 #include "mqvpn_internal.h"
 #include "xquic/xquic.h"
 
+#if defined(__APPLE__) && defined(MQVPN_API_TEST_SEAM)
+typedef int (*mqvpn_apple_tls_evaluator_fn)(const unsigned char *const certs[],
+                                            const size_t cert_len[], size_t certs_len,
+                                            const char *hostname);
+extern void mqvpn_apple_tls_set_evaluator_for_test(mqvpn_apple_tls_evaluator_fn evaluator);
+extern int mqvpn_apple_tls_verify_server_chain(const unsigned char *const certs[],
+                                               const size_t cert_len[], size_t certs_len,
+                                               const char *hostname);
+extern int mqvpn_client_test_cert_verify(mqvpn_client_t *client,
+                                         const unsigned char *certs[],
+                                         const size_t cert_len[], size_t certs_len);
+#endif
+
 /* ── Test infrastructure ── */
 
 static int g_tests_run = 0;
@@ -816,6 +829,109 @@ TEST(client_destroy_null)
     /* Must not crash */
     mqvpn_client_destroy(NULL);
 }
+
+#if defined(__APPLE__) && defined(MQVPN_API_TEST_SEAM)
+typedef struct {
+    int calls;
+    const unsigned char *certs[3];
+    size_t cert_len[3];
+    size_t certs_len;
+    char hostname[256];
+    int result;
+} apple_tls_capture_t;
+
+static apple_tls_capture_t g_apple_tls_capture;
+
+static int
+capture_apple_tls_evaluation(const unsigned char *const certs[],
+                             const size_t cert_len[], size_t certs_len,
+                             const char *hostname)
+{
+    g_apple_tls_capture.calls++;
+    g_apple_tls_capture.certs_len = certs_len;
+    for (size_t i = 0; i < certs_len && i < 3; i++) {
+        g_apple_tls_capture.certs[i] = certs[i];
+        g_apple_tls_capture.cert_len[i] = cert_len[i];
+    }
+    snprintf(g_apple_tls_capture.hostname, sizeof(g_apple_tls_capture.hostname), "%s",
+             hostname ? hostname : "");
+    return g_apple_tls_capture.result;
+}
+
+static mqvpn_client_t *
+make_tls_test_client(const char *server_host, const char *tls_server_name, int insecure)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, server_host, 443);
+    if (tls_server_name) mqvpn_config_set_tls_server_name(cfg, tls_server_name);
+    mqvpn_config_set_insecure(cfg, insecure);
+
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    mqvpn_client_t *client = mqvpn_client_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    return client;
+}
+
+TEST(apple_tls_system_trust_routing)
+{
+    static const unsigned char leaf[] = {0x30, 0x01, 0x01};
+    static const unsigned char intermediate[] = {0x30, 0x01, 0x02};
+    const unsigned char *certs[] = {leaf, intermediate};
+    const size_t lens[] = {sizeof(leaf), sizeof(intermediate)};
+    const unsigned char *missing_cert[] = {NULL};
+    const size_t zero_len[] = {0};
+    memset(&g_apple_tls_capture, 0, sizeof(g_apple_tls_capture));
+    g_apple_tls_capture.result = 0;
+    mqvpn_apple_tls_set_evaluator_for_test(capture_apple_tls_evaluation);
+
+    mqvpn_client_t *client =
+        make_tls_test_client("208.69.79.206", "vpn.example.test", 0);
+    ASSERT_NOT_NULL(client);
+    ASSERT_EQ(mqvpn_client_test_cert_verify(client, certs, lens, 2), 0);
+    ASSERT_EQ(g_apple_tls_capture.calls, 1);
+    ASSERT_EQ(g_apple_tls_capture.certs_len, 2u);
+    ASSERT_EQ(g_apple_tls_capture.certs[0] == leaf, 1);
+    ASSERT_EQ(g_apple_tls_capture.certs[1] == intermediate, 1);
+    ASSERT_EQ(g_apple_tls_capture.cert_len[0], sizeof(leaf));
+    ASSERT_EQ(g_apple_tls_capture.cert_len[1], sizeof(intermediate));
+    ASSERT_STR_EQ(g_apple_tls_capture.hostname, "vpn.example.test");
+    mqvpn_client_destroy(client);
+
+    memset(&g_apple_tls_capture, 0, sizeof(g_apple_tls_capture));
+    g_apple_tls_capture.result = -1;
+    client = make_tls_test_client("vpn.example.test", NULL, 0);
+    ASSERT_NOT_NULL(client);
+    ASSERT_EQ(mqvpn_client_test_cert_verify(client, certs, lens, 2), -1);
+    ASSERT_EQ(g_apple_tls_capture.calls, 1);
+    ASSERT_STR_EQ(g_apple_tls_capture.hostname, "vpn.example.test");
+    mqvpn_client_destroy(client);
+
+    memset(&g_apple_tls_capture, 0, sizeof(g_apple_tls_capture));
+    g_apple_tls_capture.result = -1;
+    client = make_tls_test_client("vpn.example.test", NULL, 1);
+    ASSERT_NOT_NULL(client);
+    ASSERT_EQ(mqvpn_client_test_cert_verify(client, NULL, NULL, 0), 0);
+    ASSERT_EQ(g_apple_tls_capture.calls, 0);
+    mqvpn_client_destroy(client);
+
+    memset(&g_apple_tls_capture, 0, sizeof(g_apple_tls_capture));
+    g_apple_tls_capture.result = 0;
+    ASSERT_EQ(mqvpn_apple_tls_verify_server_chain(NULL, NULL, 0, "vpn.example.test"),
+              -1);
+    ASSERT_EQ(mqvpn_apple_tls_verify_server_chain(missing_cert, lens, 1,
+                                                 "vpn.example.test"),
+              -1);
+    ASSERT_EQ(mqvpn_apple_tls_verify_server_chain(certs, zero_len, 1,
+                                                 "vpn.example.test"),
+              -1);
+    ASSERT_EQ(mqvpn_apple_tls_verify_server_chain(certs, lens, 1, ""), -1);
+    ASSERT_EQ(g_apple_tls_capture.calls, 0);
+
+    mqvpn_apple_tls_set_evaluator_for_test(NULL);
+}
+#endif
 
 /* ── Client lifecycle: connect / state / disconnect ── */
 
@@ -3094,6 +3210,9 @@ main(void)
     run_client_new_missing_required_callbacks();
     run_client_new_abi_mismatch();
     run_client_destroy_null();
+#if defined(__APPLE__) && defined(MQVPN_API_TEST_SEAM)
+    run_apple_tls_system_trust_routing();
+#endif
 
     /* State machine tests */
     run_client_new_creates_idle();

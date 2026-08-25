@@ -9,6 +9,9 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#if defined(__APPLE__)
+#  include "apple_tls_verify.h"
+#endif
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
 
@@ -1292,14 +1295,38 @@ static int
 cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t certs_len,
                void *conn_user_data)
 {
+    cli_conn_t *conn = (cli_conn_t *)conn_user_data;
+    if (!conn || !conn->client) return -1;
+    mqvpn_client_t *client = conn->client;
+    if (client->config.insecure) return 0;
+#if defined(__APPLE__)
+    const char *hostname = client->config.tls_server_name[0]
+                               ? client->config.tls_server_name
+                               : client->config.server_host;
+    if (mqvpn_apple_tls_verify_server_chain(certs, cert_len, certs_len, hostname) == 0)
+        return 0;
+#else
     (void)certs;
     (void)cert_len;
     (void)certs_len;
-    cli_conn_t *conn = (cli_conn_t *)conn_user_data;
-    if (conn && conn->client->config.insecure) return 0;
-    LOG_E(conn->client, "TLS certificate verification failed");
+#endif
+    LOG_E(client, "TLS certificate verification failed");
     return -1;
 }
+
+#ifdef MQVPN_API_TEST_SEAM
+#  if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#  endif
+int
+mqvpn_client_test_cert_verify(mqvpn_client_t *client, const unsigned char *certs[],
+                              const size_t cert_len[], size_t certs_len)
+{
+    if (!client) return -1;
+    cli_conn_t conn = {.client = client};
+    return cb_cert_verify(certs, cert_len, certs_len, &conn);
+}
+#endif
 
 static void
 cb_save_token(const unsigned char *t, unsigned tl, void *u)
