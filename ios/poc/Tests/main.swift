@@ -177,4 +177,53 @@ let hyParsed = HybridSettings(providerConfiguration: hyBool)!
 check(hyParsed.enabled == false, "int-backed enabled rejected (isBool strict)")
 check(hyParsed.tcpMode == 2, "bool-backed mode clamps to auto")
 
+// ── Tunnel lifecycle ──
+// These catch an accidental selection of a stale or another app's profile,
+// a Stop action that leaves a live tunnel visually connected, and a Stop that
+// hangs after the engine tick thread has already exited.
+let tunnelProviderBundleID = "com.zackjackson.mqvpn.PacketTunnel"
+let selectedManager = selectMatchingManager([
+    .init(id: "old", providerBundleID: "com.mp0rta.mqvpnpoc.PacketTunnel", status: .connected),
+    .init(id: "current", providerBundleID: tunnelProviderBundleID, status: .disconnected),
+], providerBundleID: tunnelProviderBundleID)
+check(selectedManager?.id == "current", "select matching provider profile, never a stale first profile")
+check(selectMatchingManager([
+    .init(id: "other", providerBundleID: "com.example.other.PacketTunnel", status: .connected),
+], providerBundleID: tunnelProviderBundleID) == nil,
+      "no matching provider profile stays unavailable")
+
+check(StopLifecycle.request(hasManager: false, status: .connected) == .unavailable,
+      "Stop without a manager is unavailable")
+check(StopLifecycle.request(hasManager: true, status: .disconnected) == .alreadyStopped,
+      "Stop on a disconnected manager is already stopped")
+for status in [TunnelStatus.connected, .reasserting] {
+    let request = StopLifecycle.request(hasManager: true, status: status)
+    check(request == .requested, "Stop requests disconnect from \(status)")
+    check(StopLifecycle.visibleStatus(after: request, current: status) == .disconnecting,
+          "requested Stop visibly disconnects from \(status)")
+}
+check(StopLifecycle.transition(from: .requested, observedStatus: .disconnected) == .stopped,
+      "disconnected notification completes Stop successfully")
+check(StopLifecycle.transition(from: .requested, timedOut: true) == .failed,
+      "Stop timeout fails instead of waiting forever")
+check(StopLifecycle.transition(from: .requested, didError: true) == .failed,
+      "Stop error fails instead of waiting forever")
+
+var acceptedTeardowns = 0
+var acceptedCompletions = 0
+StopLifecycle.performOrFinish(
+    perform: { body in body(); return true },
+    accepted: { acceptedTeardowns += 1; acceptedCompletions += 1 },
+    rejected: { acceptedCompletions += 100 })
+check(acceptedTeardowns == 1 && acceptedCompletions == 1,
+      "accepted engine dispatch tears down and finishes exactly once")
+
+var rejectedCompletions = 0
+StopLifecycle.performOrFinish(
+    perform: { _ in false },
+    accepted: { rejectedCompletions += 100 },
+    rejected: { rejectedCompletions += 1 })
+check(rejectedCompletions == 1,
+      "rejected engine dispatch finishes locally exactly once")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }

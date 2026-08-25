@@ -2,11 +2,14 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 import NetworkExtension
+import os
+
+private let providerLog = Logger(subsystem: "mqvpn.poc", category: "provider")
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
-    private var engine: MqvpnEngine!
-    private var binder: PathBinder!
-    private var metrics: GateMetrics!
+    private var engine: MqvpnEngine?
+    private var binder: PathBinder?
+    private var metrics: GateMetrics?
     // Optional (not `!`): handleAppMessage can be delivered independently of
     // the start/stop lifecycle, so the reader must tolerate a nil cache.
     private var snapshot: SnapshotCache?
@@ -27,10 +30,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             throw NSError(domain: "mqvpn.poc", code: 11,
                           userInfo: [NSLocalizedDescriptionKey: "server unresolved: \(server.host)"])
         }
-        engine = MqvpnEngine()
-        binder = PathBinder(engine: engine)
-        metrics = GateMetrics(engine: engine, binder: binder)
-        snapshot = SnapshotCache(engine: engine)
+        let engine = MqvpnEngine()
+        let binder = PathBinder(engine: engine)
+        let metrics = GateMetrics(engine: engine, binder: binder)
+        let snapshot = SnapshotCache(engine: engine)
+        self.engine = engine
+        self.binder = binder
+        self.metrics = metrics
+        self.snapshot = snapshot
 
         engine.onTunOutput = { [weak self] data in
             // NEPacketTunnelFlow requires a protocol family per packet; the
@@ -61,14 +68,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // there); the engine/TLS side still gets server.host for SNI.
                 let settings = Self.makeSettings(from: info, server: resolvedIP)
                 self.setTunnelNetworkSettings(settings) { err in
-                    self.engine.perform {   // hop: latch access stays single-threaded
+                    engine.perform {   // hop: latch access stays single-threaded
                         guard !startResolved else { return }
                         startResolved = true
                         if let err { cont.resume(throwing: err); return }
-                        self.engine.tunActive()  // opens TUN + drives state 3->4
+                        engine.tunActive()  // opens TUN + drives state 3->4
                         self.readLoop()          // one-shot API: re-armed per completion
-                        self.metrics.start()     // 10s cadence os_log dumps
-                        self.snapshot?.start()   // 1s cadence app-facing cache
+                        metrics.start()          // 10s cadence os_log dumps
+                        snapshot.start()         // 1s cadence app-facing cache
                         cont.resume()
                     }
                 }
@@ -101,17 +108,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // the binder probes fresh per-type state itself rather than
             // trusting any possibly-stale monitor snapshot.
             defaultPathObservation = observe(\.defaultPath) { [weak self] _, _ in
-                guard let self else { return }
-                self.engine.perform { self.binder.reconcile() }
+                guard self != nil else { return }
+                engine.perform { binder.reconcile() }
             }
         }
     }
 
     private func readLoop() {
         packetFlow.readPackets { [weak self] packets, _ in
-            guard let self else { return }
-            self.engine.perform {
-                for p in packets { self.engine.feedTunPacket(p) }
+            guard let self, let engine = self.engine else { return }
+            engine.perform {
+                for p in packets { engine.feedTunPacket(p) }
             }
             self.readLoop()   // MUST re-arm: readPackets delivers once per call
         }
@@ -168,21 +175,42 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // frame races the async fd close on monitorQueue — losing the race
         // just means the server falls back to its idle timeout) and gives
         // repeated gate runs a zero state start.
+        providerLog.notice("STOP_BEGIN")
         defaultPathObservation?.invalidate()
         defaultPathObservation = nil
         await withCheckedContinuation { cont in
-            // Safe to resume from inside perform{}: only this method cancels
-            // the tick thread, so the hop cannot be dropped here.
-            engine.perform { [binder, engine] in
-                // Detach the closed-callback first: disconnect fires
-                // tunnel_closed synchronously, and re-entering
-                // cancelTunnelWithError during a system-initiated stop is
-                // unwanted.
-                engine?.onTunnelClosed = nil
-                binder?.stop()       // removePath for every slot + cancel monitors
-                engine?.shutdown()   // client=nil -> disconnect -> destroy -> thread cancel
-                cont.resume()
-            }
+            let engine = self.engine
+            let binder = self.binder
+            StopLifecycle.performOrFinish(
+                perform: { body in engine?.perform(body) ?? false },
+                accepted: { [weak self] in
+                    providerLog.notice("STOP_DISPATCHED accepted=true")
+                    // Detach the closed-callback first: disconnect fires
+                    // tunnel_closed synchronously, and re-entering
+                    // cancelTunnelWithError during a system-initiated stop is
+                    // unwanted.
+                    engine?.onTunnelClosed = nil
+                    binder?.stop()       // removePath for every slot + cancel monitors
+                    engine?.shutdown()   // client=nil -> disconnect -> destroy -> thread cancel
+                    self?.engine = nil
+                    self?.binder = nil
+                    self?.metrics = nil
+                    self?.snapshot = nil
+                    providerLog.notice("STOP_FINISHED accepted=true")
+                    cont.resume()
+                },
+                rejected: { [weak self] in
+                    // A completed/absent tick thread cannot safely run the
+                    // tick-confined binder teardown. The provider still must
+                    // release its local ownership and return to NE promptly.
+                    providerLog.notice("STOP_DISPATCHED accepted=false")
+                    self?.engine = nil
+                    self?.binder = nil
+                    self?.metrics = nil
+                    self?.snapshot = nil
+                    providerLog.notice("STOP_FINISHED accepted=false")
+                    cont.resume()
+                })
         }
     }
 }

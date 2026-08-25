@@ -55,13 +55,31 @@ final class TunnelController: ObservableObject {
 
     var isEditable: Bool { manager != nil && status == .disconnected }
     var isConnectable: Bool { isEditable && serverSettings != nil && !isSaving }
+    var isStoppable: Bool {
+        guard manager != nil else { return false }
+        switch Self.tunnelStatus(status) {
+        case .connecting, .connected, .reasserting: return true
+        default: return false
+        }
+    }
     static func isUp(_ s: NEVPNStatus) -> Bool { s == .connected || s == .reasserting }
 
     func loadOrCreateManager() async {
         do {
             let existing = try await NETunnelProviderManager.loadAllFromPreferences()
-            let m = existing.first ?? NETunnelProviderManager()
-            if existing.isEmpty {
+            let descriptors = existing.enumerated().map { index, manager in
+                ManagerDescriptor(
+                    id: String(index),
+                    providerBundleID: (manager.protocolConfiguration as? NETunnelProviderProtocol)?
+                        .providerBundleIdentifier,
+                    status: Self.tunnelStatus(manager.connection.status))
+            }
+            let matching = selectMatchingManager(descriptors, providerBundleID: Self.providerBundleID)
+            let m: NETunnelProviderManager
+            if let matching, let index = Int(matching.id) {
+                m = existing[index]
+            } else {
+                m = NETunnelProviderManager()
                 // Placeholder only: NE rejects an empty serverAddress at save.
                 // Decoupled from the real peer, which the seeding step below
                 // (and ultimately the extension) resolves and sets itself.
@@ -136,7 +154,14 @@ final class TunnelController: ObservableObject {
     }
 
     func stop() {
-        manager?.connection.stopVPNTunnel()
+        guard let manager, isStoppable else { return }
+        let request = StopLifecycle.request(hasManager: true, status: Self.tunnelStatus(status))
+        guard request == .requested else { return }
+        status = .disconnecting
+        statusText = Self.describe(status)
+        // The immediate display is an acknowledged user intent; all terminal
+        // reconciliation remains exclusively driven by NEVPNStatusDidChange.
+        manager.connection.stopVPNTunnel()
     }
 
     /// Persists server + reorder + hybrid settings via the atomic snapshot -> merge ->
@@ -264,6 +289,18 @@ final class TunnelController: ObservableObject {
         case .reasserting: return "reasserting"
         case .disconnecting: return "disconnecting"
         @unknown default: return "unknown(\(s.rawValue))"
+        }
+    }
+
+    private static func tunnelStatus(_ s: NEVPNStatus) -> TunnelStatus {
+        switch s {
+        case .invalid: return .invalid
+        case .disconnected: return .disconnected
+        case .connecting: return .connecting
+        case .connected: return .connected
+        case .reasserting: return .reasserting
+        case .disconnecting: return .disconnecting
+        @unknown default: return .invalid
         }
     }
 }

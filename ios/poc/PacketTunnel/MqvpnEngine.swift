@@ -66,11 +66,13 @@ final class MqvpnEngine: NSObject {
     /// Hop an arbitrary closure onto the tick thread (the ONLY entry point).
     /// After shutdown() the thread is gone — late hops (source cancel
     /// handlers, monitor updates) are silently dropped.
-    func perform(_ body: @escaping () -> Void) {
-        guard let t = tickThread, !t.isFinished, !t.isCancelled else { return }
+    @discardableResult
+    func perform(_ body: @escaping () -> Void) -> Bool {
+        guard let t = tickThread, !t.isFinished, !t.isCancelled else { return false }
         let wrapped = BlockOperation(block: body)
         wrapped.perform(#selector(Operation.start), on: t,
                         with: nil, waitUntilDone: false)
+        return true
     }
 
     /// Tears the client down (tick thread). client goes nil first so any

@@ -57,6 +57,7 @@ struct DashboardView: View {
                     .disabled(!controller.isConnectable)
                 Button("Stop") { controller.stop() }
                     .buttonStyle(.bordered)
+                    .disabled(!controller.isStoppable)
             }
         }
     }
