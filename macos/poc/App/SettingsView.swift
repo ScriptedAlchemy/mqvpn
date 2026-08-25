@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var relayKeyText: String
     @State private var hybridEnabled: Bool
     @State private var hybridMode: Int
+    @State private var optimizeFor: Int
 
     init(controller: TunnelController) {
         self.controller = controller
@@ -31,6 +32,7 @@ struct SettingsView: View {
         _relayKeyText = State(initialValue: relay.keyBase64)
         _hybridEnabled = State(initialValue: controller.hybridSettings.enabled)
         _hybridMode = State(initialValue: controller.hybridSettings.tcpMode)
+        _optimizeFor = State(initialValue: controller.schedulerSettings.policy)
     }
 
     private var serverDraft: ServerSettings {
@@ -48,6 +50,10 @@ struct SettingsView: View {
 
     private var hybridDraft: HybridSettings {
         HybridSettings(enabled: hybridEnabled, tcpMode: hybridMode)
+    }
+
+    private var schedulerDraft: SchedulerSettings {
+        SchedulerSettings(policy: optimizeFor)
     }
 
     private var formValid: Bool {
@@ -70,6 +76,13 @@ struct SettingsView: View {
             SecureField("Relay key (base64, 32 bytes)", text: $relayKeyText)
                 .disabled(!relayEnabled)
             Divider()
+            Picker(SchedulerSettings.pickerTitle, selection: $optimizeFor) {
+                Text(SchedulerSettings.labelThroughput).tag(SchedulerSettings.maxThroughput)
+                Text(SchedulerSettings.labelLatency).tag(SchedulerSettings.lowLatency)
+            }
+            Text("Applies on the next Start. Max Throughput learns path capacity from real traffic.")
+                .font(.caption)
+                .foregroundColor(.secondary)
             Toggle("Hybrid TCP", isOn: $hybridEnabled)
             if hybridEnabled {
                 Picker("TCP mode", selection: $hybridMode) {
@@ -84,7 +97,7 @@ struct SettingsView: View {
                 Button("Save") {
                     Task {
                         await controller.save(server: serverDraft, relay: relayDraft,
-                                              hybrid: hybridDraft)
+                                              hybrid: hybridDraft, scheduler: schedulerDraft)
                         if controller.configError == nil { dismiss() }
                     }
                 }

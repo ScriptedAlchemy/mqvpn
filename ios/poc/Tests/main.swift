@@ -119,6 +119,21 @@ runAsync {
     catch { threw = true }
     check(!threw && boolOf(store, "reorderEnabled") == true, "refresh fail -> committed")
 }
+runAsync {
+    // Optimize For commit fail rolls Low Latency merge back to Max Throughput (0)
+    let store = FakeStore()
+    store.providerConfiguration = ["schedulerPolicy": NSNumber(value: SchedulerSettings.maxThroughput)]
+    store.commitThrows = true
+    var threw = false
+    do {
+        try await performAtomicSave(store, merge: [
+            "schedulerPolicy": NSNumber(value: SchedulerSettings.lowLatency),
+        ])
+    } catch { threw = true }
+    let rolledBack = (store.providerConfiguration?["schedulerPolicy"] as? NSNumber)?.intValue
+        == SchedulerSettings.maxThroughput
+    check(threw && rolledBack, "scheduler commit fail -> rethrow + rollback to Max Throughput")
+}
 
 // IngestGate
 check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 2, isUp: true, snapSeq: 5,
@@ -195,6 +210,31 @@ let hyBool: [String: Any] = ["hybridEnabled": NSNumber(value: 1), "hybridTcpMode
 let hyParsed = HybridSettings(providerConfiguration: hyBool)!
 check(hyParsed.enabled == false, "int-backed enabled rejected (isBool strict)")
 check(hyParsed.tcpMode == 2, "bool-backed mode clamps to auto")
+
+// SchedulerSettings — Max Throughput is the default; unknown values clamp there.
+let sched = SchedulerSettings(policy: SchedulerSettings.lowLatency)
+check(SchedulerSettings(providerConfiguration: sched.toProviderConfiguration()) == sched,
+      "scheduler round-trip")
+check(SchedulerSettings(providerConfiguration: nil) == .default, "missing scheduler defaults to max throughput")
+check(SchedulerSettings(providerConfiguration: [:]) == .default, "empty dict defaults to max throughput")
+check(SchedulerSettings.`default`.policy == SchedulerSettings.maxThroughput, "default is max throughput")
+let schedBad: [String: Any] = ["schedulerPolicy": NSNumber(value: 9)]
+check(SchedulerSettings(providerConfiguration: schedBad).policy == SchedulerSettings.maxThroughput,
+      "out-of-range scheduler clamps to max throughput")
+let schedBool: [String: Any] = ["schedulerPolicy": NSNumber(value: true)]
+check(SchedulerSettings(providerConfiguration: schedBool).policy == SchedulerSettings.maxThroughput,
+      "bool-backed scheduler clamps to max throughput")
+check(SchedulerSettings.coreScheduler(for: SchedulerSettings.maxThroughput) == 1,
+      "max throughput maps to WLB")
+check(SchedulerSettings.coreScheduler(for: SchedulerSettings.lowLatency) == 0,
+      "low latency maps to minrtt")
+check(SchedulerSettings.headerValue(for: SchedulerSettings.maxThroughput) == "throughput" &&
+      SchedulerSettings.headerValue(for: SchedulerSettings.lowLatency) == "latency",
+      "CONNECT-IP mqvpn-performance header values")
+check(SchedulerSettings.displayLabel(for: SchedulerSettings.maxThroughput) == "Max Throughput" &&
+      SchedulerSettings.displayLabel(for: SchedulerSettings.lowLatency) == "Low Latency" &&
+      SchedulerSettings.pickerTitle == "Optimize For",
+      "product labels never expose scheduler names")
 
 // ── Tunnel lifecycle ──
 // These catch an accidental selection of a stale or another app's profile,

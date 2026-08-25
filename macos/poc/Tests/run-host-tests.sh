@@ -31,6 +31,7 @@ swiftc -o "$OUT" \
     "$IOS/Shared/ServerResolve.swift" \
     "$IOS/Shared/ReorderSettings.swift" \
     "$IOS/Shared/HybridSettings.swift" \
+    "$IOS/Shared/SchedulerSettings.swift" \
     "$IOS/Shared/RelayBonjour.swift" \
     "$IOS/Shared/OperatingMode.swift" \
     "$IOS/Shared/RelayRuntimeState.swift" \
@@ -77,6 +78,7 @@ swiftc -typecheck \
     "$IOS/Shared/ServerResolve.swift" \
     "$IOS/Shared/ReorderSettings.swift" \
     "$IOS/Shared/HybridSettings.swift" \
+    "$IOS/Shared/SchedulerSettings.swift" \
     "$IOS/Shared/RelayBonjour.swift" \
     "$TMPD/ReorderStatsSnapshot.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
@@ -104,6 +106,7 @@ swiftc -typecheck \
     "$IOS/Shared/ServerResolve.swift" \
     "$IOS/Shared/ReorderSettings.swift" \
     "$IOS/Shared/HybridSettings.swift" \
+    "$IOS/Shared/SchedulerSettings.swift" \
     "$IOS/Shared/RelayBonjour.swift" \
     "$TMPD/ReorderStatsSnapshot.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \

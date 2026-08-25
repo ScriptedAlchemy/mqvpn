@@ -13,6 +13,7 @@ final class TunnelController: ObservableObject {
     @Published var serverSettings: ServerSettings?
     @Published var relaySettings: MacRelaySettings?
     @Published var hybridSettings: HybridSettings = .disabled
+    @Published var schedulerSettings: SchedulerSettings = .default
     @Published var configError: String?
     @Published private(set) var isSaving = false
     @Published var showSettings = false
@@ -132,7 +133,7 @@ final class TunnelController: ObservableObject {
     }
 
     func save(server: ServerSettings, relay: MacRelaySettings,
-              hybrid: HybridSettings) async {
+              hybrid: HybridSettings, scheduler: SchedulerSettings) async {
         guard let manager,
               saveGuard(isSaving: isSaving, isEditable: isEditable,
                         hasManager: true) == nil else { return }
@@ -140,7 +141,7 @@ final class TunnelController: ObservableObject {
         defer { isSaving = false }
         do {
             let merged = MacProviderConfiguration.make(server: server, relay: relay,
-                                                       hybrid: hybrid)
+                                                       hybrid: hybrid, scheduler: scheduler)
             try await applyProtocol(to: manager, configuration: merged)
             try await read(from: manager)
             profileIsCurrent = true
@@ -183,6 +184,7 @@ final class TunnelController: ObservableObject {
             configError = "server config invalid — re-enter in Settings"
         }
         hybridSettings = HybridSettings(providerConfiguration: config) ?? .disabled
+        schedulerSettings = SchedulerSettings(providerConfiguration: config)
         do {
             relaySettings = try MacRelaySettings.startConfiguration(from: config)
                 ?? MacRelaySettings(providerConfiguration: config)

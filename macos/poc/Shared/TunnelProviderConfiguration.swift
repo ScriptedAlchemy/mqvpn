@@ -120,10 +120,12 @@ enum MacConnectGuard {
 /// server-only save.
 enum MacProviderConfiguration {
     static func make(server: ServerSettings, relay: MacRelaySettings,
-                     hybrid: HybridSettings) -> [String: Any] {
+                     hybrid: HybridSettings,
+                     scheduler: SchedulerSettings = .default) -> [String: Any] {
         var configuration = server.toProviderConfiguration()
         for (key, value) in relay.toProviderConfiguration() { configuration[key] = value }
         for (key, value) in hybrid.toProviderConfiguration() { configuration[key] = value }
+        for (key, value) in scheduler.toProviderConfiguration() { configuration[key] = value }
         return configuration
     }
 }

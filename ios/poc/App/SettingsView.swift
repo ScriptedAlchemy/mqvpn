@@ -22,6 +22,7 @@ struct SettingsView: View {
 
     @State private var hybridEnabled: Bool
     @State private var hybridMode: Int
+    @State private var optimizeFor: Int
     @State private var operatingMode: OperatingMode
     @State private var relayKeyText: String
     @State private var relayPortText: String
@@ -42,6 +43,7 @@ struct SettingsView: View {
 
         _hybridEnabled = State(initialValue: controller.hybridSettings.enabled)
         _hybridMode = State(initialValue: controller.hybridSettings.tcpMode)
+        _optimizeFor = State(initialValue: controller.schedulerSettings.policy)
         _operatingMode = State(initialValue: controller.operatingMode)
         let relay = controller.relaySettings ?? .emptyDraft
         _relayKeyText = State(initialValue: relay.keyBase64)
@@ -119,6 +121,14 @@ struct SettingsView: View {
                         Text("The Mac connects to this iPhone over the shared Wi-Fi LAN; only mqvpn UDP is forwarded over cellular.")
                     }
                 }
+                Section {
+                    Picker(SchedulerSettings.pickerTitle, selection: $optimizeFor) {
+                        Text(SchedulerSettings.labelThroughput).tag(SchedulerSettings.maxThroughput)
+                        Text(SchedulerSettings.labelLatency).tag(SchedulerSettings.lowLatency)
+                    }.disabled(!controller.isEditable)
+                } header: { Text(SchedulerSettings.pickerTitle) } footer: {
+                    Text("Applies on the next Start. Max Throughput learns path capacity from real traffic; Low Latency prefers the fastest path.")
+                }
                 if operatingMode == .vpn {
                 Section("Reorder Buffer") {
                     Toggle("Enabled", isOn: $enabled).disabled(!controller.isEditable)
@@ -174,9 +184,11 @@ struct SettingsView: View {
 
     private func save() async {
         let hybrid = HybridSettings(enabled: hybridEnabled, tcpMode: hybridMode)
+        let scheduler = SchedulerSettings(policy: optimizeFor)
         do {
             try await controller.saveSettings(
                 server: serverDraft, reorder: draft, hybrid: hybrid,
+                scheduler: scheduler,
                 operatingMode: operatingMode,
                 relay: operatingMode == .macRelay ? relayDraft : controller.relaySettings)
             dismiss()

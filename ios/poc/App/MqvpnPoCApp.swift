@@ -35,6 +35,7 @@ final class TunnelController: ObservableObject {
     @Published var pathRates: [String: Double] = [:]   // iface name -> Mbps
     @Published var reorderSettings: ReorderSettings = .disabled
     @Published var hybridSettings = HybridSettings.disabled
+    @Published var schedulerSettings = SchedulerSettings.default
     @Published var serverSettings: ServerSettings?   // nil = unset/corrupt → Connect disabled
     @Published var operatingMode: OperatingMode = .vpn
     @Published var relaySettings: RelaySettings?
@@ -119,6 +120,7 @@ final class TunnelController: ObservableObject {
             manager = m
             reorderSettings = ReorderSettings(providerConfiguration: pc) ?? .disabled
             hybridSettings = HybridSettings(providerConfiguration: pc) ?? .disabled
+            schedulerSettings = SchedulerSettings(providerConfiguration: pc)
             if let mode = OperatingMode(providerConfiguration: pc) {
                 operatingMode = mode
                 relaySettings = RelaySettings(providerConfiguration: pc)
@@ -214,7 +216,8 @@ final class TunnelController: ObservableObject {
     /// function the host tests fault-inject — so the tested logic IS the
     /// production logic.
     func saveSettings(server: ServerSettings, reorder: ReorderSettings,
-                      hybrid: HybridSettings, operatingMode: OperatingMode,
+                      hybrid: HybridSettings, scheduler: SchedulerSettings,
+                      operatingMode: OperatingMode,
                       relay: RelaySettings?) async throws {
         if let e = saveGuard(isSaving: isSaving, isEditable: isEditable, hasManager: manager != nil) {
             throw e
@@ -228,6 +231,7 @@ final class TunnelController: ObservableObject {
         var merged = server.toProviderConfiguration()
         for (k, v) in reorder.toProviderConfiguration() { merged[k] = v }
         for (k, v) in hybrid.toProviderConfiguration() { merged[k] = v }
+        for (k, v) in scheduler.toProviderConfiguration() { merged[k] = v }
         for (k, v) in operatingMode.toProviderConfiguration() { merged[k] = v }
         if let relay, relay.isValid {
             for (k, v) in relay.toProviderConfiguration() { merged[k] = v }
@@ -236,6 +240,11 @@ final class TunnelController: ObservableObject {
         serverSettings = server
         reorderSettings = reorder
         hybridSettings = hybrid
+        // NEConfigStore holds the pre-refresh proto; loadFromPreferences can
+        // replace manager.protocolConfiguration. Publish the manager's current
+        // value, not the caller object. Missing proto → Max Throughput default.
+        let savedProto = manager.protocolConfiguration as? NETunnelProviderProtocol
+        schedulerSettings = SchedulerSettings(providerConfiguration: savedProto?.providerConfiguration)
         self.operatingMode = operatingMode
         relaySettings = relay?.isValid == true ? relay : nil
         configError = nil   // only on success

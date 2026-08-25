@@ -301,14 +301,22 @@ check(saveGuard(isSaving: true, isEditable: false, hasManager: false) == .inProg
 let validServer = ServerSettings(host: "vpn.example", port: 443, serverName: "",
                                  authKey: "psk", insecure: false)
 let hybrid = HybridSettings(enabled: true, tcpMode: HybridSettings.modeAuto)
+let scheduler = SchedulerSettings(policy: SchedulerSettings.lowLatency)
 let directOnlyConfiguration = MacProviderConfiguration.make(
     server: validServer,
     relay: MacRelaySettings(enabled: false, host: "", port: 5443, keyBase64: ""),
-    hybrid: hybrid)
+    hybrid: hybrid,
+    scheduler: scheduler)
 check(ServerSettings(providerConfiguration: directOnlyConfiguration) == validServer &&
       HybridSettings(providerConfiguration: directOnlyConfiguration) == hybrid &&
+      SchedulerSettings(providerConfiguration: directOnlyConfiguration) == scheduler &&
       (try? MacRelaySettings.startConfiguration(from: directOnlyConfiguration)) == nil,
-      "one Mac provider configuration persists server, Hybrid, and an explicit direct-only relay state")
+      "one Mac provider configuration persists server, Hybrid, Optimize For, and an explicit direct-only relay state")
+check(SchedulerSettings(providerConfiguration: MacProviderConfiguration.make(
+        server: validServer,
+        relay: MacRelaySettings(enabled: false, host: "", port: 5443, keyBase64: ""),
+        hybrid: hybrid)).policy == SchedulerSettings.maxThroughput,
+      "Mac provider configuration defaults Optimize For to Max Throughput")
 check(MacPollingLifecycle.shouldPoll(status: .connected) &&
       MacPollingLifecycle.shouldPoll(status: .reasserting) &&
       !MacPollingLifecycle.shouldPoll(status: .connecting) &&
@@ -397,6 +405,27 @@ runAsync {
     let rolledBack = (store.providerConfiguration?["macRelayEnabled"] as? NSNumber)?.boolValue == false
     check(commitFailed && rolledBack && store.localizedName == "old" && store.isEnabled == false,
           "commit failure rolls configuration, name, and enabled back together")
+}
+runAsync {
+    let store = FakeStore()
+    store.providerConfiguration = ["schedulerPolicy": NSNumber(value: SchedulerSettings.maxThroughput)]
+    store.localizedName = "old"
+    store.isEnabled = false
+    store.commitThrows = true
+    var commitFailed = false
+    do {
+        try await performAtomicSave(
+            store,
+            merge: ["schedulerPolicy": NSNumber(value: SchedulerSettings.lowLatency)],
+            name: TunnelProviderConfiguration.localizedName,
+            enabled: true)
+    } catch MacSaveFailure.commit {
+        commitFailed = true
+    } catch { }
+    let rolledBack = (store.providerConfiguration?["schedulerPolicy"] as? NSNumber)?.intValue
+        == SchedulerSettings.maxThroughput
+    check(commitFailed && rolledBack && store.localizedName == "old" && store.isEnabled == false,
+          "scheduler commit failure rolls Optimize For back to Max Throughput")
 }
 runAsync {
     let store = FakeStore()

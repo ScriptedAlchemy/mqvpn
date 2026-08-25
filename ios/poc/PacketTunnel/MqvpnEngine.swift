@@ -39,7 +39,9 @@ final class MqvpnEngine: NSObject {
     /// Blocks until the client exists on the tick thread — callers may start
     /// PathBinder immediately after return without ordering assumptions.
     func start(server: ServerSettings, reorder: ReorderSettings = .disabled,
-               hybrid: HybridSettings = .disabled, serverAddr: ResolvedServerAddress) {
+               hybrid: HybridSettings = .disabled,
+               scheduler: SchedulerSettings = .default,
+               serverAddr: ResolvedServerAddress) {
         self.serverAddr = serverAddr
         // Provenance-independent ABI guard: the linked libmqvpn.a and this
         // extension must share the mqvpn_reorder_stats_t layout. On mismatch,
@@ -64,7 +66,8 @@ final class MqvpnEngine: NSObject {
         tickThread.start()
         runLoopReady.wait()
         let ready = DispatchSemaphore(value: 0)
-        perform { self.setupClient(server, reorder: reorder, hybrid: hybrid); ready.signal() }
+        perform { self.setupClient(server, reorder: reorder, hybrid: hybrid,
+                                   scheduler: scheduler); ready.signal() }
         ready.wait()
     }
 
@@ -93,7 +96,8 @@ final class MqvpnEngine: NSObject {
         tickThread.cancel()
     }
 
-    private func setupClient(_ server: ServerSettings, reorder: ReorderSettings, hybrid: HybridSettings) {
+    private func setupClient(_ server: ServerSettings, reorder: ReorderSettings,
+                             hybrid: HybridSettings, scheduler: SchedulerSettings) {
         let cfg = mqvpn_config_new()
         mqvpn_config_set_server(cfg, server.host, Int32(server.port))
         // "" = unset: the core then uses server.host for SNI / cert verify,
@@ -147,6 +151,21 @@ final class MqvpnEngine: NSObject {
         }
         hybridConfigured = hybridOK
         log.notice("[hybrid] applied enabled=\(hybrid.enabled) mode=\(hybrid.tcpMode) configured=\(hybridOK)")
+        let mode: mqvpn_performance_mode_t = scheduler.policy == SchedulerSettings.lowLatency
+            ? MQVPN_PERF_LOW_LATENCY : MQVPN_PERF_MAX_THROUGHPUT
+        if mqvpn_config_set_performance_mode(cfg, mode) != 0 {
+            log.error("[scheduler] performance mode rejected policy=\(scheduler.policy)")
+            mqvpn_config_free(cfg)
+            startFailed = true
+            onTunnelClosed?(Int32(MQVPN_ERR_INVALID_ARG.rawValue))
+            return
+        }
+        // Low Latency is WLB policy XQC_WLB_LOW_LATENCY applied in core after
+        // connect via performance mode — always request WLB at config time.
+        if mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_WLB) != 0 {
+            log.error("[scheduler] setter failed policy=\(scheduler.policy) — keeping library default")
+        }
+        log.notice("[scheduler] applied policy=\(scheduler.displayLabel, privacy: .public)")
         var cbs = mqvpn_client_callbacks_t()
         cbs.abi_version = UInt32(MQVPN_CALLBACKS_ABI_VERSION)
         cbs.struct_size = UInt32(MemoryLayout<mqvpn_client_callbacks_t>.size)

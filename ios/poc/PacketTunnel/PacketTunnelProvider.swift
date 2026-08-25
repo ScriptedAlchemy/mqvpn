@@ -157,7 +157,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.cancelTunnelWithError(err)
                 }
             }
-            engine.start(server: server, reorder: reorder, hybrid: hybrid, serverAddr: resolved)
+            engine.start(server: server, reorder: reorder, hybrid: hybrid,
+                         scheduler: SchedulerSettings(providerConfiguration: providerConfig),
+                         serverAddr: resolved)
             binder.start()
             // Redundant trigger for path lifecycle: NWPathMonitor updates
             // have been observed to arrive minutes late inside the provider

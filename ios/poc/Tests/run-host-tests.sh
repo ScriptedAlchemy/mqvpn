@@ -29,6 +29,7 @@ swiftc -o "$OUT" \
     "$SHARED/ServerResolve.swift" \
     "$SHARED/ReorderSettings.swift" \
     "$SHARED/HybridSettings.swift" \
+    "$SHARED/SchedulerSettings.swift" \
     "$SHARED/ProviderMessage.swift" \
     "$SHARED/TunnelLifecycle.swift" \
     "$SHARED/OperatingMode.swift" \

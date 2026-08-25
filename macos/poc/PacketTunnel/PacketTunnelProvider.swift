@@ -154,6 +154,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         engine.start(server: server,
                      reorder: ReorderSettings(providerConfiguration: providerConfiguration()) ?? .disabled,
                      hybrid: HybridSettings(providerConfiguration: providerConfiguration()) ?? .disabled,
+                     scheduler: SchedulerSettings(providerConfiguration: providerConfiguration()),
                      serverAddr: serverAddress!)
 
         if relaySettings != nil, let relayEndpoint = resolvedRelay?.ipString {
