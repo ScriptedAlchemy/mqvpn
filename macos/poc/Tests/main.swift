@@ -354,11 +354,11 @@ check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                 relay: MacRelaySettings(enabled: true, host: "",
                                                         port: 5443, keyBase64: "")),
       "an enabled but incomplete iPhone relay cannot Start")
-check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
-                                server: validServer,
-                                relay: MacRelaySettings(enabled: true, host: "",
-                                                        port: 5443, keyBase64: relayKey)),
-      "an enabled relay cannot Start until discovery resolves a LAN peer")
+check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
+                               server: validServer,
+                               relay: MacRelaySettings(enabled: true, host: "",
+                                                       port: 5443, keyBase64: relayKey)),
+      "a valid relay preference does not block direct-path Start while discovery waits")
 check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                server: validServer,
                                relay: MacRelaySettings(enabled: true, host: "",
@@ -373,6 +373,17 @@ check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                discoveredRelay: MacRelayEndpoint(
                                    host: "fd97:b933:48b8:4fdb::42", port: 5443)),
       "Start is allowed after a real IPv6 relay endpoint resolves")
+check(MacRelayEndpointTransition.decide(current: nil, discovered: nil) == .keep &&
+      MacRelayEndpointTransition.decide(
+          current: nil,
+          discovered: MacRelayEndpoint(host: "192.168.1.50", port: 5443)) == .attach &&
+      MacRelayEndpointTransition.decide(
+          current: MacRelayEndpoint(host: "192.168.1.50", port: 5443),
+          discovered: MacRelayEndpoint(host: "192.168.1.50", port: 5443)) == .keep &&
+      MacRelayEndpointTransition.decide(
+          current: MacRelayEndpoint(host: "192.168.1.50", port: 5443),
+          discovered: MacRelayEndpoint(host: "192.168.1.51", port: 5443)) == .replace,
+      "continuous relay discovery attaches late and replaces a changed LAN endpoint")
 check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                 server: validServer, relay: nil,
                                 relayConfigurationIsValid: false),

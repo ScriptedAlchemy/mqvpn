@@ -7,6 +7,11 @@ import os
 
 private let macProviderLog = Logger(subsystem: "mqvpn.mac", category: "provider")
 
+private struct DiscoveredRelayAddress: @unchecked Sendable {
+    let endpoint: MacRelayEndpoint
+    let address: ResolvedServerAddress
+}
+
 /// The macOS packet-tunnel runtime.  Network Extension, rather than a root
 /// helper, owns every route and DNS transaction.  This class only reaches
 /// `setTunnelNetworkSettings` after libmqvpn has authenticated and supplied a
@@ -24,6 +29,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private var startupTimer: DispatchSourceTimer?
     private var recoveryTimer: DispatchSourceTimer?
     private var reconnectTimer: DispatchSourceTimer?
+    private var relayDiscoveryTimer: DispatchSourceTimer?
+    private var relayDiscoveryInFlight = false
+    private var relayTransitionInFlight = false
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var settingsApplyInFlight = false
     private var settingsApplyWaiters: [() -> Void] = []
@@ -31,7 +39,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private var transportStopTask: Task<Void, Never>?
     private var serverAddress: ResolvedServerAddress?
     private var relayAddress: ResolvedServerAddress?
+    private var relayEndpoint: MacRelayEndpoint?
     private var relaySettings: MacRelaySettings?
+    private var currentTunnelInfo: mqvpn_tunnel_info_t?
+    private var resolvedServerIPv4: String?
     private var lastPathCount = 0
     private var startCancelled = false
     private lazy var relaySession = MacRelayLANSession(
@@ -66,26 +77,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         }).value, let serverIPv4 = resolvedServer.ipString else {
             throw Self.error(11, "server unresolved: \(server.host)")
         }
-        let resolvedRelay: ResolvedServerAddress?
-        if relaySettings != nil {
-            guard let discovered = await Task.detached(priority: .userInitiated, operation: {
-                MacRelayBonjourResolver.resolve(timeout: 3)
-            }).value else {
-                throw Self.error(12, "No relay found")
-            }
-            guard let address = await Task.detached(priority: .userInitiated, operation: {
-                resolveRelayEndpoint(discovered.host, discovered.port)
-            }).value, let ip = address.ipString,
-                  MacRelayDiscovery.choose([
-                      MacRelayEndpoint(host: ip, port: discovered.port)
-                  ]) != nil else {
-                throw Self.error(12, "No relay found")
-            }
-            resolvedRelay = address
-        } else {
-            resolvedRelay = nil
-        }
-
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             lifecycleQueue.async { [weak self] in
                 guard let self else {
@@ -100,24 +91,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                 self.startResolved = false
                 self.setStartCancelled(false)
                 self.serverAddress = resolvedServer
-                self.relayAddress = resolvedRelay
+                self.relayAddress = nil
+                self.relayEndpoint = nil
                 self.relaySettings = relaySettings
                 _ = self.lifecycle.begin(nowMs: Self.nowMs())
                 self.startRuntime(server: server, serverIPv4: serverIPv4,
-                                  relaySettings: relaySettings, resolvedRelay: resolvedRelay)
+                                  relaySettings: relaySettings)
             }
         }
     }
 
     private func startRuntime(server: ServerSettings, serverIPv4: String,
-                              relaySettings: MacRelaySettings?,
-                              resolvedRelay: ResolvedServerAddress?) {
+                              relaySettings: MacRelaySettings?) {
         let engine = MqvpnEngine()
         let direct = PathBinder(engine: engine, interfaceTypes: [.wifi, .wiredEthernet])
         let snapshots = SnapshotCache(engine: engine)
         self.engine = engine
         self.directBinder = direct
         self.snapshotCache = snapshots
+        self.resolvedServerIPv4 = serverIPv4
         setSnapshotReader { [weak snapshots] in snapshots?.read() }
 
         engine.onTunOutput = { [weak self] packet in
@@ -158,25 +150,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                      scheduler: SchedulerSettings(providerConfiguration: providerConfiguration()),
                      serverAddr: serverAddress!)
 
-        if relaySettings != nil, let relayEndpoint = resolvedRelay?.ipString {
-            guard relaySession.start(relayIPv4: relayEndpoint, makeBinder: { [weak self] name in
-                self?.makeRelayBinder(interfaceName: name)
-            }) else {
-                failStart(Self.error(15, "no live Wi-Fi or Ethernet interface reaches the iPhone relay"))
-                return
-            }
-            relaySession.onUnavailable = { [weak self] in
-                guard let self else { return }
-                self.snapshotCache?.updateLifecycle(reasserting: self.reasserting,
-                                                    error: "iPhone relay interface unavailable")
-            }
-            relaySession.armMonitor(relayIPv4: relayEndpoint) { [weak self] in
-                self?.lifecycle.isStopping ?? true
-            }
-        }
-
         direct.start()
         armStartupTimeout()
+        if relaySettings != nil { armRelayDiscovery() }
     }
 
     /// Lifecycle-queue-only. A relay binder is created only for a live local
@@ -196,12 +172,138 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         return relay
     }
 
+    private func armRelayDiscovery() {
+        guard relaySettings != nil, relayDiscoveryTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: lifecycleQueue)
+        timer.schedule(deadline: .now(), repeating: .seconds(2))
+        timer.setEventHandler { [weak self] in self?.discoverRelay() }
+        timer.resume()
+        relayDiscoveryTimer = timer
+    }
+
+    private func cancelRelayDiscovery() {
+        relayDiscoveryTimer?.cancel()
+        relayDiscoveryTimer = nil
+        relayTransitionInFlight = false
+    }
+
+    private func discoverRelay() {
+        guard relaySettings != nil, !lifecycle.isStopping,
+              !relayDiscoveryInFlight else { return }
+        relayDiscoveryInFlight = true
+        let lookup = Task.detached(priority: .utility) { () -> DiscoveredRelayAddress? in
+            guard let endpoint = MacRelayBonjourResolver.resolve(timeout: 1.5),
+                  let address = resolveRelayEndpoint(endpoint.host, endpoint.port),
+                  let ip = address.ipString,
+                  let chosen = MacRelayDiscovery.choose([
+                      MacRelayEndpoint(host: ip, port: endpoint.port)
+                  ])
+            else { return nil }
+            return DiscoveredRelayAddress(endpoint: chosen, address: address)
+        }
+        Task { [weak self] in
+            let result = await lookup.value
+            self?.lifecycleQueue.async { [weak self] in
+                self?.relayDiscoveryCompleted(result)
+            }
+        }
+    }
+
+    private func relayDiscoveryCompleted(_ discovered: DiscoveredRelayAddress?) {
+        relayDiscoveryInFlight = false
+        guard !lifecycle.isStopping, !relayTransitionInFlight,
+              let discovered else { return }
+        switch MacRelayEndpointTransition.decide(current: relayEndpoint,
+                                                  discovered: discovered.endpoint) {
+        case .keep:
+            return
+        case .attach, .replace:
+            prepareRelayRouteAndAttach(discovered)
+        }
+    }
+
+    /// A late relay is additive: update Network Extension's exclusions first,
+    /// then create the LAN socket. This keeps HELLO/ACK off the tunnel even
+    /// when the iPhone appears after the default route is already installed.
+    private func prepareRelayRouteAndAttach(_ discovered: DiscoveredRelayAddress) {
+        guard !settingsApplyInFlight else { return }
+        relayTransitionInFlight = true
+        guard let info = currentTunnelInfo, let serverIPv4 = resolvedServerIPv4,
+              let relayIP = discovered.address.ipString else {
+            replaceRelayTransport(with: discovered)
+            return
+        }
+        settingsApplyInFlight = true
+        let settings = Self.makeSettings(from: info, serverIPv4: serverIPv4,
+                                         relayIPv4: relayIP)
+        setTunnelNetworkSettings(settings) { [weak self] error in
+            self?.lifecycleQueue.async {
+                guard let self else { return }
+                self.settingsApplyInFlight = false
+                let waiters = self.settingsApplyWaiters
+                self.settingsApplyWaiters.removeAll()
+                waiters.forEach { $0() }
+                guard !self.lifecycle.isStopping else { return }
+                guard error == nil else {
+                    self.relayTransitionInFlight = false
+                    self.snapshotCache?.updateLifecycle(
+                        reasserting: self.reasserting,
+                        error: "iPhone relay route update failed")
+                    return
+                }
+                self.replaceRelayTransport(with: discovered)
+            }
+        }
+    }
+
+    private func replaceRelayTransport(with discovered: DiscoveredRelayAddress) {
+        guard let relayIP = discovered.address.ipString else {
+            relayTransitionInFlight = false
+            return
+        }
+        relaySession.cancelMonitor()
+        let old = relaySession.takeBinderForTeardown()
+        let install = { [weak self] in
+            guard let self, !self.lifecycle.isStopping else { return }
+            self.relayAddress = discovered.address
+            self.relayEndpoint = discovered.endpoint
+            let installed = self.relaySession.start(
+                relayIPv4: relayIP,
+                makeBinder: { [weak self] name in
+                    self?.makeRelayBinder(interfaceName: name)
+                })
+            self.relaySession.onUnavailable = { [weak self] in
+                guard let self else { return }
+                self.snapshotCache?.updateLifecycle(
+                    reasserting: self.reasserting,
+                    error: "iPhone relay interface unavailable")
+            }
+            self.relaySession.armMonitor(relayIPv4: relayIP) { [weak self] in
+                self?.lifecycle.isStopping ?? true
+            }
+            if !installed {
+                self.snapshotCache?.updateLifecycle(
+                    reasserting: self.reasserting,
+                    error: "waiting for a LAN interface to the iPhone relay")
+            }
+            self.relayTransitionInFlight = false
+            macProviderLog.notice(
+                "relay endpoint adopted host=\(discovered.endpoint.host, privacy: .public) port=\(discovered.endpoint.port)")
+        }
+        if let old {
+            old.stop { [weak self] in self?.lifecycleQueue.async(execute: install) }
+        } else {
+            install()
+        }
+    }
+
     private func providerConfiguration() -> [String: Any]? {
         (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
     }
 
     private func receivedTunnelConfiguration(_ info: mqvpn_tunnel_info_t, serverIPv4: String,
                                              activePathCount: Int) {
+        currentTunnelInfo = info
         if startResolved {
             guard !lifecycle.isStopping,
                   lifecycle.tunnelConfigurationReady() == .applyReconnectSettings else { return }
@@ -457,6 +559,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         recoveryTimer = nil
         reconnectTimer?.cancel()
         reconnectTimer = nil
+        cancelRelayDiscovery()
         relaySession.cancelMonitor()
         snapshotCache?.updateLifecycle(reasserting: false, error: error.localizedDescription)
         let continuation = startContinuation
@@ -530,6 +633,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         recoveryTimer = nil
         reconnectTimer?.cancel()
         reconnectTimer = nil
+        cancelRelayDiscovery()
         relaySession.cancelMonitor()
         reasserting = false
         let task = Task { [weak self] in
@@ -582,7 +686,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         self.snapshotCache = nil
         self.serverAddress = nil
         self.relayAddress = nil
+        self.relayEndpoint = nil
         self.relaySettings = nil
+        self.currentTunnelInfo = nil
+        self.resolvedServerIPv4 = nil
         setSnapshotReader(nil)
         macProviderLog.notice("STOP_COMPLETE")
     }

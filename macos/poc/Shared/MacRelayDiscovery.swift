@@ -9,6 +9,19 @@ struct MacRelayEndpoint: Equatable {
     let port: Int
 }
 
+enum MacRelayEndpointTransition: Equatable {
+    case keep
+    case attach
+    case replace
+
+    static func decide(current: MacRelayEndpoint?,
+                       discovered: MacRelayEndpoint?) -> MacRelayEndpointTransition {
+        guard let discovered else { return .keep }
+        guard let current else { return .attach }
+        return current == discovered ? .keep : .replace
+    }
+}
+
 /// Pure picker used by Start and the dashboard. Bonjour may publish several
 /// records. After the Mac IPv4 tunnel comes up, the iPhone ULA stops answering
 /// neighbor discovery while link-local on Wi‑Fi stays reachable. Prefer a

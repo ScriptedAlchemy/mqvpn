@@ -107,9 +107,10 @@ enum MacConnectGuard {
               relayConfigurationIsValid, profileIsCurrent else { return false }
         guard let relay else { return true }
         guard !relay.enabled || relay.isValid else { return false }
-        if relay.enabled {
-            return MacRelayDiscovery.choose(discoveredRelay.map { [$0] } ?? []) != nil
-        }
+        // Relay is an additive path. A temporarily absent iPhone must not
+        // block the direct Mac path; the provider keeps discovering while the
+        // tunnel is running and attaches the relay when it appears.
+        _ = discoveredRelay
         return true
     }
 }
