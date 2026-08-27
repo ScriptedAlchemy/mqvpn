@@ -95,6 +95,10 @@ final class TunnelController: ObservableObject {
                 let proto = NETunnelProviderProtocol()
                 proto.providerBundleIdentifier = Self.providerBundleID
                 proto.serverAddress = (try? ServerSettings.fromBundle())?.host ?? "mqvpn"
+                // Match the Mac profile: local networks stay off-tunnel so
+                // Wi-Fi deploys, AirDrop, and LAN peers keep working while
+                // the VPN is up.
+                proto.excludeLocalNetworks = true
                 m.protocolConfiguration = proto
                 m.localizedDescription = "mqvpn PoC"
                 m.isEnabled = true
@@ -184,7 +188,31 @@ final class TunnelController: ObservableObject {
         if #available(iOS 16.2, *) {
             liveActivityStarted = MqvpnLiveActivityLifecycle.begin(mode: operatingMode)
         }
+        Task { await startReclaimingConfiguration(manager) }
+    }
+
+    /// Another VPN app selecting its own configuration flips this one to
+    /// disabled, and a bare startVPNTunnel then fails with NEVPNErrorDomain
+    /// error 2 (configurationDisabled). Re-assert enablement on every start
+    /// so pressing Start always reclaims the active VPN slot.
+    private func startReclaimingConfiguration(_ manager: NETunnelProviderManager) async {
         do {
+            try await manager.loadFromPreferences()
+            var needsSave = !manager.isEnabled
+            if let proto = manager.protocolConfiguration as? NETunnelProviderProtocol,
+               !proto.excludeLocalNetworks {
+                // Configurations saved before this flag existed keep
+                // swallowing the LAN; upgrade them in place on Start.
+                proto.excludeLocalNetworks = true
+                needsSave = true
+            }
+            manager.isEnabled = true
+            if needsSave {
+                try await manager.saveToPreferences()
+                // NE requires a reload after save before the connection can
+                // be started against the freshly enabled configuration.
+                try await manager.loadFromPreferences()
+            }
             try manager.connection.startVPNTunnel()
         } catch {
             statusText = "start error: \(error.localizedDescription)"
