@@ -148,9 +148,10 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
             guard let self, !self.stopped, self.timer == nil else { return }
             self.publish()
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            // Two seconds is responsive enough for a glanceable speed display
-            // without mirroring every provider packet into ActivityKit.
-            timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .milliseconds(250))
+            // One-second cadence: the target carries frequent-updates
+            // entitlement, and a speed readout that trails the line by
+            // several seconds reads as wrong rather than smoothed.
+            timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
             timer.setEventHandler { [weak self] in self?.publish() }
             self.timer = timer
             timer.resume()

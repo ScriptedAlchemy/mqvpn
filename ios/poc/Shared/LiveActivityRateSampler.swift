@@ -52,7 +52,7 @@ struct LiveActivityRateSampler {
     private let maximumInterval: Double
     private var baselines: [LiveActivityInterfaceKind: Baseline] = [:]
 
-    init(smoothingFactor: Double = 0.45, maximumInterval: Double = 10) {
+    init(smoothingFactor: Double = 0.65, maximumInterval: Double = 10) {
         self.smoothingFactor = min(max(smoothingFactor, 0), 1)
         self.maximumInterval = maximumInterval
     }
