@@ -343,6 +343,13 @@ check(MacPollingLifecycle.shouldPoll(status: .connected) &&
       !MacPollingLifecycle.shouldPoll(status: .connecting) &&
       !MacPollingLifecycle.shouldPoll(status: .disconnected),
       "loading an already-connected Mac profile starts app-message polling while down states stay quiet")
+check(MacStatusReconciliation.needsUpdate(cached: .connected,
+                                          observed: .disconnected) &&
+      MacStatusReconciliation.needsUpdate(cached: .reasserting,
+                                          observed: .connected) &&
+      !MacStatusReconciliation.needsUpdate(cached: .connected,
+                                           observed: .connected),
+      "the dashboard repairs missed system VPN status notifications")
 check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                server: validServer, relay: nil),
       "direct-only Start is allowed with a valid server and no relay")

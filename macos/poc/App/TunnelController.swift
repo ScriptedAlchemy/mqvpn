@@ -24,6 +24,7 @@ final class TunnelController: ObservableObject {
     private var relayBrowser: MacRelayBonjourBrowser?
     private var observer: NSObjectProtocol?
     private var pollTimer: Timer?
+    private var statusTimer: Timer?
     private var rateSampler = MacSnapshotRateSampler()
     private var pathRates: [MacPathRate] = []
     private var lastSnapshotReceivedAt: TimeInterval?
@@ -75,6 +76,7 @@ final class TunnelController: ObservableObject {
     deinit {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         relayBrowser?.stop()
+        statusTimer?.invalidate()
     }
 
     func loadOrCreateManager() async {
@@ -100,6 +102,7 @@ final class TunnelController: ObservableObject {
             manager = loaded
             profileIsCurrent = true
             applyStatus(loaded.connection.status)
+            startStatusMonitoring()
             refreshRelayDiscovery()
         } catch {
             profileIsCurrent = false
@@ -227,6 +230,7 @@ final class TunnelController: ObservableObject {
             stopPolling()
             if tunnelStatus == .disconnected || tunnelStatus == .invalid {
                 expireSnapshot()
+                lastError = nil
             }
         }
     }
@@ -240,6 +244,23 @@ final class TunnelController: ObservableObject {
             }
         }
         poll()
+    }
+
+    private func startStatusMonitoring() {
+        statusTimer?.invalidate()
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
+            [weak self] _ in
+            Task { @MainActor in self?.reconcileSystemStatus() }
+        }
+    }
+
+    private func reconcileSystemStatus() {
+        guard let observed = manager?.connection.status else { return }
+        let cached = TunnelStatus.fromNEVPNRawValue(Int(status.rawValue))
+        let actual = TunnelStatus.fromNEVPNRawValue(Int(observed.rawValue))
+        guard MacStatusReconciliation.needsUpdate(cached: cached,
+                                                  observed: actual) else { return }
+        applyStatus(observed)
     }
 
     private func stopPolling() {

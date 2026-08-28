@@ -137,6 +137,13 @@ enum MacPollingLifecycle {
     }
 }
 
+enum MacStatusReconciliation {
+    static func needsUpdate(cached: TunnelStatus,
+                            observed: TunnelStatus) -> Bool {
+        cached != observed
+    }
+}
+
 enum StopLifecycle: Equatable {
     case unavailable
     case alreadyStopped
