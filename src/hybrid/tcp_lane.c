@@ -23,6 +23,8 @@
 
 #include "lwip/priv/tcp_priv.h" /* TCP_MSL — C1's CLOSING grace-sweep window */
 
+#include "log.h" /* LOG_WRN — ctx-free, same include lwip_glue.c uses */
+
 /* Dual-stack (LWIP_IPV6=1): ip_addr_t is now a tagged union
  * (lwip/ip_addr.h) — sizeof(ip_addr_t) != 4, so the old compile-time pin on
  * the bare-ip4_addr_t assumption no longer applies. The accept callback
@@ -1151,6 +1153,14 @@ mqvpn_tcp_lane_on_relay_error(mqvpn_tcp_flow_t *f)
      * tcp_lane_flow_status_t's contract, tcp_lane_internal.h).
      * xquic-context chains (downlink read notify, writable notify,
      * closing-notify, response gating) legally ignore the status. */
+    /* The inner app experiences this as a bare RST mid-connection; without
+     * this line a relay-error kill is indistinguishable in the field from a
+     * server reset or a tunnel-down abort (all three were silent through
+     * 2026-08). Ctx-free LOG_WRN — same idiom as lwip_glue.c. */
+    LOG_WRN("tcp_lane: relay error — resetting flow (state=%d dst_port=%u "
+            "uplink_queued=%u withheld=%u)",
+            (int)f->state, (unsigned)f->target_port, (unsigned)f->uplink_queued_bytes,
+            (unsigned)f->uplink_withheld_recved);
     return tcp_lane_teardown_flow(f, /*close_h3=*/1);
 }
 
