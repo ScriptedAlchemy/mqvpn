@@ -41,14 +41,26 @@
 #  ifndef MQVPN_LWIP_IOS_RCV_SCALE
 #    define MQVPN_LWIP_IOS_RCV_SCALE 2
 #  endif
-/* MEMP_NUM_TCP_SEG(512) >= TCP_SND_QUEUELEN (lwIP init.c #error) caps the
- * sweep at scale<=4. */
+/* MEMP_NUM_TCP_SEG >= TCP_SND_QUEUELEN (lwIP init.c #error). The gate is
+ * kept at scale<=4 (conservative — 1024 would mathematically admit scale 5,
+ * but nobody has sized the rest of the iOS budget for a 2 MiB window). */
 #  if MQVPN_LWIP_IOS_RCV_SCALE > 4
 #    error "iOS profile: scale > 4 violates MEMP_NUM_TCP_SEG >= TCP_SND_QUEUELEN"
 #  endif
-/* iOS NE (~50 MB resident ceiling): flow cap 64. */
+/* iOS NE (~50 MB resident ceiling): flow cap 64.
+ *
+ * SEG pool 1024 (was 512 through 2026-08): the pool is GLOBAL across
+ * flows while TCP_SND_QUEUELEN caps ONE pcb at 118 pbufs (scale 2), and
+ * SYN-ACKs for NEW connections draw from this same pool — on exhaustion
+ * tcp_listen_input silently tcp_abandon()s the freshly-accepted pcb
+ * (vendored tcp_in.c), so concurrent-open bursts stall behind SYN
+ * retransmits exactly when a few downlink-saturated flows are already
+ * holding their queues. 512 covered only ~4 saturated flows; the field
+ * workload (2026-08-27) holds 12 concurrent inner flows. 1024 covers ~8
+ * saturated flows plus handshake headroom for the rest, at 32 B/seg =
+ * +16 KiB of .bss — noise against the 50 MB NE ceiling. */
 #  define MQVPN_LWIP_TCP_PCB_POOL 128
-#  define MQVPN_LWIP_TCP_SEG_POOL 512
+#  define MQVPN_LWIP_TCP_SEG_POOL 1024
 #elif defined(__ANDROID__)
 /* Android: flow cap 256 — a handset multiplexes far fewer inner flows than a
  * router, and the pools are .bss touched at lwip_init(), so the desktop

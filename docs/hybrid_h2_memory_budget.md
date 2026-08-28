@@ -16,7 +16,7 @@ Pool sizing is a three-way split selected in
 |---|---|---|---|---|
 | desktop / router (Linux, Windows, macOS) | default | 8192 | 8192 | 4096 |
 | Android | `__ANDROID__` toolchain predefine | 512 | 2048 | 256 |
-| iOS NE | `MQVPN_LWIP_IOS_PROFILE` CMake option | 128 | 512 | 64 |
+| iOS NE | `MQVPN_LWIP_IOS_PROFILE` CMake option | 128 | 1024 | 64 |
 
 The **config default stays 256 on every profile** — the ceiling only bounds what an
 operator may configure upward. The desktop/router ceiling was 256 through v0.13.4;
@@ -315,7 +315,7 @@ Shipped constants for `MQVPN_LWIP_IOS_PROFILE` at the default scale (2) and
 | `TCP_WND` | lwipopts.h | `65535 << 2` = 262,140 B (≈256 KiB) | shared derivation (§1) at iOS scale |
 | `TCP_SND_BUF` | lwipopts.h | `65536 << 2` = 262,144 B (256 KiB) | down from 2 MiB |
 | `MEMP_NUM_TCP_PCB` | mqvpn_lwip_profile.h | 128 (`tcp_max_flows`=64 + headroom) | down from 8192 desktop/router, 512 Android |
-| `MEMP_NUM_TCP_SEG` | mqvpn_lwip_profile.h | 512, shared send+OOSEQ pool | down from 8192 desktop/router, 2048 Android |
+| `MEMP_NUM_TCP_SEG` | mqvpn_lwip_profile.h | 1024, shared send+OOSEQ pool (raised from 512 in 2026-08: 512 covered ~4 send-saturated flows and starved SYN-ACK allocation under 12-flow bursts; +16 KiB .bss) | down from 8192 desktop/router, 2048 Android |
 | `PBUF_POOL_SIZE` | lwipopts.h | 32 (power-of-2 ladder off `TCP_WND`) | down from 256 |
 | `MQVPN_TCP_LANE_BP_HIGH_WATER` | tcp_lane.h | `TCP_WND`/2 ≈ 131,070 B | down from the fixed 256 KiB |
 | `MQVPN_TCP_LANE_BP_LOW_WATER` | tcp_lane.h | `TCP_WND`/8 ≈ 32,767 B | down from 64 KiB |

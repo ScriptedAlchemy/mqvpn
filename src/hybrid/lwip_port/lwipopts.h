@@ -142,7 +142,7 @@
  * (desktop/router 8192 / Android 2048 / iOS 512). Either way it covers
  * only a few flows at full TCP_SND_BUF (TCP_SND_QUEUELEN caps one pcb at
  * 4*TCP_SND_BUF/MSS segments: 937 with the 2 MiB send buffer, iOS
- * scale=2 118 of 512 ~ 4 flows). tcp_write() returns ERR_MEM on pool
+ * scale=2 118 of 1024 ~ 8 flows). tcp_write() returns ERR_MEM on pool
  * exhaustion — the TCP-lane relay (tcp_lane.c) MUST handle that as
  * backpressure (retry on sent-callback), it is not optional. The pool is
  * therefore a throughput knob, not a correctness one; it tracks the pcb
