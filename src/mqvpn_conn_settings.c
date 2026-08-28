@@ -17,9 +17,77 @@
 
 #include <xquic/xquic.h>
 
-/* Send-queue cap. Same value the previous inline blocks used; kept here
- * so adding new mqvpn-wide xquic-tuning knobs lives next to the builder. */
-#define XQC_SNDQ_MAX_PKTS 16384
+/* Send-queue cap, per side. The send queue holds BOTH unacked in-flight
+ * packets AND framed-but-unsent backlog, and it is the deepest queue on the
+ * upload path: at MQVPN_MAX_PKT_OUT_SIZE (1400 B) the old shared 16384-packet
+ * cap is ~23 MiB, which a 15 Mbit/s uplink drains in ~12.8 s — measured on
+ * device as 13.3 s loaded upload latency (2026-08-27 speedtest through the
+ * tunnel), i.e. the queue really did fill to its cap. Everything behind it
+ * (datagram-lane pings included — the sndq is FIFO across lanes) waited that
+ * long.
+ *
+ * Server keeps 16384: it serves many clients' bulk downlink from one engine
+ * and has the memory; its standing queue per connection is bounded by the
+ * client-advertised flow-control windows below, not by this cap.
+ *
+ * Client drops to 4096 (~5.6 MiB): still >= 2x BDP at 100 ms for a ~230
+ * Mbit/s send rate (2 * 230 Mbit/s * 0.1 s = 5.6 MiB), so it cannot become
+ * the throughput limit on any plausible phone/desktop uplink, but the
+ * blocked-sender rewake threshold — xquic re-notifies EAGAIN'd streams and
+ * datagram writers only after sndq_max/10 packets free up
+ * (XQC_SNDQ_RELEASE_ENOUGH_SPACE_TH, xqc_send_queue.h) — shrinks from 1638
+ * pkts (~2.3 MiB ~= 1.2 s of dead time at 15 Mbit/s) to 410 pkts (~560 KiB
+ * ~= 0.3 s), and a full queue now EAGAINs the datagram lane after ~3 s of
+ * backlog instead of ~13 s, which is the loss signal inner TCP needs to back
+ * off (shallower queue = earlier, honest congestion signal). */
+#define XQC_SNDQ_MAX_PKTS_SERVER 16384
+#define XQC_SNDQ_MAX_PKTS_CLIENT 4096
+
+/* ─── Stream/connection flow-control windows (fork extension, xquic.h) ───
+ *
+ * xquic's stock transport params advertise XQC_MAX_RECV_WINDOW = 16 MiB per
+ * stream (and a max_data derived as streams x 16 MiB, i.e. unbounded in
+ * practice), and its receive-window autotuner may double windows up to that
+ * same 16 MiB. For the hybrid TCP lane that means one inner TCP flow may
+ * keep up to 16 MiB framed-and-unread in flight: the sender frames stream
+ * data into packets up to the advertised window REGARDLESS of cwnd
+ * (xqc_stream_do_send_flow_ctl checks stream_send_offset, which advances at
+ * framing time), so window minus wire-in-flight sits as standing queue.
+ * These fields pin both the initial advertisement AND the autotune ceiling.
+ *
+ * Per-stream 1 MiB:
+ *  - throughput floor: window/RTT = 1 MiB / 100 ms ~= 84 Mbit/s per flow
+ *    (>= the 20 Mbit/s @ 100 ms target with 4x headroom; still 28 Mbit/s at
+ *    a 300 ms tail RTT). The pre-fix hybrid lane was NOT stream-FC-bound
+ *    (16 MiB windows); its per-flow collapse came from the sndq bufferbloat
+ *    above, so this is a deliberate CEILING being introduced, not a raise.
+ *  - bufferbloat bound: one saturating upload flow's standing queue
+ *    (framed-unsent + wire) <= 1 MiB ~= 0.56 s at a 15 Mbit/s uplink;
+ *    the cwnd-bounded part of that is on the wire, so the standing unsent
+ *    share is window - cwnd_share (~0.3-0.4 s typical).
+ *  - which side binds what: the SERVER's advertised
+ *    init_max_stream_data_bidi_remote governs the phone's upload per flow
+ *    (client-initiated bidi streams, client->server direction); the CLIENT's
+ *    init_max_stream_data_bidi_local governs download per flow. Both sides
+ *    get the same values from this one builder — a server redeploy with this
+ *    build is REQUIRED for the upload-direction bound to take effect.
+ *
+ * Connection-level 8 MiB:
+ *  - hard cap on total sent-but-unread bytes across ALL streams of one
+ *    connection ==> per-connection stream receive-buffer memory bound of
+ *    8 MiB. iOS NE budget arithmetic: 8 MiB is 16% of the ~50 MB resident
+ *    ceiling; the lwIP side worst case adds TCP_WND (256 KiB, iOS profile)
+ *    x 64 flows = 16 MiB (see docs/hybrid_h2_memory_budget.md), leaving
+ *    >26 MB for everything else. Without this cap the theoretical exposure
+ *    was 64 flows x 16 MiB.
+ *  - aggregate stream throughput ceiling 8 MiB/RTT: ~670 Mbit/s @ 100 ms,
+ *    ~210 Mbit/s @ 320 ms — above the 175 Mbit/s download measured through
+ *    the tunnel on 2026-08-27, so no regression on the healthy direction.
+ *  - also bounds the aggregate upload standing queue at 8 MiB even if many
+ *    flows saturate at once (6 flows x 1 MiB = 6 MiB < 8 MiB: per-stream
+ *    caps bind first at the real flow counts). */
+#define MQVPN_STREAM_FC_WINDOW (1u * 1024 * 1024)
+#define MQVPN_CONN_FC_WINDOW   (8u * 1024 * 1024)
 
 void
 mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
@@ -129,10 +197,18 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
      * keep both paths on one deliberate ceiling. The relay codec separately
      * allows xquic's ACK and AEAD expansion around that budget. */
     out->probing_pkt_out_size = MQVPN_MAX_PKT_OUT_SIZE;
-    out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
-    out->so_sndbuf = 8 * 1024 * 1024;
     out->idle_time_out = 120000;
     out->init_idle_time_out = 10000;
+
+    /* Flow-control windows — shared by both sides; see the arithmetic on the
+     * MQVPN_*_FC_WINDOW defines above. bidi_remote is what actually bounds
+     * the phone's upload (peer-initiated bidi streams, receive side of the
+     * server); bidi_local bounds download on the client; uni streams carry
+     * only H3 control/QPACK traffic and just inherit the same bound. */
+    out->init_max_stream_data_bidi_local = MQVPN_STREAM_FC_WINDOW;
+    out->init_max_stream_data_bidi_remote = MQVPN_STREAM_FC_WINDOW;
+    out->init_max_stream_data_uni = MQVPN_STREAM_FC_WINDOW;
+    out->init_max_data = MQVPN_CONN_FC_WINDOW;
 
     /* Caller-gated, never derived here: see the field comment in
      * mqvpn_conn_settings.h for why this must equal the batched-send
@@ -164,8 +240,23 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
         break;
     case MQVPN_CC_BBR2:
         out->cong_ctrl_callback = xqc_bbr2_cb;
-        out->cc_params.cc_optimization_flags =
-            XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+        /* RTTVAR_COMPENSATION is deliberately NOT set (it was, through
+         * 2026-08). It adds bw * (srtt - min_rtt) to target cwnd
+         * (xqc_bbr2_compensate_cwnd_for_rttvar) — meant to ride out wireless
+         * RTT spikes that are NOT congestion. But on a bufferbloated uplink
+         * srtt - min_rtt IS our own standing queue's delay, so the addition
+         * equals the bytes already sitting in the queue: queue -> srtt up ->
+         * cwnd up -> deeper queue, a positive feedback loop with no fixed
+         * point below the so_sndbuf cwnd clamp. Observed on device
+         * (2026-08-27): cwnd pinned at the 8 MiB clamp with srtt inflated
+         * 100 ms -> 13.3 s under upload load. Without the flag, cwnd tracks
+         * cwnd_gain (2.0) x BDP(min_rtt) + ack-aggregation headroom, i.e.
+         * bottleneck queue ~= 1x BDP (~100 ms extra at any rate) instead of
+         * "whatever the clamp allows". Throughput cost: none in steady state
+         * — BBR2's bw estimate is delivery-rate based and unaffected;
+         * genuine non-congestive RTT spikes now cost a temporarily
+         * conservative cwnd, the right trade for an interactive VPN. */
+        out->cc_params.cc_optimization_flags = XQC_BBR2_FLAG_FAST_CONVERGENCE;
         break;
     }
 
@@ -181,6 +272,14 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
         out->enable_multipath = 1;
         out->mp_ping_on = 1;
         out->max_path_id_grant_max_value = 128;
+
+        /* Deep send queue + 8 MiB cwnd clamp: the server's job is bulk
+         * downlink at datacenter bandwidth; its per-connection standing
+         * queue is bounded by the client-advertised FC windows, not by
+         * these. (so_sndbuf is a per-path cwnd clamp in this xquic fork —
+         * xqc_send_ctl.c — not a socket buffer.) */
+        out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS_SERVER;
+        out->so_sndbuf = 8 * 1024 * 1024;
     } else {
         /* client carries the keep-alive role (ping_on=1) and gates MP on
          * cfg->multipath. */
@@ -191,6 +290,15 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
         if (in->recv_rate_bytes_per_sec) {
             out->recv_rate_bytes_per_sec = in->recv_rate_bytes_per_sec;
         }
+
+        /* Shallower send queue (see XQC_SNDQ_MAX_PKTS_CLIENT's comment for
+         * the latency/rewake arithmetic) and a 4 MiB cwnd clamp: 4 MiB =
+         * 2x BDP at 100 ms for a 160 Mbit/s uplink (or 200 ms at 80
+         * Mbit/s), generous against any plausible phone/home uplink while
+         * halving the worst damage a cwnd-runaway regression could do to
+         * loaded latency (4 MiB / 15 Mbit/s ~= 2.2 s vs 4.4 s). */
+        out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS_CLIENT;
+        out->so_sndbuf = 4 * 1024 * 1024;
     }
 
     /* --- scheduler / FEC params --- */

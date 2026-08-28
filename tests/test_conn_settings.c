@@ -119,11 +119,15 @@ test_propagation_cc(void)
         .init_max_path_id = 0,
     };
 
-    /* default: BBR2 — also verify optimization flags are set */
+    /* default: BBR2 — also verify optimization flags are set.
+     * RTTVAR_COMPENSATION must stay ABSENT: it turns self-induced queueing
+     * delay into extra cwnd (bw * (srtt - min_rtt)), a positive feedback
+     * loop measured on device as 13.3 s loaded upload RTT — see the comment
+     * in mqvpn_conn_settings.c. A regression re-adding it fails here. */
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_PTR_EQ(cs.cong_ctrl_callback.xqc_cong_ctl_init, xqc_bbr2_cb.xqc_cong_ctl_init);
-    ASSERT_EQ(cs.cc_params.cc_optimization_flags,
-              XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE);
+    ASSERT_EQ(cs.cc_params.cc_optimization_flags, XQC_BBR2_FLAG_FAST_CONVERGENCE);
+    ASSERT_EQ(cs.cc_params.cc_optimization_flags & XQC_BBR2_FLAG_RTTVAR_COMPENSATION, 0);
 
     /* BBR — no optimization flags */
     in.cc = MQVPN_CC_BBR;
@@ -400,11 +404,53 @@ test_defer_flush_tracks_batch_registration(void)
     return 0;
 }
 
+/* Flow-control windows and send-queue depth: the anti-bufferbloat contract
+ * (see the MQVPN_*_FC_WINDOW / XQC_SNDQ_MAX_PKTS_* comments in
+ * mqvpn_conn_settings.c). Stream/conn windows are SYMMETRIC — the server's
+ * bidi_remote bounds the phone's upload per flow, the client's bidi_local
+ * bounds download per flow, and both must move together — while the send
+ * queue and cwnd clamp are ASYMMETRIC (shallow client, deep server). */
+static int
+test_flow_control_windows_and_sndq(void)
+{
+    xqc_conn_settings_t cli, srv;
+    mqvpn_conn_settings_input_t c = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+    mqvpn_conn_settings_input_t s = {
+        .is_server = true,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+    mqvpn_build_conn_settings(&c, &cli);
+    mqvpn_build_conn_settings(&s, &srv);
+
+    /* symmetric: 1 MiB per stream, 8 MiB per connection, both sides */
+    ASSERT_EQ(cli.init_max_stream_data_bidi_local, 1024 * 1024);
+    ASSERT_EQ(cli.init_max_stream_data_bidi_remote, 1024 * 1024);
+    ASSERT_EQ(cli.init_max_stream_data_uni, 1024 * 1024);
+    ASSERT_EQ(cli.init_max_data, 8 * 1024 * 1024);
+    ASSERT_EQ(srv.init_max_stream_data_bidi_local, 1024 * 1024);
+    ASSERT_EQ(srv.init_max_stream_data_bidi_remote, 1024 * 1024);
+    ASSERT_EQ(srv.init_max_stream_data_uni, 1024 * 1024);
+    ASSERT_EQ(srv.init_max_data, 8 * 1024 * 1024);
+
+    /* asymmetric: shallow client queue/clamp, deep server queue/clamp */
+    ASSERT_EQ(cli.sndq_packets_used_max, 4096);
+    ASSERT_EQ(cli.so_sndbuf, 4 * 1024 * 1024);
+    ASSERT_EQ(srv.sndq_packets_used_max, 16384);
+    ASSERT_EQ(srv.so_sndbuf, 8 * 1024 * 1024);
+    return 0;
+}
+
 int
 main(void)
 {
     int failed = 0;
     failed += test_asymmetry_server_vs_client();
+    failed += test_flow_control_windows_and_sndq();
     failed += test_defer_flush_tracks_batch_registration();
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
