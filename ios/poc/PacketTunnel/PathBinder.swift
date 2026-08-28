@@ -46,6 +46,13 @@ final class PathBinder {
     private var slots: [NWInterface.InterfaceType: PathSlot] = [:]  // tick-thread confined
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
     private var pollTimer: Timer?   // tick-thread confined
+    /// Consecutive unsatisfied probe results per interface. A single stale
+    /// delivery from the path daemon (documented above as stalling inside NE
+    /// providers) used to tear down a carrying path instantly; the QUIC
+    /// layer already evicts genuinely dead paths, so removal here waits for
+    /// the daemon to say no three times in a row. Tick-thread confined.
+    private var unsatisfiedStreak: [NWInterface.InterfaceType: Int] = [:]
+    private static let removalStreak = 3
     private let monitorQueue = DispatchQueue(label: "mqvpn.poc.pathmon")
 
     init(engine: MqvpnEngine,
@@ -140,9 +147,14 @@ final class PathBinder {
             let iface = path.availableInterfaces.first { $0.type == type }
             self.engine.perform {   // hop to tick thread
                 if path.status == .satisfied, let iface {
+                    self.unsatisfiedStreak[type] = 0
                     self.addPath(type: type, iface: iface)
                 } else {
-                    self.removePath(type: type)
+                    let streak = (self.unsatisfiedStreak[type] ?? 0) + 1
+                    self.unsatisfiedStreak[type] = streak
+                    if streak >= Self.removalStreak {
+                        self.removePath(type: type)
+                    }
                 }
                 then?()
             }
