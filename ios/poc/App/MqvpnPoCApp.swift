@@ -349,6 +349,18 @@ final class TunnelController: ObservableObject {
     }
 
     /// Compute per-path rates from the previous sample, then publish.
+    /// Total bytes carried by each physical interface, summed over the
+    /// outer flows sharing it. Each flow keeps its own counters in the C
+    /// client (`p->bytes_tx` is incremented per path entry), so a single
+    /// flow speaks only for its own share of the link.
+    static func bytesByInterface(_ paths: [PathSnapshot]) -> [String: UInt64] {
+        var out: [String: UInt64] = [:]
+        for p in paths {
+            out[p.name, default: 0] &+= p.txBytes &+ p.rxBytes
+        }
+        return out
+    }
+
     private func ingest(_ snap: TunnelSnapshot) {
         if snap.operatingMode == .macRelay {
             prevSnapshot = snap
@@ -360,17 +372,19 @@ final class TunnelController: ObservableObject {
         if let prev = prevSnapshot {
             let dt = snap.timestamp - prev.timestamp
             if dt > 0.05 {
-                var prevByName: [String: PathSnapshot] = [:]
-                for pp in prev.paths { prevByName[pp.name] = pp }
+                // Sum every outer flow on an interface before differencing.
+                // Keying a dictionary by interface name kept only the last
+                // flow of the four, so the rate shown was one flow's, and
+                // the row under-reported the link by roughly that factor.
+                let now = Self.bytesByInterface(snap.paths)
+                let before = Self.bytesByInterface(prev.paths)
                 var rates: [String: Double] = [:]
-                for p in snap.paths {
-                    guard let pp = prevByName[p.name] else { continue }
+                for (name, current) in now {
+                    guard let old = before[name] else { continue }
                     // Double avoids UInt64 wrap; a counter reset (path re-add)
                     // yields a negative delta which we clamp to 0.
-                    let curBytes = Double(p.txBytes) + Double(p.rxBytes)
-                    let oldBytes = Double(pp.txBytes) + Double(pp.rxBytes)
-                    let delta = curBytes - oldBytes
-                    rates[p.name] = delta > 0 ? delta * 8.0 / dt / 1_000_000.0 : 0.0
+                    let delta = Double(current) - Double(old)
+                    rates[name] = delta > 0 ? delta * 8.0 / dt / 1_000_000.0 : 0.0
                 }
                 pathRates = rates
             }

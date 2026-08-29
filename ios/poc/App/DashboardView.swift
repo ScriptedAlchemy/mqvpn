@@ -116,16 +116,23 @@ struct DashboardView: View {
                 Text("Paths").font(.headline)
                 if let paths = controller.snapshot?.paths, !paths.isEmpty {
                     // Several outer flows share one physical interface (they
-                    // exist to beat per-flow shaping), and each reports the
-                    // same interface-level counters — so listing them
-                    // individually shows the same numbers N times. Collapse
-                    // to one row per interface and say how many flows it
-                    // carries.
+                    // exist to beat per-flow shaping), and each keeps its own
+                    // counters. Collapse to one row per interface, summing
+                    // their bytes — showing flows[0] reported a quarter of
+                    // the link's traffic under a "x4 flows" label.
                     let grouped = Dictionary(grouping: paths, by: \.name)
                         .sorted { $0.key < $1.key }
                     ForEach(grouped, id: \.key) { name, flows in
                         PathCardView(
-                            path: flows[0],
+                            path: PathSnapshot(
+                                name: name,
+                                // ACTIVE = 1; an interface carrying at least
+                                // one active flow is active, and the raw values
+                                // do not sort best-to-worst.
+                                status: flows.contains { $0.status == 1 } ? 1 : flows[0].status,
+                                txBytes: flows.reduce(0) { $0 &+ $1.txBytes },
+                                rxBytes: flows.reduce(0) { $0 &+ $1.rxBytes }
+                            ),
                             rateMbps: controller.pathRates[name],
                             flowCount: flows.count
                         )
