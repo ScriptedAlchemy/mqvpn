@@ -43,7 +43,21 @@ final class PathBinder {
     }
     private let engine: MqvpnEngine
     private let interfaceTypes: [NWInterface.InterfaceType]
-    private var slots: [NWInterface.InterfaceType: PathSlot] = [:]  // tick-thread confined
+    /// One entry per (interface, replica). Replicas exist because consumer
+    /// uplinks shape PER FLOW: measured on this link, one outer UDP flow
+    /// tops out near 5-10 Mbps while two independent tunnels running at once
+    /// reach ~21 Mbps combined. Every replica is a separate socket with its
+    /// own source port, so each earns its own allowance and the QUIC
+    /// scheduler stripes across all of them.
+    struct PathKey: Hashable {
+        let type: NWInterface.InterfaceType
+        let replica: Int
+    }
+    private var slots: [PathKey: PathSlot] = [:]  // tick-thread confined
+    /// Outer flows per physical interface. Four keeps the per-interface
+    /// socket count modest while lifting the shaped ceiling fourfold; the
+    /// server grants 8 path IDs by default and tolerates up to 128.
+    private static let replicasPerInterface = 4
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
     private var pollTimer: Timer?   // tick-thread confined
     /// Consecutive unsatisfied probe results per interface. A single stale
@@ -148,12 +162,16 @@ final class PathBinder {
             self.engine.perform {   // hop to tick thread
                 if path.status == .satisfied, let iface {
                     self.unsatisfiedStreak[type] = 0
-                    self.addPath(type: type, iface: iface)
+                    for replica in 0 ..< Self.replicasPerInterface {
+                        self.addPath(type: type, replica: replica, iface: iface)
+                    }
                 } else {
                     let streak = (self.unsatisfiedStreak[type] ?? 0) + 1
                     self.unsatisfiedStreak[type] = streak
                     if streak >= Self.removalStreak {
-                        self.removePath(type: type)
+                        for replica in 0 ..< Self.replicasPerInterface {
+                            self.removePath(key: PathKey(type: type, replica: replica))
+                        }
                     }
                 }
                 then?()
@@ -173,8 +191,9 @@ final class PathBinder {
     }
 
     /// Socket preparation + registration. Runs on the tick thread.
-    private func addPath(type: NWInterface.InterfaceType, iface: NWInterface) {
-        if let existing = slots[type] {
+    private func addPath(type: NWInterface.InterfaceType, replica: Int, iface: NWInterface) {
+        let key = PathKey(type: type, replica: replica)
+        if let existing = slots[key] {
             guard PathSlotRebind.shouldReplace(existingName: existing.ifname,
                                                existingIndex: existing.ifindex,
                                                incomingName: iface.name,
@@ -182,7 +201,7 @@ final class PathBinder {
             else { return }
             // Drop the stale fd first. `slots` is cleared synchronously so
             // the replacement can bind the new ifindex on this same probe.
-            removePath(type: type)
+            removePath(key: key)
         }
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { log.error("socket() errno=\(errno)"); return }
@@ -264,7 +283,7 @@ final class PathBinder {
             if !queued { cancellationGate.finish() }
         }
         source.resume()
-        slots[type] = PathSlot(handle: handle, fd: fd, source: source,
+        slots[key] = PathSlot(handle: handle, fd: fd, source: source,
                                ifname: iface.name, ifindex: UInt32(iface.index),
                                cancellationGate: cancellationGate)
         log.notice("path added type=\(String(describing: type), privacy: .public) fd=\(fd) handle=\(handle)")
@@ -273,9 +292,10 @@ final class PathBinder {
     /// Failover teardown. Runs on the tick thread.
     /// Order: orderly engine removal first, then cancel (whose handler closes
     /// the fd and reports fd-closed back on the tick thread).
-    private func removePath(type: NWInterface.InterfaceType,
+    private func removePath(key: PathKey,
                             closeCompletion: (() -> Void)? = nil) {
-        guard let slot = slots.removeValue(forKey: type) else { return }
+        let type = key.type
+        guard let slot = slots.removeValue(forKey: key) else { return }
         if let closeCompletion { slot.cancellationGate.setCompletion(closeCompletion) }
         engine.removePath(slot.handle)
         slot.source.cancel()
@@ -289,15 +309,15 @@ final class PathBinder {
     func stop(completion: @escaping () -> Void = {}) {
         pollTimer?.invalidate()
         pollTimer = nil
-        let types = Array(slots.keys)
+        let keys = Array(slots.keys)
         let group = DispatchGroup()
-        for type in types {
+        for key in keys {
             group.enter()
-            removePath(type: type) { group.leave() }
+            removePath(key: key) { group.leave() }
         }
         for (_, m) in monitors { m.cancel() }
         monitors.removeAll()
-        guard !types.isEmpty else {
+        guard !keys.isEmpty else {
             completion()
             return
         }
