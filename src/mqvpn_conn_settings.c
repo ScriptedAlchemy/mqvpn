@@ -307,10 +307,18 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     /* --- reinjection --- */
     mqvpn_apply_reinjection(in, out);
 
-    /* --- init_max_path_id: 0 = keep xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID=8) ---
-     */
+    /* --- init_max_path_id ---
+     * xquic's default grant is 8 path IDs, which was ample when a client
+     * bound one socket per interface. Consumer uplinks shape per flow
+     * though (measured: one outer flow caps near 5 Mbps, four reach 11),
+     * so the client now opens several replica sockets per interface and a
+     * two-interface phone asks for 16. Grant 32 by default — the ID space
+     * is cheap, the server tolerates 128, and refusing a path silently
+     * costs exactly the throughput the replicas exist to win. */
     if (in->init_max_path_id > 0) {
         out->init_max_path_id = in->init_max_path_id;
+    } else {
+        out->init_max_path_id = 32;
     }
 }
 

@@ -54,10 +54,11 @@ final class PathBinder {
         let replica: Int
     }
     private var slots: [PathKey: PathSlot] = [:]  // tick-thread confined
-    /// Outer flows per physical interface. Four keeps the per-interface
-    /// socket count modest while lifting the shaped ceiling fourfold; the
-    /// server grants 8 path IDs by default and tolerates up to 128.
-    private static let replicasPerInterface = 4
+    /// Outer flows per physical interface. Four flows doubled throughput
+    /// (5 -> 11 Mbps measured), so the shaping is real and the ceiling
+    /// scales with flow count; eight per interface keeps the total at 16,
+    /// inside the 128 path IDs the server tolerates.
+    private static let replicasPerInterface = 8
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
     private var pollTimer: Timer?   // tick-thread confined
     /// Consecutive unsatisfied probe results per interface. A single stale

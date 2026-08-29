@@ -25,6 +25,8 @@ struct StatusBadge: View {
 struct PathCardView: View {
     let path: PathSnapshot
     let rateMbps: Double?
+    /// Outer flows sharing this interface; >1 once replicas are in play.
+    var flowCount: Int = 1
 
     var body: some View {
         HStack(spacing: 12) {
@@ -37,6 +39,11 @@ struct PathCardView: View {
                     Text(path.name).font(.headline)
                     StatusBadge(text: Self.statusName(path.status),
                                 color: Self.statusColor(path.status))
+                    if flowCount > 1 {
+                        Text("×\(flowCount) flows")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 HStack(spacing: 14) {
                     Label(Self.mbText(path.txBytes), systemImage: "arrow.up")

@@ -115,8 +115,20 @@ struct DashboardView: View {
             } else {
                 Text("Paths").font(.headline)
                 if let paths = controller.snapshot?.paths, !paths.isEmpty {
-                    ForEach(paths, id: \.name) { p in
-                        PathCardView(path: p, rateMbps: controller.pathRates[p.name])
+                    // Several outer flows share one physical interface (they
+                    // exist to beat per-flow shaping), and each reports the
+                    // same interface-level counters — so listing them
+                    // individually shows the same numbers N times. Collapse
+                    // to one row per interface and say how many flows it
+                    // carries.
+                    let grouped = Dictionary(grouping: paths, by: \.name)
+                        .sorted { $0.key < $1.key }
+                    ForEach(grouped, id: \.key) { name, flows in
+                        PathCardView(
+                            path: flows[0],
+                            rateMbps: controller.pathRates[name],
+                            flowCount: flows.count
+                        )
                     }
                 } else {
                     Text("no data").font(.caption).foregroundStyle(.secondary)
