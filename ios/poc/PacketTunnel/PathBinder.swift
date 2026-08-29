@@ -69,6 +69,10 @@ final class PathBinder {
     /// layer already evicts genuinely dead paths, so removal here waits for
     /// the daemon to say no three times in a row. Tick-thread confined.
     private var unsatisfiedStreak: [NWInterface.InterfaceType: Int] = [:]
+    /// A reconcile walk is a chain across interfaces; these keep concurrent
+    /// triggers from restarting it and starving the later interfaces.
+    private var walkInFlight = false
+    private var walkPendingRetrigger = false
     private static let removalStreak = 3
     private let monitorQueue = DispatchQueue(label: "mqvpn.poc.pathmon")
 
@@ -132,11 +136,30 @@ final class PathBinder {
     /// addPath/removePath, whose guards make repeats no-ops.
     func reconcile() {
         guard !interfaceTypes.isEmpty, !monitors.isEmpty else { return }
+        // One walk at a time. The walk is a chain — each interface is probed
+        // in the previous one's completion — so a trigger arriving mid-walk
+        // used to restart it at interface 0. With several replicas per
+        // interface the first leg outlives the 1 s poll, and the restart
+        // meant the SECOND interface was never reached at all: the phone
+        // showed eight Wi-Fi flows and no cellular. Coalesce instead, and
+        // remember that a trigger was missed so the next walk still runs.
+        guard !walkInFlight else {
+            walkPendingRetrigger = true
+            return
+        }
+        walkInFlight = true
         reconcile(at: 0)
     }
 
     private func reconcile(at index: Int) {
-        guard index < interfaceTypes.count else { return }
+        guard index < interfaceTypes.count else {
+            walkInFlight = false
+            if walkPendingRetrigger {
+                walkPendingRetrigger = false
+                reconcile()
+            }
+            return
+        }
         probe(interfaceTypes[index]) { [weak self] in
             self?.reconcile(at: index + 1)
         }
