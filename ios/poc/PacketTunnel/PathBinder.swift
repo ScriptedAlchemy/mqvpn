@@ -54,11 +54,13 @@ final class PathBinder {
         let replica: Int
     }
     private var slots: [PathKey: PathSlot] = [:]  // tick-thread confined
-    /// Outer flows per physical interface. Four flows doubled throughput
-    /// (5 -> 11 Mbps measured), so the shaping is real and the ceiling
-    /// scales with flow count; eight per interface keeps the total at 16,
-    /// inside the 128 path IDs the server tolerates.
-    private static let replicasPerInterface = 8
+    /// Outer flows per physical interface. Four doubled throughput (5 -> 11
+    /// Mbps measured) with both radios still attached. Eight starved the
+    /// cellular path entirely: Wi-Fi is probed first and its replicas
+    /// consumed the whole negotiated path-ID grant, so pdp_ip0 got nothing.
+    /// A second radio is worth far more than a fifth flow on the first, so
+    /// this stays at 4 until a raised grant is confirmed on the wire.
+    private static let replicasPerInterface = 4
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
     private var pollTimer: Timer?   // tick-thread confined
     /// Consecutive unsatisfied probe results per interface. A single stale
@@ -138,6 +140,13 @@ final class PathBinder {
         probe(interfaceTypes[index]) { [weak self] in
             self?.reconcile(at: index + 1)
         }
+    }
+
+    /// Replica indices are added lowest-first across ALL interfaces before
+    /// any interface takes a second flow, so a finite path-ID grant is spent
+    /// on breadth (both radios) before depth (more flows on one radio).
+    private func replicaAddOrder(for type: NWInterface.InterfaceType) -> [Int] {
+        Array(0 ..< Self.replicasPerInterface)
     }
 
     /// One-shot fresh path lookup. A NEW NWPathMonitor registration always
