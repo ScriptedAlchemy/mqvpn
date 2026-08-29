@@ -430,6 +430,50 @@ check(abs((secondRates.wifi?.megabitsPerSecond ?? -1) - 12) < 0.0001,
 check(abs((secondRates.cellular?.megabitsPerSecond ?? -1) - 24) < 0.0001,
       "cellular Mbps derives independently from its real byte delta")
 
+// Four outer flows share one interface and each keeps its own counters.
+// Summing them is what makes the per-interface total meaningful; keeping
+// only the first measured a quarter of the link, and because the order is
+// not stable across samples a later sample could pick a younger flow, send
+// the total backwards, and collapse the readout to "--".
+var multiFlow = LiveActivityRateSampler(smoothingFactor: 1.0)
+_ = multiFlow.sample(
+    timestamp: 200,
+    counters: [
+        InterfaceByteCounter(name: "en0", totalBytes: 1_000_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 2_000_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 3_000_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 4_000_000, active: true),
+    ])
+let summed = multiFlow.sample(
+    timestamp: 201,
+    counters: [
+        InterfaceByteCounter(name: "en0", totalBytes: 1_500_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 2_500_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 3_500_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 4_500_000, active: true),
+    ])
+// 10 MB total -> 12 MB total over 1s = 2 MB/s = 16 Mbps.
+check(abs((summed.wifi?.megabitsPerSecond ?? -1) - 16) < 0.0001,
+      "every flow on an interface counts toward its speed")
+
+// The same totals arriving in a different order must not read as a
+// counter reset. This is the case that produced "--" on a live link.
+var reordered = LiveActivityRateSampler(smoothingFactor: 1.0)
+_ = reordered.sample(
+    timestamp: 300,
+    counters: [
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 9_000_000, active: true),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 1_000_000, active: true),
+    ])
+let shuffled = reordered.sample(
+    timestamp: 301,
+    counters: [
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 1_250_000, active: true),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 9_250_000, active: true),
+    ])
+check(shuffled.cellular?.megabitsPerSecond != nil,
+      "flow order changing between samples never reads as a counter reset")
+
 let smoothedRates = activityRates.sample(
     timestamp: 104,
     counters: [

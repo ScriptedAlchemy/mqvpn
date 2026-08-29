@@ -59,11 +59,25 @@ struct LiveActivityRateSampler {
 
     mutating func sample(timestamp: Double,
                          counters: [InterfaceByteCounter]) -> LiveActivityRateSnapshot {
+        // Sum every outer flow on an interface. Keeping only the first
+        // measured one flow of four, and the order is not stable across
+        // samples: when a later sample happened to pick a younger flow the
+        // total went backwards, the monotonic guard below rejected it, and
+        // the readout fell back to "--" instead of a speed.
         var current: [LiveActivityInterfaceKind: InterfaceByteCounter] = [:]
         for counter in counters where counter.active {
-            guard let kind = LiveActivityInterfaceKind(interfaceName: counter.name),
-                  current[kind] == nil else { continue }
-            current[kind] = counter
+            guard let kind = LiveActivityInterfaceKind(interfaceName: counter.name)
+            else { continue }
+            if let running = current[kind] {
+                let (total, overflow) =
+                    running.totalBytes.addingReportingOverflow(counter.totalBytes)
+                current[kind] = InterfaceByteCounter(
+                    name: running.name,
+                    totalBytes: overflow ? UInt64.max : total,
+                    active: true)
+            } else {
+                current[kind] = counter
+            }
         }
 
         for kind in LiveActivityInterfaceKind.allCases where current[kind] == nil {
