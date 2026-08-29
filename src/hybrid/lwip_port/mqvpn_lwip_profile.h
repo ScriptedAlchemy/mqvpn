@@ -38,8 +38,16 @@
 #endif
 
 #ifdef MQVPN_LWIP_IOS_PROFILE
+/* Default scale 4 (65535<<4 = 1 MiB effective receive window). The tunnel
+ * couples this window to the WAN round trip: the lane withholds tcp_recved
+ * until the QUIC side takes the bytes, so a flow's ceiling is window/RTT.
+ * At 120 ms the old 256 KiB default capped one flow near 17 Mbps in theory
+ * and ~5 Mbps measured, while the paths carry 15+; 1 MiB lifts that ceiling
+ * fourfold. Budget: PBUF_POOL_SIZE follows the ladder to 128 (~1.1 MiB) and
+ * MEMP_NUM_TCP_SEG is already 1024, inside the NE's 50 MB allowance even
+ * with a dozen concurrent flows. */
 #  ifndef MQVPN_LWIP_IOS_RCV_SCALE
-#    define MQVPN_LWIP_IOS_RCV_SCALE 2
+#    define MQVPN_LWIP_IOS_RCV_SCALE 4
 #  endif
 /* MEMP_NUM_TCP_SEG >= TCP_SND_QUEUELEN (lwIP init.c #error). The gate is
  * kept at scale<=4 (conservative — 1024 would mathematically admit scale 5,
