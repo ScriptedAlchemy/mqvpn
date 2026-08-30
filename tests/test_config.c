@@ -2348,6 +2348,42 @@ test_ini_json_invalid_scalar_parity(void)
  * X-macro table exists for — a future row addition/removal is exercised
  * here automatically without editing this test. */
 static void
+test_reorder_rule_proto_tcp_port_zero(void)
+{
+    /* INI: named "tcp" maps to proto 6; Port=0 is accepted and stored (the
+     * match-rule wildcard). Same mapper is shared with JSON. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Proto = tcp\n"
+                      "Port = 0\n"
+                      "Profile = cellular_bond\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t icfg;
+    mqvpn_config_defaults(&icfg);
+    int irc = mqvpn_config_load(&icfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(irc, 0, "ini tcp/port-0 load ok");
+    ASSERT_EQ_INT(icfg.reorder.n_rules, 1, "ini n_rules");
+    ASSERT_EQ_INT(icfg.reorder.rules[0].proto, MQVPN_IPPROTO_TCP, "ini proto tcp=6");
+    ASSERT_EQ_INT(icfg.reorder.rules[0].port, 0, "ini Port=0 stored");
+
+    const char *json = "{"
+                       "\"reorder\":{\"enabled\":\"on\"},"
+                       "\"reorder_rules\":["
+                       "{\"proto\":\"tcp\",\"port\":0,\"profile\":\"cellular_bond\"}"
+                       "]"
+                       "}";
+    mqvpn_file_config_t jcfg;
+    mqvpn_config_defaults(&jcfg);
+    int jrc = mqvpn_config_load_json_filecfg(&jcfg, json);
+    ASSERT_EQ_INT(jrc, 0, "json tcp/port-0 load ok");
+    ASSERT_EQ_INT(jcfg.reorder.n_rules, 1, "json n_rules");
+    ASSERT_EQ_INT(jcfg.reorder.rules[0].proto, MQVPN_IPPROTO_TCP, "json proto tcp=6");
+    ASSERT_EQ_INT(jcfg.reorder.rules[0].port, 0, "json port 0 stored");
+}
+
+static void
 test_sched_cc_name_roundtrip(void)
 {
 #define MQVPN_SCHED_ROUNDTRIP_CHECK(enum_val, str)                                     \
@@ -2502,6 +2538,9 @@ main(void)
 
     /* mqvpn_sched_names.h table parity */
     test_sched_cc_name_roundtrip();
+
+    /* [ReorderRule] Proto=tcp / Port=0 and JSON reorder_rules proto:"tcp" */
+    test_reorder_rule_proto_tcp_port_zero();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

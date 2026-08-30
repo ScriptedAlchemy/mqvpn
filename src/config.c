@@ -341,13 +341,18 @@ parse_hybrid_tcp_mode(const char *val, mqvpn_hybrid_tcp_mode_t *out)
     return -1;
 }
 
-/* Parse an L4 protocol token for [ReorderRule] Proto. v1 only handles UDP
- * (the only eligible protocol, §4); a bare numeric value is also accepted. */
+/* Parse an L4 protocol token for [ReorderRule] Proto. Named forms "udp" and
+ * "tcp" (case-insensitive) plus a bare 0–255 numeric value are accepted.
+ * MQVPN_IPPROTO_* come from reorder.h via config.h. */
 static int
 parse_reorder_proto(const char *val, uint8_t *out)
 {
     if (strcasecmp(val, "udp") == 0) {
         *out = MQVPN_IPPROTO_UDP;
+        return 0;
+    }
+    if (strcasecmp(val, "tcp") == 0) {
+        *out = MQVPN_IPPROTO_TCP;
         return 0;
     }
     int v = 0;

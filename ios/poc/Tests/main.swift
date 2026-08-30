@@ -28,28 +28,71 @@ check(RelayInterfaceObservation.effective(observed: nil, current: "en0",
       "a transient monitor miss cannot close a live interface-bound relay socket")
 
 // planReorder
-check(ReorderSettings(enabled: false, profile: 4, ports: [443]).planReorder().rules.isEmpty,
+check(ReorderSettings(enabled: false, profile: 4, ports: [443], bondTCP: false).planReorder().rules.isEmpty,
       "disabled -> empty plan")
-let plan = ReorderSettings(enabled: true, profile: 4, ports: [443, 443, 0, 70000, 5401]).planReorder()
+let plan = ReorderSettings(enabled: true, profile: 4, ports: [443, 443, 0, 70000, 5401],
+                           bondTCP: false).planReorder()
 check(plan.rules.map { $0.port } == [443, 5401], "dedupe + range filter")
 check(plan.rules.allSatisfy { $0.proto == 17 && $0.profile == 4 }, "proto=17 + profile passthrough")
 check(plan.warnings.contains { $0.contains(": 0") } && plan.warnings.contains { $0.contains("70000") },
       "out-of-range warnings")
-let many = ReorderSettings(enabled: true, profile: 3, ports: Array(1000..<1020)).planReorder()
+let many = ReorderSettings(enabled: true, profile: 3, ports: Array(1000..<1020),
+                           bondTCP: false).planReorder()
 check(many.rules.count == 16 && many.warnings.contains { $0.contains("exceed 16") }, "cap at 16 + warning")
 
 // isSavable
-check(ReorderSettings(enabled: true, profile: 3, ports: []).isSavable == false, "enabled+no-ports unsavable")
-check(ReorderSettings(enabled: true, profile: 3, ports: [443]).isSavable, "enabled+port savable")
-check(ReorderSettings(enabled: false, profile: 3, ports: []).isSavable, "disabled always savable")
+check(ReorderSettings(enabled: true, profile: 3, ports: [], bondTCP: false).isSavable == false,
+      "enabled+no-ports unsavable")
+check(ReorderSettings(enabled: true, profile: 3, ports: [443], bondTCP: false).isSavable,
+      "enabled+port savable")
+check(ReorderSettings(enabled: false, profile: 3, ports: [], bondTCP: false).isSavable,
+      "disabled always savable")
 
 // parsePorts
 let pp = ReorderSettings.parsePorts(" 443, 5401 ,x, ")
 check(pp.ports == [443, 5401] && pp.warnings.contains { $0.contains("x") }, "parsePorts trim/skip/warn")
 
 // providerConfiguration round-trip
-let s = ReorderSettings(enabled: true, profile: 4, ports: [443, 5401])
+let s = ReorderSettings(enabled: true, profile: 4, ports: [443, 5401], bondTCP: true)
 check(ReorderSettings(providerConfiguration: s.toProviderConfiguration()) == s, "round-trip")
+check(s.toProviderConfiguration()["reorderBondTCP"] as? NSNumber == NSNumber(value: true),
+      "round-trip writes reorderBondTCP")
+
+// bondTCP-only: one proto-6/port-0 rule, savable without UDP ports
+let tcpOnly = ReorderSettings(enabled: true, profile: 3, ports: [], bondTCP: true)
+let tcpPlan = tcpOnly.planReorder()
+check(tcpPlan.rules.count == 1 && tcpPlan.rules[0].proto == ReorderSettings.protoTCP
+        && tcpPlan.rules[0].port == 0 && tcpPlan.rules[0].profile == 3,
+      "bondTCP-only -> one TCP wildcard rule")
+check(tcpOnly.isSavable, "bondTCP-only is savable")
+
+// bondTCP + UDP ports: TCP wildcard plus UDP rules; UDP cap is maxRules-1
+let bondAndPorts = ReorderSettings(enabled: true, profile: 4,
+                                   ports: [443, 5401], bondTCP: true).planReorder()
+check(bondAndPorts.rules.contains { $0.proto == 6 && $0.port == 0 && $0.profile == 4 },
+      "bondTCP + ports includes TCP wildcard")
+check(bondAndPorts.rules.filter { $0.proto == 17 }.map { $0.port } == [443, 5401],
+      "bondTCP + ports keeps UDP port rules")
+let bondMany = ReorderSettings(enabled: true, profile: 3, ports: Array(1000..<1020),
+                               bondTCP: true).planReorder()
+check(bondMany.rules.count == 16
+        && bondMany.rules.filter { $0.proto == 17 }.count == 15
+        && bondMany.rules.contains { $0.proto == 6 && $0.port == 0 }
+        && bondMany.warnings.contains { $0.contains("exceed 15") },
+      "bondTCP reserves one slot; UDP cap is 15")
+
+// malformed reorderBondTCP → false (same strict-bool as enabled)
+let badBond: [String: Any] = ["reorderEnabled": NSNumber(value: true),
+                              "reorderProfile": NSNumber(value: 3),
+                              "reorderPorts": [NSNumber(value: 443)],
+                              "reorderBondTCP": NSNumber(value: 1)]
+check(ReorderSettings(providerConfiguration: badBond)!.bondTCP == false,
+      "numeric reorderBondTCP is not a bool → false")
+let missingBond: [String: Any] = ["reorderEnabled": NSNumber(value: true),
+                                  "reorderProfile": NSNumber(value: 3),
+                                  "reorderPorts": [NSNumber(value: 443)]]
+check(ReorderSettings(providerConfiguration: missingBond)!.bondTCP == false,
+      "missing reorderBondTCP → false")
 
 // exact-int validation
 check(ReorderSettings.exactInt(NSNumber(value: true)) == nil, "reject bool NSNumber")

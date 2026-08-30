@@ -883,6 +883,47 @@ test_udp_pin_ipv4_truncated(void)
     PASS();
 }
 
+static void
+test_dgram_flow_hash_stamped_unpins(void)
+{
+    TEST(mqvpn_dgram_flow_hash stamped returns UNPINNED);
+
+    uint8_t tcp[40];
+    make_tcp_pkt(tcp, "10.0.0.1", 12345, "8.8.8.8", 80);
+    uint8_t udp[28];
+    make_udp_pkt(udp, "10.0.0.1", 12345, "8.8.8.8", 443);
+
+    /* stamped=true is the WLB unpin sentinel regardless of packet or udp_pin. */
+    ASSERT_EQ(mqvpn_dgram_flow_hash(tcp, 40, false, true),
+              MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(mqvpn_dgram_flow_hash(tcp, 40, true, true), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(mqvpn_dgram_flow_hash(udp, 28, false, true),
+              MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(mqvpn_dgram_flow_hash(udp, 28, true, true), MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_dgram_flow_hash_raw_matches_pkt(void)
+{
+    TEST(mqvpn_dgram_flow_hash unstamped matches flow_hash_pkt);
+
+    uint8_t tcp[40];
+    make_tcp_pkt(tcp, "10.0.0.1", 12345, "8.8.8.8", 80);
+    uint8_t udp[28];
+    make_udp_pkt(udp, "10.0.0.1", 12345, "8.8.8.8", 443);
+
+    ASSERT_EQ(mqvpn_dgram_flow_hash(tcp, 40, false, false),
+              flow_hash_pkt(tcp, 40, false));
+    ASSERT_EQ(mqvpn_dgram_flow_hash(tcp, 40, true, false), flow_hash_pkt(tcp, 40, true));
+    ASSERT_EQ(mqvpn_dgram_flow_hash(udp, 28, false, false),
+              flow_hash_pkt(udp, 28, false));
+    ASSERT_EQ(mqvpn_dgram_flow_hash(udp, 28, true, false), flow_hash_pkt(udp, 28, true));
+
+    PASS();
+}
+
 /* ── Main ── */
 
 int
@@ -930,6 +971,8 @@ main(void)
     test_udp_pin_ipv6_gate();
     test_udp_pin_tcp_unchanged();
     test_udp_pin_ipv4_truncated();
+    test_dgram_flow_hash_stamped_unpins();
+    test_dgram_flow_hash_raw_matches_pkt();
 
     printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;

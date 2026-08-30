@@ -21,6 +21,11 @@
 #define MQVPN_SCHED_BACKUP_FEC  2
 #define MQVPN_SCHED_WLB_UDP_PIN 3
 
+/* Mirrors the WLB scheduler's internal WLB_FLOW_HASH_UNPINNED sentinel
+ * (third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c). A datagram
+ * sent with this hash is scheduled per-packet WRR with no flow-table pinning.
+ * A 1-in-2^32 organic FNV-1a collision with the sentinel is harmless: that
+ * one flow is merely scheduled unpinned. */
 #define MQVPN_FLOW_HASH_UNPINNED 0xFFFFFFFFU
 
 /* Returns flow hash for xquic WLB scheduler hint.
@@ -36,5 +41,21 @@
  * IPv6 extension headers are intentionally out of scope for now; IPv6 pinning
  * only recognizes packets whose base header points directly at TCP or UDP. */
 uint32_t flow_hash_pkt(const uint8_t *pkt, int len, bool udp_pin);
+
+/* Datagram flow-hash hint for xqc_conn_set_dgram_flow_hash.
+ *
+ * A reorder-stamped flow is resequenced at the peer, so cross-path reordering
+ * is absorbed there. Keeping it pinned would only cap the flow at one path's
+ * share (the measured 22-vs-42 Mbps gap on a 12-connection upload). When
+ * stamped, return the WLB unpin sentinel so the datagram is scheduled
+ * per-packet WRR like stream data; otherwise hash as usual. */
+static inline uint32_t
+mqvpn_dgram_flow_hash(const uint8_t *pkt, int len, bool udp_pin, bool stamped)
+{
+    if (stamped) {
+        return MQVPN_FLOW_HASH_UNPINNED;
+    }
+    return flow_hash_pkt(pkt, len, udp_pin);
+}
 
 #endif /* MQVPN_FLOW_SCHED_H */

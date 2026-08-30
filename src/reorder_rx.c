@@ -684,9 +684,10 @@ reset_reorder_flow(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
 /* ───────────────── §11.6: ACK-direction demotion classifier ───────────────
  *
  * A cheap rolling classifier observes the first `classify_window` real-traffic
- * packets of a flow. The judgment length is the INNER UDP PAYLOAD length (§11.6
- * "udp_payload_len" / should-fix 2): IP + UDP headers excluded, so IPv4/IPv6
- * header-length differences and the 8-byte UDP header do not skew the verdict.
+ * packets of a flow. The judgment length is the INNER L4 PAYLOAD length (§11.6
+ * "udp_payload_len" / should-fix 2, generalized to TCP): IP + L4 headers
+ * excluded, so IPv4/IPv6 header-length differences and the L4 header (8-byte
+ * UDP, doff-sized TCP) do not skew the verdict.
  * After the window, large <= ack_demote_max_large_packets (a COUNT threshold,
  * tolerating 1-2 client-Initial large packets) ⇒ ACK direction ⇒ demote.
  */
@@ -697,34 +698,60 @@ typedef enum {
                          4) */
 } classify_result;
 
-/* §11.6 udp_payload_len: inner UDP payload length of a bare inner IP packet
- * (IP header + 8-byte UDP header excluded). The packet has already been
- * 5-tuple-parsed (so it is a well-formed IPv4/IPv6 UDP packet); we recompute the
- * header span here to subtract it. Returns 0 if the packet is too short for a
- * UDP payload (defensive — should not happen post-parse). */
+/* §11.6 udp_payload_len, generalized to TCP: inner L4 payload length of a
+ * bare inner IP packet (IP header + L4 header excluded — 8 bytes for UDP,
+ * data-offset words for TCP). The packet has already been 5-tuple-parsed (so
+ * it is a well-formed IPv4/IPv6 UDP or TCP packet); we recompute the header
+ * span here to subtract it. Excluding the real TCP header matters for the
+ * ACK-demotion verdict: a pure ACK is 0 payload bytes, not 20-60 header
+ * bytes, so ACK-direction TCP flows demote to pass-through exactly like
+ * ACK-direction UDP request flows. Returns 0 if the packet is too short for
+ * an L4 payload (defensive — should not happen post-parse). */
 static uint32_t
-inner_udp_payload_len(const uint8_t *pkt, uint16_t len)
+inner_l4_payload_len(const uint8_t *pkt, uint16_t len)
 {
     if (len < 1) {
         return 0;
     }
     uint8_t version = (uint8_t)(pkt[0] >> 4);
     size_t hdr = 0;
+    uint8_t proto = 0;
     if (version == 4) {
         if (len < 20) {
             return 0;
         }
         hdr = (size_t)(pkt[0] & 0x0f) * 4; /* IHL words → bytes */
+        proto = pkt[9];
     } else if (version == 6) {
         /* The 5-tuple parser already walked any extension headers; for the
-         * classifier we use the fixed 40-byte IPv6 header. Extension headers are
-         * rare on inner UDP and would only make the payload appear slightly
-         * larger, never flipping a small ACK to large. */
+         * classifier we use the fixed 40-byte IPv6 header and the base Next
+         * Header. Extension headers are rare on inner UDP/TCP; a chained NH
+         * falls to the UDP-sized branch below and only makes the payload
+         * appear slightly larger, never flipping a small ACK to large. */
+        if (len < 40) {
+            return 0;
+        }
         hdr = 40;
+        proto = pkt[6];
     } else {
         return 0;
     }
-    size_t l4 = hdr + 8; /* + UDP header */
+    size_t l4;
+    if (proto == MQVPN_IPPROTO_TCP) {
+        /* TCP header length = data offset (upper nibble of byte 12 of the
+         * TCP header) in 32-bit words. A nonsense doff (< 5 words) reads as
+         * no-payload rather than a negative span. */
+        if ((size_t)len < hdr + 13) {
+            return 0;
+        }
+        size_t doff = (size_t)(pkt[hdr + 12] >> 4) * 4;
+        if (doff < 20) {
+            return 0;
+        }
+        l4 = hdr + doff;
+    } else {
+        l4 = hdr + 8; /* + UDP header */
+    }
     if ((size_t)len <= l4) {
         return 0;
     }
@@ -748,7 +775,7 @@ classify_update(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, const uint8_t *
         return CLASSIFY_UNCHANGED; /* already judged */
     }
     f->classify_seen++;
-    if (inner_udp_payload_len(pkt, len) >= rx->cfg.small_packet_threshold_bytes) {
+    if (inner_l4_payload_len(pkt, len) >= rx->cfg.small_packet_threshold_bytes) {
         f->classify_large++;
     }
     if (f->classify_seen == rx->cfg.classify_window) {
@@ -1114,8 +1141,8 @@ mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload, size_
 
     /* §6: flow key is the inner-IP 5-tuple. Parsed ONCE here and threaded through
      * to the per-flow wait decision AND flow_get_or_create (no double-parse). If
-     * the inner packet is not a parseable UDP 5-tuple it should not have been
-     * stamped REORDERED; drop.
+     * the inner packet is not a parseable UDP/TCP 5-tuple it should not have
+     * been stamped REORDERED; drop.
      *
      * Behavior delta (intended, not a regression): with n_rules>0 and global
      * wait==0, a packet that fails this parse is now dropped here rather than

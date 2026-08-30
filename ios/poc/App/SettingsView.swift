@@ -12,6 +12,7 @@ struct SettingsView: View {
     @State private var enabled: Bool
     @State private var profile: Int
     @State private var portsText: String
+    @State private var bondTCP: Bool
     @State private var errorText: String?
 
     @State private var hostText: String
@@ -33,6 +34,7 @@ struct SettingsView: View {
         _enabled = State(initialValue: s.enabled)
         _profile = State(initialValue: s.profile)
         _portsText = State(initialValue: s.ports.map(String.init).joined(separator: ","))
+        _bondTCP = State(initialValue: s.bondTCP)
 
         let srv = controller.serverSettings ?? (try? ServerSettings.fromBundle()) ?? .emptyDraft
         _hostText = State(initialValue: srv.host)
@@ -52,7 +54,8 @@ struct SettingsView: View {
 
     private var draft: ReorderSettings {
         ReorderSettings(enabled: enabled, profile: profile,
-                        ports: ReorderSettings.parsePorts(portsText).ports)
+                        ports: ReorderSettings.parsePorts(portsText).ports,
+                        bondTCP: bondTCP)
     }
     private var warnings: [String] {
         ReorderSettings.parsePorts(portsText).warnings + draft.planReorder().warnings
@@ -132,7 +135,7 @@ struct SettingsView: View {
                     }
                 }
                 if operatingMode == .vpn {
-                    Section("Reorder Buffer") {
+                    Section {
                         Toggle("Enabled", isOn: $enabled).disabled(!controller.isEditable)
                         if enabled {
                             Picker("Profile", selection: $profile) {
@@ -142,6 +145,7 @@ struct SettingsView: View {
                             TextField("Ports (comma-separated, e.g. 443,5401)", text: $portsText)
                                 .keyboardType(.numbersAndPunctuation)
                                 .disabled(!controller.isEditable)
+                            Toggle("Bond TCP flows", isOn: $bondTCP).disabled(!controller.isEditable)
                             ForEach(warnings, id: \.self) { w in
                                 Text(w).font(.caption).foregroundColor(.orange)
                             }
@@ -150,6 +154,10 @@ struct SettingsView: View {
                                     .font(.caption).foregroundColor(.red)
                             }
                         }
+                    } header: {
+                        Text("Reorder Buffer")
+                    } footer: {
+                        Text("Spreads each TCP connection across all paths and resequences at the far end; requires reorder support on the server.")
                     }
                     Section {
                         Toggle("Enabled", isOn: $hybridEnabled).disabled(!controller.isEditable)

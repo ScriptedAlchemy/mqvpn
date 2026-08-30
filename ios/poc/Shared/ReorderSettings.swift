@@ -13,32 +13,38 @@ struct ReorderSettings: Equatable {
     var enabled: Bool
     var profile: Int          // 3 = CELLULAR_BOND, 4 = FIBER_LTE
     var ports: [Int]
+    var bondTCP: Bool
 
     // Explicit memberwise init: defining the custom `init?(providerConfiguration:)`
     // below would otherwise suppress Swift's synthesized memberwise init, which
     // `.disabled` and `init?` both call.
-    init(enabled: Bool, profile: Int, ports: [Int]) {
+    init(enabled: Bool, profile: Int, ports: [Int], bondTCP: Bool) {
         self.enabled = enabled
         self.profile = profile
         self.ports = ports
+        self.bondTCP = bondTCP
     }
 
-    static let disabled = ReorderSettings(enabled: false, profile: 3, ports: [])
+    static let disabled = ReorderSettings(enabled: false, profile: 3, ports: [],
+                                          bondTCP: false)
     static let profileCellularBond = 3
     static let profileFiberLTE = 4
     static let protoUDP = 17
+    static let protoTCP = 6
     static let maxRules = 16
 
     private enum Key {
         static let enabled = "reorderEnabled"
         static let profile = "reorderProfile"
         static let ports = "reorderPorts"
+        static let bondTCP = "reorderBondTCP"
     }
 
     func toProviderConfiguration() -> [String: Any] {
         [Key.enabled: NSNumber(value: enabled),
          Key.profile: NSNumber(value: profile),
-         Key.ports: ports.map { NSNumber(value: $0) }]
+         Key.ports: ports.map { NSNumber(value: $0) },
+         Key.bondTCP: NSNumber(value: bondTCP)]
     }
 
     /// Validates on read. A malformed top-level dict yields nil (caller falls
@@ -61,7 +67,11 @@ struct ReorderSettings: Equatable {
                 if let v = Self.exactInt(n), (1...65535).contains(v) { ports.append(v) }
             }
         }
-        self.init(enabled: enabled, profile: profile, ports: ports)
+        // Same strict-bool discipline as `enabled`: only a genuine CFBoolean
+        // counts; missing/malformed/numeric-backed values stay false.
+        var bondTCP = false
+        if let n = dict[Key.bondTCP] as? NSNumber, Self.isBool(n) { bondTCP = n.boolValue }
+        self.init(enabled: enabled, profile: profile, ports: ports, bondTCP: bondTCP)
     }
 
     /// True iff `n` is a genuine integer NSNumber (not boolean, not
@@ -89,8 +99,10 @@ struct ReorderSettings: Equatable {
         return (ports, warnings)
     }
 
-    /// Empty plan when !enabled. Else dedupe, range-filter, cap at maxRules,
-    /// map each surviving port to a UDP rule with `profile`.
+    /// Empty plan when !enabled. Else dedupe, range-filter, cap UDP ports so
+    /// the optional proto-6/port-0 TCP wildcard still fits in maxRules, then
+    /// map surviving ports to UDP rules. Port 0 is the match-rule wildcard
+    /// ("all TCP"), not a UDP listen port.
     func planReorder(maxRules: Int = ReorderSettings.maxRules)
         -> (rules: [ReorderRuleSpec], warnings: [String]) {
         guard enabled else { return ([], []) }
@@ -101,12 +113,17 @@ struct ReorderSettings: Equatable {
             guard (1...65535).contains(p) else { warnings.append("port out of range: \(p)"); continue }
             if seen.insert(p).inserted { valid.append(p) }
         }
-        if valid.count > maxRules {
-            warnings.append("ports exceed \(maxRules); dropping \(valid.count - maxRules)")
-            valid = Array(valid.prefix(maxRules))
+        // Reserve one slot for the TCP wildcard so total rules stay ≤ maxRules.
+        let udpCap = maxRules - (bondTCP ? 1 : 0)
+        if valid.count > udpCap {
+            warnings.append("ports exceed \(udpCap); dropping \(valid.count - udpCap)")
+            valid = Array(valid.prefix(udpCap))
         }
-        return (valid.map { ReorderRuleSpec(proto: Self.protoUDP, port: $0, profile: profile) },
-                warnings)
+        var rules = valid.map { ReorderRuleSpec(proto: Self.protoUDP, port: $0, profile: profile) }
+        if bondTCP {
+            rules.append(ReorderRuleSpec(proto: Self.protoTCP, port: 0, profile: profile))
+        }
+        return (rules, warnings)
     }
 
     /// Save-gate: enabling requires at least one rule.

@@ -222,8 +222,9 @@ mqvpn_flow_key_hash(const mqvpn_flow_key_t *k, uint64_t seed)
  *
  * mqvpn_parse_l3l4() walks a bare inner IP packet once and classifies it;
  * mqvpn_reorder_parse_5tuple() wraps it for the reorder TX gating path
- * (§10.2) and RX dispatch: 0 only for a parseable, non-fragmented UDP packet;
- * -1 for anything that must be sent RAW (§4 / §4.1).
+ * (§10.2) and RX dispatch: 0 only for a parseable, non-fragmented UDP or TCP
+ * packet (§4 was UDP-only; TCP joined with the TCP-bond work); -1 for
+ * anything that must be sent RAW (§4 / §4.1).
  */
 #define MQVPN_IPPROTO_UDP 17
 #define MQVPN_IPPROTO_TCP 6
@@ -350,12 +351,18 @@ mqvpn_parse_l3l4(const uint8_t *pkt, size_t len, mqvpn_flow_key_t *out)
     return MQVPN_L4_MALFORMED; /* not IPv4 or IPv6 */
 }
 
-/* Contract-identical wrapper around mqvpn_parse_l3l4(): 0 only for a
- * parseable, non-fragmented UDP packet; -1 otherwise. */
+/* Wrapper around mqvpn_parse_l3l4(): 0 only for a parseable, non-fragmented
+ * UDP or TCP packet; -1 otherwise. TCP joined the eligible set with the
+ * TCP-bond work (port-0 wildcard rules; stamped datagrams are scheduled
+ * unpinned): stamping TCP is what lets the WLB scheduler spread one inner
+ * TCP flow across every path while the peer's RX restores order. Note the
+ * knock-on for zero-rules configs: mode ON with no rules means "all flows
+ * implicitly eligible" (compute_eligible), which now covers TCP too. */
 static inline int
 mqvpn_reorder_parse_5tuple(const uint8_t *pkt, size_t len, mqvpn_flow_key_t *out)
 {
-    return mqvpn_parse_l3l4(pkt, len, out) == MQVPN_L4_UDP ? 0 : -1;
+    mqvpn_l4_verdict_t v = mqvpn_parse_l3l4(pkt, len, out);
+    return (v == MQVPN_L4_UDP || v == MQVPN_L4_TCP) ? 0 : -1;
 }
 
 /* ───────────────────────────── §16: config ────────────────────────────────
@@ -433,15 +440,20 @@ typedef struct {
     int n_rules;
 } mqvpn_reorder_config_t;
 
-/* First rule whose proto matches and port == src or dst; NULL if none. Shared by
- * TX (eligibility) and RX (per-flow wait/cap) so the match is identical. */
+/* First rule whose proto matches and whose port is 0 (wildcard: any src/dst
+ * port) or equals src or dst; NULL if none. Shared by TX (eligibility) and RX
+ * (per-flow wait/cap) so the match is identical. Port 0 = any port, letting a
+ * rule express "all TCP" / "all UDP" for a proto. An INI [ReorderRule] that
+ * omits Port= previously never matched (begin-time port stays 0, and 0 never
+ * equalled a real flow's ports) and now matches its whole proto — intended. */
 static inline const mqvpn_reorder_rule_t *
 mqvpn_reorder_match_rule(const mqvpn_reorder_config_t *cfg, const mqvpn_flow_key_t *key)
 {
     for (int i = 0; i < cfg->n_rules; i++) {
         const mqvpn_reorder_rule_t *r = &cfg->rules[i];
         if (r->proto != key->proto) continue;
-        if (r->port == key->src_port || r->port == key->dst_port) return r;
+        if (r->port == 0 || r->port == key->src_port || r->port == key->dst_port)
+            return r;
     }
     return NULL;
 }

@@ -126,6 +126,60 @@ test_decide_stamp_passthrough(void)
     mqvpn_reorder_tx_free(tx);
 }
 
+/* Build a minimal IPv4 TCP packet: 20-byte IP header (IHL 5), 20-byte TCP
+ * header (doff 5), `payload` bytes after it. Ports live at the same offsets
+ * the 5-tuple parser reads. */
+static size_t
+build_v4_tcp(uint8_t *buf, uint16_t sport, uint16_t dport, size_t payload)
+{
+    size_t total = 40 + payload;
+    memset(buf, 0, total);
+    buf[0] = 0x45; /* v4, IHL 5 */
+    buf[9] = 6;    /* TCP */
+    buf[12] = 10;
+    buf[15] = 1;
+    buf[16] = 10;
+    buf[19] = 2;
+    buf[20] = (uint8_t)(sport >> 8);
+    buf[21] = (uint8_t)(sport);
+    buf[22] = (uint8_t)(dport >> 8);
+    buf[23] = (uint8_t)(dport);
+    buf[32] = 0x50; /* data offset 5 words */
+    return total;
+}
+
+/* TCP-bond gating: a proto-6/port-0 wildcard rule (the "Bond TCP flows"
+ * shape) makes an inner TCP flow stamp-eligible on any port; with rules
+ * present but none covering TCP, the same packet stays RAW (rule presence
+ * disables the zero-rules implicit-all fallback). */
+static void
+test_decide_tcp_wildcard_stamp(void)
+{
+    mqvpn_reorder_config_t c = base_cfg();
+    c.rules[1].proto = 6;
+    c.rules[1].port = 0; /* wildcard: any src/dst port */
+    c.rules[1].profile = MQVPN_RPROF_CELLULAR_BOND;
+    c.n_rules = 2;
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    size_t n = build_v4_tcp(pkt, 52000, 8080, 100);
+    mqvpn_reorder_tx_peek_t peek = {0};
+    size_t mtu = 0;
+    mqvpn_rgate_verdict_t v =
+        mqvpn_rgate_decide(tx, 1, c.mode, pkt, n, 1, 1400, &peek, &mtu);
+    ASSERT_EQ_INT(v, MQVPN_RGATE_STAMP, "tcp wildcard rule -> STAMP");
+    ASSERT_EQ_INT(peek.action, MQVPN_REORDER_TX_STAMP, "tcp peek.action STAMP");
+    mqvpn_reorder_tx_free(tx);
+
+    /* UDP-only rules: the identical TCP packet stays RAW. */
+    mqvpn_reorder_config_t c2 = base_cfg();
+    mqvpn_reorder_tx_t *tx2 = mqvpn_reorder_tx_new(&c2, 0x1);
+    mqvpn_reorder_tx_peek_t peek2 = {0};
+    v = mqvpn_rgate_decide(tx2, 1, c2.mode, pkt, n, 1, 1400, &peek2, &mtu);
+    ASSERT_EQ_INT(v, MQVPN_RGATE_RAW, "tcp without covering rule -> RAW");
+    mqvpn_reorder_tx_free(tx2);
+}
+
 /* Stamped form would exceed the DATAGRAM budget (8+len > udp_mss):
  * MQVPN_RGATE_DROP_REORDER_MTU with out_mtu = udp_mss - HDR_LEN. */
 static void
@@ -365,6 +419,7 @@ main(void)
     test_decide_no_reorder_tx_raw();
     test_decide_peer_unsupported_raw();
     test_decide_stamp_passthrough();
+    test_decide_tcp_wildcard_stamp();
     test_decide_drop_reorder_mtu();
     test_decide_drop_raw_mtu();
     test_decide_zero_mss_raw();

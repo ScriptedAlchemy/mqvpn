@@ -295,13 +295,28 @@ test_parse_v4_fragment_fails(void)
     ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), -1, "parse v4 offset fails");
 }
 
+/* Defined below with the l3l4 test cluster. */
+static size_t build_v4_tcp(uint8_t *buf, uint16_t sport, uint16_t dport,
+                           uint16_t frag_field);
+
+/* TCP joined the eligible set with the TCP-bond work: the wrapper now
+ * accepts non-fragmented TCP (full 20-byte header required — a UDP-sized
+ * 8-byte L4 stub stays MALFORMED) and fills the same key shape as UDP. */
 static void
-test_parse_v4_tcp_fails(void)
+test_parse_v4_tcp(void)
 {
     uint8_t buf[64];
     mqvpn_flow_key_t k;
-    size_t n = build_v4_udp(buf, 1111, 443, 0, 6 /* TCP */);
-    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), -1, "parse v4 tcp fails");
+    size_t n = build_v4_tcp(buf, 1111, 443, 0);
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), 0, "parse v4 tcp ok");
+    ASSERT_EQ_INT(k.proto, 6, "parse v4 tcp proto");
+    ASSERT_EQ_INT(k.src_port, 1111, "parse v4 tcp sport");
+    ASSERT_EQ_INT(k.dst_port, 443, "parse v4 tcp dport");
+
+    /* Truncated TCP header (UDP-sized L4) is still rejected. */
+    n = build_v4_udp(buf, 1111, 443, 0, 6 /* TCP proto, 8-byte L4 */);
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), -1,
+                  "parse v4 truncated tcp fails");
 }
 
 static void
@@ -374,14 +389,28 @@ test_parse_v6_fragment_fails(void)
 }
 
 static void
-test_parse_v6_tcp_fails(void)
+test_parse_v6_tcp(void)
 {
     uint8_t buf[64];
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x60;
     buf[6] = 6; /* TCP */
+    buf[40] = (uint8_t)(2222 >> 8);
+    buf[41] = (uint8_t)(2222); /* sport */
+    buf[42] = (uint8_t)(443 >> 8);
+    buf[43] = (uint8_t)(443); /* dport */
+    buf[52] = 0x50;            /* data offset 5 words */
     mqvpn_flow_key_t k;
-    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, 48, &k), -1, "parse v6 tcp fails");
+    /* 40-byte v6 header + full 20-byte TCP header. */
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, 60, &k), 0, "parse v6 tcp ok");
+    ASSERT_EQ_INT(k.proto, 6, "parse v6 tcp proto");
+    ASSERT_EQ_INT(k.ip_version, 6, "parse v6 tcp version");
+    ASSERT_EQ_INT(k.src_port, 2222, "parse v6 tcp sport");
+    ASSERT_EQ_INT(k.dst_port, 443, "parse v6 tcp dport");
+
+    /* Truncated (8-byte L4) v6 TCP is still rejected. */
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, 48, &k), -1,
+                  "parse v6 truncated tcp fails");
 }
 
 static void
@@ -544,9 +573,16 @@ test_parse_5tuple_wrapper_regression(void)
     uint8_t buf[64];
     mqvpn_flow_key_t k;
 
-    /* TCP is still -1 through the wrapper. */
+    /* TCP is 0 through the wrapper (TCP-bond work) and its key matches a
+     * direct l3l4 parse byte-for-byte, same guarantee UDP has. */
     size_t n = build_v4_tcp(buf, 2222, 80, 0);
-    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), -1, "wrapper v4 tcp -1");
+    mqvpn_flow_key_t direct_tcp;
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, n, &direct_tcp), MQVPN_L4_TCP,
+                  "wrapper baseline direct tcp");
+    memset(&k, 0xAA, sizeof(k));
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), 0, "wrapper v4 tcp 0");
+    ASSERT_EQ_INT(memcmp(&k, &direct_tcp, sizeof(k)), 0,
+                  "wrapper tcp key byte-identical");
 
     /* UDP is still 0 and the key matches a direct l3l4 parse byte-for-byte. */
     n = build_v4_udp(buf, 1111, 443, 0, 17);
@@ -609,6 +645,50 @@ test_should_advertise(void)
                   "no advertise when disabled");
 }
 
+/* Port 0 is a proto-wide wildcard: proto must still match, but any src/dst
+ * port matches. Specific-port rules keep the src-OR-dst equality test. */
+static void
+test_match_rule_port_zero_wildcard(void)
+{
+    mqvpn_reorder_config_t cfg;
+    mqvpn_reorder_config_default(&cfg);
+    cfg.n_rules = 1;
+    cfg.rules[0].proto = 6;
+    cfg.rules[0].port = 0;
+    cfg.rules[0].profile = MQVPN_RPROF_CELLULAR_BOND;
+
+    mqvpn_flow_key_t tcp_a = make_v4_key(0x0A000001, 0x0A000002, 12345, 443);
+    tcp_a.proto = 6;
+    mqvpn_flow_key_t tcp_b = make_v4_key(0x0A000001, 0x0A000002, 9, 22);
+    tcp_b.proto = 6;
+    ASSERT_TRUE(mqvpn_reorder_match_rule(&cfg, &tcp_a) == &cfg.rules[0],
+                "proto-6/port-0 matches TCP 12345→443");
+    ASSERT_TRUE(mqvpn_reorder_match_rule(&cfg, &tcp_b) == &cfg.rules[0],
+                "proto-6/port-0 matches TCP 9→22");
+
+    mqvpn_flow_key_t udp = make_v4_key(0x0A000001, 0x0A000002, 12345, 443);
+    ASSERT_TRUE(mqvpn_reorder_match_rule(&cfg, &udp) == NULL,
+                "proto-6/port-0 does not match UDP");
+
+    /* Specific-port UDP rule is unchanged: only src or dst == 443. */
+    cfg.rules[0].proto = 17;
+    cfg.rules[0].port = 443;
+    ASSERT_TRUE(mqvpn_reorder_match_rule(&cfg, &udp) == &cfg.rules[0],
+                "specific-port UDP 443 still matches");
+    mqvpn_flow_key_t udp_other = make_v4_key(0x0A000001, 0x0A000002, 1111, 53);
+    ASSERT_TRUE(mqvpn_reorder_match_rule(&cfg, &udp_other) == NULL,
+                "specific-port UDP 443 does not match 53");
+
+    /* proto-17/port-0 matches any UDP port, still not TCP. */
+    cfg.rules[0].port = 0;
+    ASSERT_TRUE(mqvpn_reorder_match_rule(&cfg, &udp) == &cfg.rules[0],
+                "proto-17/port-0 matches UDP 443");
+    ASSERT_TRUE(mqvpn_reorder_match_rule(&cfg, &udp_other) == &cfg.rules[0],
+                "proto-17/port-0 matches UDP 53");
+    ASSERT_TRUE(mqvpn_reorder_match_rule(&cfg, &tcp_a) == NULL,
+                "proto-17/port-0 does not match TCP");
+}
+
 int
 main(void)
 {
@@ -632,12 +712,12 @@ main(void)
 
     test_parse_v4_udp();
     test_parse_v4_fragment_fails();
-    test_parse_v4_tcp_fails();
+    test_parse_v4_tcp();
     test_parse_v4_truncated_fails();
     test_parse_v6_udp();
     test_parse_v6_with_hopopts_udp();
     test_parse_v6_fragment_fails();
-    test_parse_v6_tcp_fails();
+    test_parse_v6_tcp();
     test_parse_v6_truncated_fails();
 
     test_parse_l3l4();
@@ -646,6 +726,7 @@ main(void)
     test_header_match_ok();
     test_header_match_rejects();
     test_should_advertise();
+    test_match_rule_port_zero_wildcard();
 
     fprintf(stderr, "test_reorder_common: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
