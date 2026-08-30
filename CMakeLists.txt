@@ -918,15 +918,17 @@ if(BUILD_TESTING)
         src/platform/posix/dns_common.c src/log.c)
     target_compile_definitions(test_dns_state_darwin PRIVATE F_FULLFSYNC=1000)
 
-    add_executable(test_routing_seq_darwin
-        tests/test_routing_seq_darwin.c src/platform/darwin/routing.c
-        src/platform/posix/dns_common.c src/log.c)
+    # test_routing_seq_darwin is NOT registered here anymore: the relay-route
+    # fields it and routing.c consume (relay_route_configured & friends,
+    # platform_internal.h) became Darwin-only with the relay hardening, so
+    # darwin/routing.c no longer compiles off-macOS. The routing sequence
+    # tests still run in the APPLE block above.
 
     add_executable(test_killswitch_rules_darwin
         tests/test_killswitch_rules_darwin.c src/log.c)
     target_compile_definitions(test_killswitch_rules_darwin PRIVATE F_SETNOSIGPIPE=2)
 
-    foreach(t test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin)
+    foreach(t test_dns_state_darwin test_killswitch_rules_darwin)
         target_include_directories(${t} PRIVATE
             ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>
             ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
