@@ -63,58 +63,25 @@ enum ProviderCloseReason {
     static func isPermanent(_ reason: Int32) -> Bool {
         // MQVPN_ERR_TLS, AUTH, PROTOCOL, and ABI_MISMATCH cannot recover
         // without a configuration or binary change. CLOSED and TIMEOUT can.
-        reason == -4 || reason == -5 || reason == -6 || reason == -11
+        // INVALID_ARG (-1) and ENGINE (-3) are emitted only by the Swift
+        // engine wrapper for local setup/connect failures — the core never
+        // sends them as close reasons, so no client exists to reconnect.
+        // Treating them as transient parked the start continuation in
+        // .awaitReconnect forever and let the NE watchdog kill the extension.
+        reason == -1 || reason == -3 ||
+            reason == -4 || reason == -5 || reason == -6 || reason == -11
     }
 }
 
-/// Pure state and dispatch decisions for a user-initiated tunnel Stop.
+/// Pure decision for a user-initiated tunnel Stop request. Terminal
+/// reconciliation stays driven by NEVPNStatusDidChange, not by this type.
 enum StopLifecycle: Equatable {
     case unavailable
     case alreadyStopped
     case requested
-    case stopped
-    case failed
 
     static func request(hasManager: Bool, status: TunnelStatus) -> StopLifecycle {
         guard hasManager else { return .unavailable }
         return status == .disconnected ? .alreadyStopped : .requested
     }
-
-    /// Stop is visible immediately, while terminal reconciliation remains
-    /// driven by NEVPNStatusDidChange.
-    static func visibleStatus(after request: StopLifecycle,
-                              current: TunnelStatus) -> TunnelStatus {
-        request == .requested ? .disconnecting : current
-    }
-
-    static func transition(from state: StopLifecycle,
-                           observedStatus: TunnelStatus? = nil,
-                           timedOut: Bool = false,
-                           didError: Bool = false) -> StopLifecycle {
-        guard state == .requested else { return state }
-        if timedOut || didError { return .failed }
-        return observedStatus == .disconnected ? .stopped : state
-    }
-
-    /// Execute accepted work on the engine thread, or take the synchronous
-    /// local completion path if that thread has already stopped accepting work.
-    static func performOrFinish(perform: (@escaping () -> Void) -> Bool,
-                                accepted: @escaping () -> Void,
-                                rejected: @escaping () -> Void) {
-        if !perform(accepted) { rejected() }
-    }
-
-    /// PathBinder owns asynchronous DispatchSource cancellation. Keep the
-    /// mqvpn engine alive until every fd is closed and reported back to it.
-    static func performTransportFirst(
-        stopPaths: (@escaping () -> Void) -> Void,
-        shutdownEngine: @escaping () -> Void,
-        completion: @escaping () -> Void
-    ) {
-        stopPaths {
-            shutdownEngine()
-            completion()
-        }
-    }
-
 }

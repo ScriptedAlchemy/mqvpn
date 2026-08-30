@@ -81,8 +81,9 @@ final class SnapshotCache {
 
     /// task_info(TASK_VM_INFO) phys_footprint, bytes. Replicated from
     /// GateMetrics (which the UI task must not modify) — a self-contained read
-    /// with no shared state, so duplication carries no coupling.
-    private static func physFootprint() -> UInt64 {
+    /// with no shared state. RelayEngine shares this copy rather than keeping
+    /// a third one in the same target.
+    static func physFootprint() -> UInt64 {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(
             MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)

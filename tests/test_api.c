@@ -377,8 +377,7 @@ TEST(performance_mode_from_and_to_name)
     ASSERT_EQ(mqvpn_performance_from_name("", 0, &parsed), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(parsed, MQVPN_PERF_LOW_LATENCY);
     ASSERT_EQ(mqvpn_performance_from_name(NULL, 10, &parsed), MQVPN_ERR_INVALID_ARG);
-    ASSERT_EQ(mqvpn_performance_from_name("throughput", 10, NULL),
-              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_performance_from_name("throughput", 10, NULL), MQVPN_ERR_INVALID_ARG);
     ASSERT_STR_EQ(mqvpn_performance_to_name(MQVPN_PERF_MAX_THROUGHPUT), "throughput");
     ASSERT_STR_EQ(mqvpn_performance_to_name(MQVPN_PERF_LOW_LATENCY), "latency");
     /* Never NULL — out-of-range values format as "unknown" (sched precedent). */

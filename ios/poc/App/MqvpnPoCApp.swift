@@ -56,7 +56,6 @@ final class TunnelController: ObservableObject {
     private var lastIngestedSeq: UInt64 = 0
     private var lastIngestedTimestamp: Double = 0
     private var liveActivityStarted = false
-    private var liveActivitySampler = LiveActivityRateSampler()
 
     var isEditable: Bool { manager != nil && status == .disconnected }
     var isConnectable: Bool {
@@ -348,7 +347,6 @@ final class TunnelController: ObservableObject {
         } catch { /* transient; keep the current snapshot */ }
     }
 
-    /// Compute per-path rates from the previous sample, then publish.
     /// Total bytes carried by each physical interface, summed over the
     /// outer flows sharing it. Each flow keeps its own counters in the C
     /// client (`p->bytes_tx` is incremented per path entry), so a single
@@ -361,12 +359,15 @@ final class TunnelController: ObservableObject {
         return out
     }
 
+    /// Compute per-path rates from the previous sample, then publish. Live
+    /// Activity updates are NOT published here: the provider's
+    /// MqvpnLiveActivityReporter owns them for every state this app ever
+    /// covered (it runs whenever the tunnel is up, foreground or not).
     private func ingest(_ snap: TunnelSnapshot) {
         if snap.operatingMode == .macRelay {
             prevSnapshot = snap
             snapshot = snap
             pathRates = [:]
-            publishLiveActivity(snap)
             return
         }
         if let prev = prevSnapshot {
@@ -392,19 +393,6 @@ final class TunnelController: ObservableObject {
         prevSnapshot = snap
         snapshot = snap
         eventLog.ingest(snap)
-        publishLiveActivity(snap)
-    }
-
-    private func publishLiveActivity(_ snap: TunnelSnapshot) {
-        guard liveActivityStarted else { return }
-        if #available(iOS 16.2, *) {
-            let published = LiveActivityContentFactory.make(snapshot: snap,
-                                                            sampler: &liveActivitySampler)
-            Task {
-                _ = await MqvpnLiveActivityLifecycle.updateExisting(
-                    mode: operatingMode, state: published.state, staleDate: published.staleDate)
-            }
-        }
     }
 
     private static func describe(_ s: NEVPNStatus) -> String {

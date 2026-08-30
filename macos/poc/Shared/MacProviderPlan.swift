@@ -3,24 +3,21 @@
 
 import Foundation
 
+/// No persisted host/port: the provider reaches the iPhone exclusively
+/// through Bonjour discovery, so the durable relay preference is only the
+/// enabled bit and the shared key.
 struct MacRelaySettings: Equatable {
     let enabled: Bool
-    let host: String
-    let port: Int
     let keyBase64: String
 
     private enum Key {
         static let enabled = "macRelayEnabled"
-        static let host = "macRelayHost"
-        static let port = "macRelayPort"
         static let key = "macRelayKey"
-        static let all = [enabled, host, port, key]
+        static let all = [enabled, key]
     }
 
-    init(enabled: Bool, host: String, port: Int, keyBase64: String) {
+    init(enabled: Bool, keyBase64: String) {
         self.enabled = enabled
-        self.host = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.port = port
         self.keyBase64 = keyBase64.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -32,15 +29,8 @@ struct MacRelaySettings: Equatable {
         } else {
             enabled = config[Key.enabled] as? Bool ?? false
         }
-        let host = (config[Key.host] as? String) ?? ""
-        let port: Int
-        if let number = config[Key.port] as? NSNumber {
-            port = number.intValue
-        } else {
-            port = config[Key.port] as? Int ?? 5443
-        }
         let key = (config[Key.key] as? String) ?? ""
-        self.init(enabled: enabled, host: host, port: port, keyBase64: key)
+        self.init(enabled: enabled, keyBase64: key)
         guard !enabled || isValid else { return nil }
     }
 
@@ -61,12 +51,11 @@ struct MacRelaySettings: Equatable {
     }
 
     var isValid: Bool {
-        (1...65_535).contains(port) && decodedKey != nil
+        decodedKey != nil
     }
 
     func toProviderConfiguration() -> [String: Any] {
-        [Key.enabled: NSNumber(value: enabled), Key.host: host,
-         Key.port: NSNumber(value: port), Key.key: keyBase64]
+        [Key.enabled: NSNumber(value: enabled), Key.key: keyBase64]
     }
 }
 
@@ -146,13 +135,9 @@ struct MacIPv4Route: Equatable {
     let prefix: UInt8
 }
 
-struct MacIPv6Route: Equatable {
-    let address: String
-    let prefix: UInt8
-}
-
 /// Framework-free description of the settings that Network Extension applies
 /// only after libmqvpn has authenticated and delivered tunnel configuration.
+/// The plan is IPv4-only by design; see makeSettings for the ::/0 rationale.
 struct MacProviderNetworkPlan: Equatable {
     let assignedAddress: String
     let subnetMask: String
@@ -160,15 +145,10 @@ struct MacProviderNetworkPlan: Equatable {
     let serverIPv4: String
     let includedRoutes: [MacIPv4Route]
     let excludedRoutes: [MacIPv4Route]
-    let assignedIPv6: String
-    let assignedIPv6Prefix: UInt8
-    let includedIPv6Routes: [MacIPv6Route]
-    let excludedIPv6Routes: [MacIPv6Route]
     let dnsServers: [String]
 
     init(assignedAddress: String, assignedPrefix: UInt8, mtu: Int,
-         serverIPv4: String, relayIPv4: String?, relayLAN: MacIPv4Route? = nil,
-         relayIPv6: String? = nil) {
+         serverIPv4: String, relayIPv4: String?, relayLAN: MacIPv4Route? = nil) {
         self.assignedAddress = assignedAddress
         self.subnetMask = Self.prefixToMask(assignedPrefix)
         self.mtu = mtu
@@ -180,14 +160,7 @@ struct MacProviderNetworkPlan: Equatable {
         }
         if let relayLAN { excluded.append(relayLAN) }
         self.excludedRoutes = excluded
-        // The overlay is IPv4-only. Claiming ::/0 blackholes AAAA and, worse,
-        // steals the iPhone ULA hop after HELLO/ACK. Leave IPv6 on the LAN.
-        self.assignedIPv6 = "fd77:7777:7777::a"
-        self.assignedIPv6Prefix = 64
-        self.includedIPv6Routes = []
-        self.excludedIPv6Routes = []
         self.dnsServers = ["1.1.1.1", "8.8.8.8"]
-        _ = relayIPv6
     }
 
     static func prefixToMask(_ prefix: UInt8) -> String {
@@ -220,20 +193,14 @@ enum MacProviderCloseReason {
     }
 }
 
-enum MacRelayRebindDecision: Equatable {
-    case keep
-    case unbind
-    case rebind(to: String)
-}
-
 enum MacRelayRebindPolicy {
-    /// A live binder stays until a different interface is observed. A
-    /// transient `getifaddrs` miss after tunnel settings must not unbind:
-    /// that dropped the authenticated IPv6 relay about two seconds after ACK.
-    static func decide(current: String?, desired: String?) -> MacRelayRebindDecision {
-        if current == desired { return .keep }
-        guard let desired else { return .keep }
-        return .rebind(to: desired)
+    /// A live binder stays until a different interface is observed; nil means
+    /// keep. A transient `getifaddrs` miss after tunnel settings must not
+    /// unbind: that dropped the authenticated IPv6 relay about two seconds
+    /// after ACK.
+    static func rebindTarget(current: String?, desired: String?) -> String? {
+        guard let desired, desired != current else { return nil }
+        return desired
     }
 }
 
@@ -270,14 +237,6 @@ struct MacProviderLifecycle {
     }
 
     private var stage: Stage = .idle
-    private(set) var settingsRequested = false
-
-    var isEstablished: Bool {
-        switch stage {
-        case .established, .recovering: return true
-        default: return false
-        }
-    }
 
     var isStopping: Bool {
         if case .stopping = stage { return true }
@@ -295,8 +254,6 @@ struct MacProviderLifecycle {
             stage = .reapplyingReconnectSettings(deadlineMs: deadlineMs)
             return .applyReconnectSettings
         }
-        guard case .preflight = stage else { return .none }
-        settingsRequested = true
         guard case let .preflight(startedMs) = stage else { return .none }
         stage = .applyingSettings(startedMs: startedMs)
         return .applyNetworkSettings

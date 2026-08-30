@@ -385,9 +385,12 @@ darwin_setup_relay_route(platform_ctx_t *p)
     /* Unlike server pins, never fall back to `change`: add failure may mean
      * an administrator-owned scoped route already exists. Mutating it and
      * later deleting it would violate route ownership. Fail closed instead. */
-    if (run_route_cmd(argv) != 0) return -1;
+    if (run_route_cmd(argv) != 0) {
+        LOG_WRN("relay route: add %s via %s dev %s failed", p->relay_ip,
+                gateway[0] ? gateway : "on-link", p->relay_iface);
+        return -1;
+    }
 
-    snprintf(p->relay_route_gateway, sizeof(p->relay_route_gateway), "%s", gateway);
     snprintf(p->relay_route_iface, sizeof(p->relay_route_iface), "%s", p->relay_iface);
     p->relay_route_configured = 1;
     LOG_INF("relay route: %s via %s dev %s", p->relay_ip,
@@ -405,7 +408,6 @@ darwin_cleanup_relay_route(platform_ctx_t *p)
                           host_cidr, NULL};
     (void)run_route_cmd(argv);
     p->relay_route_configured = 0;
-    p->relay_route_gateway[0] = '\0';
     p->relay_route_iface[0] = '\0';
 }
 

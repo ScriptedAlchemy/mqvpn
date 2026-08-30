@@ -518,8 +518,8 @@ main(int argc, char *argv[])
         /* optimize_for was validated by validate_optimize_for() at config
          * load (defaults are valid too), so this parse cannot fail. */
         mqvpn_performance_mode_t perf_mode = MQVPN_PERF_MAX_THROUGHPUT;
-        mqvpn_performance_from_name(file_cfg.optimize_for,
-                                    strlen(file_cfg.optimize_for), &perf_mode);
+        mqvpn_performance_from_name(file_cfg.optimize_for, strlen(file_cfg.optimize_for),
+                                    &perf_mode);
         if (!eff_server || eff_server[0] == '\0') {
             fprintf(stderr, "error: --server is required for client mode\n");
             return 1;

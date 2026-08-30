@@ -636,7 +636,7 @@ test_get_status_one_client_with_path(void)
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"state_label\":\"active\"");
     CHECK_HAS("\"reinject_tx_bytes\":0");
-    CHECK_HAS("\"goodput_Bps\":0");
+    CHECK_HAS("\"goodput_bps\":0");
     CHECK_HAS("\"warmup\":false");
     CHECK_HAS("\"weight_pct\":0");
 }
@@ -713,13 +713,13 @@ test_get_status_wlb_matched_path_id(void)
 
     g_wlb_tmpl.n_paths = 1;
     g_wlb_tmpl.paths[0].path_id = 7;
-    g_wlb_tmpl.paths[0].goodput_Bps = 123456;
+    g_wlb_tmpl.paths[0].goodput_bps = 123456;
     g_wlb_tmpl.paths[0].warmup = 1;
     g_wlb_tmpl.paths[0].weight_pct = 20;
 
     call("{\"cmd\":\"get_status\"}");
     CHECK_HAS("\"path_id\":7");
-    CHECK_HAS("\"goodput_Bps\":123456");
+    CHECK_HAS("\"goodput_bps\":123456");
     CHECK_HAS("\"warmup\":true");
     CHECK_HAS("\"weight_pct\":20");
 }

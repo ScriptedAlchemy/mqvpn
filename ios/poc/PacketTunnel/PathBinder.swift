@@ -165,13 +165,6 @@ final class PathBinder {
         }
     }
 
-    /// Replica indices are added lowest-first across ALL interfaces before
-    /// any interface takes a second flow, so a finite path-ID grant is spent
-    /// on breadth (both radios) before depth (more flows on one radio).
-    private func replicaAddOrder(for type: NWInterface.InterfaceType) -> [Int] {
-        Array(0 ..< Self.replicasPerInterface)
-    }
-
     /// One-shot fresh path lookup. A NEW NWPathMonitor registration always
     /// receives an initial update reflecting current daemon state on start,
     /// independent of any stalled long-lived monitor — that first delivery
@@ -282,10 +275,13 @@ final class PathBinder {
         // 6. register with the engine (we are on the tick thread already)
         let (handle, outcome) = engine.addPathFd(fd, desc: &desc)
         guard PathAddOutcomePolicy.keep(handle: handle, outcomeRaw: outcome.rawValue) else {
-            // Registration refused (handle slot unavailable; outcome is NOT
-            // written in this case). Surface it — this is exactly what the
-            // failover-flap gate measures — and release the fd without any
-            // engine calls.
+            // Not kept per PathAddOutcomePolicy. handle < 0: no slot was
+            // granted (outcome is NOT written) and there is nothing to tell
+            // the engine. handle >= 0 with a permanent rejection (outcome 2):
+            // the engine slot must not stay occupied, so remove the handle
+            // and report the fd close for the core's cleanup. Surface it
+            // either way — this is exactly what the failover-flap gate
+            // measures.
             log.error("add_path_fd failed iface=\(iface.name, privacy: .public) handle=\(handle)")
             if handle >= 0 { engine.removePath(handle) }
             close(fd)
@@ -335,8 +331,8 @@ final class PathBinder {
         log.notice("path removed type=\(String(describing: type), privacy: .public) handle=\(slot.handle)")
     }
 
-    /// Full teardown for stopTunnel. Runs on the tick thread. Mirrors
-    /// removePath(type:) for every live slot, then cancels the monitors
+    /// Full teardown for stopTunnel. Runs on the tick thread. Runs
+    /// removePath(key:) for every live slot, then cancels the monitors
     /// themselves (start() is the only other writer of `monitors`, on the
     /// caller's thread, so this is safe without extra synchronization).
     func stop(completion: @escaping () -> Void = {}) {

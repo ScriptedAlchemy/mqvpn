@@ -179,8 +179,10 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
             activities: activities.map {
                 LiveActivityDescriptor(id: $0.id, mode: $0.attributes.mode)
             }, desiredMode: mode.rawValue)
-        guard LiveActivityReporterPublish.shouldUpdateExisting(currentID: plan.currentID)
-        else { return }
+        // No exact-mode Island means this session never created one: stay
+        // silent instead of sampling or calling ActivityKit. That miss is
+        // steady-state, not an event worth logging every second.
+        guard plan.currentID != nil else { return }
         let published = LiveActivityContentFactory.make(snapshot: snapshot, sampler: &sampler)
         Task {
             _ = await MqvpnLiveActivityLifecycle.updateExisting(

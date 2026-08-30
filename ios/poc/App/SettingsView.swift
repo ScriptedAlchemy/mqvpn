@@ -132,37 +132,37 @@ struct SettingsView: View {
                     }
                 }
                 if operatingMode == .vpn {
-                Section("Reorder Buffer") {
-                    Toggle("Enabled", isOn: $enabled).disabled(!controller.isEditable)
-                    if enabled {
-                        Picker("Profile", selection: $profile) {
-                            Text("CELLULAR BOND").tag(ReorderSettings.profileCellularBond)
-                            Text("FIBER LTE").tag(ReorderSettings.profileFiberLTE)
-                        }.disabled(!controller.isEditable)
-                        TextField("Ports (comma-separated, e.g. 443,5401)", text: $portsText)
-                            .keyboardType(.numbersAndPunctuation)
-                            .disabled(!controller.isEditable)
-                        ForEach(warnings, id: \.self) { w in
-                            Text(w).font(.caption).foregroundColor(.orange)
-                        }
-                        if draft.planReorder().rules.isEmpty {
-                            Text("Enable requires at least one valid port.")
-                                .font(.caption).foregroundColor(.red)
+                    Section("Reorder Buffer") {
+                        Toggle("Enabled", isOn: $enabled).disabled(!controller.isEditable)
+                        if enabled {
+                            Picker("Profile", selection: $profile) {
+                                Text("CELLULAR BOND").tag(ReorderSettings.profileCellularBond)
+                                Text("FIBER LTE").tag(ReorderSettings.profileFiberLTE)
+                            }.disabled(!controller.isEditable)
+                            TextField("Ports (comma-separated, e.g. 443,5401)", text: $portsText)
+                                .keyboardType(.numbersAndPunctuation)
+                                .disabled(!controller.isEditable)
+                            ForEach(warnings, id: \.self) { w in
+                                Text(w).font(.caption).foregroundColor(.orange)
+                            }
+                            if draft.planReorder().rules.isEmpty {
+                                Text("Enable requires at least one valid port.")
+                                    .font(.caption).foregroundColor(.red)
+                            }
                         }
                     }
-                }
-                Section {
-                    Toggle("Enabled", isOn: $hybridEnabled).disabled(!controller.isEditable)
-                    if hybridEnabled {
-                        Picker("TCP Mode", selection: $hybridMode) {
-                            Text("Auto").tag(HybridSettings.modeAuto)
-                            Text("Stream").tag(HybridSettings.modeStream)
-                            Text("Raw").tag(HybridSettings.modeRaw)
-                        }.disabled(!controller.isEditable)
+                    Section {
+                        Toggle("Enabled", isOn: $hybridEnabled).disabled(!controller.isEditable)
+                        if hybridEnabled {
+                            Picker("TCP Mode", selection: $hybridMode) {
+                                Text("Auto").tag(HybridSettings.modeAuto)
+                                Text("Stream").tag(HybridSettings.modeStream)
+                                Text("Raw").tag(HybridSettings.modeRaw)
+                            }.disabled(!controller.isEditable)
+                        }
+                    } header: { Text("Hybrid Mode") } footer: {
+                        Text("Requires hybrid support on the server; TCP connections fail otherwise.")
                     }
-                } header: { Text("Hybrid Mode") } footer: {
-                    Text("Requires hybrid support on the server; TCP connections fail otherwise.")
-                }
                 }
                 if let errorText { Section { Text(errorText).foregroundColor(.red) } }
                 if !controller.isEditable {

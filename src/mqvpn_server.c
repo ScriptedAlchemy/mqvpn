@@ -3092,7 +3092,7 @@ mqvpn_server_get_client_wlb(const mqvpn_server_t *s, mqvpn_internal_client_wlb_t
             if (n > (size_t)MQVPN_MAX_PATHS) n = (size_t)MQVPN_MAX_PATHS;
             for (size_t p = 0; p < n; p++) {
                 e->paths[e->n_paths].path_id = snap[p].path_id;
-                e->paths[e->n_paths].goodput_Bps = snap[p].goodput_Bps;
+                e->paths[e->n_paths].goodput_bps = snap[p].goodput_bps;
                 e->paths[e->n_paths].weight_pct = snap[p].weight_pct;
                 e->paths[e->n_paths].warmup = snap[p].warmup;
                 e->n_paths++;

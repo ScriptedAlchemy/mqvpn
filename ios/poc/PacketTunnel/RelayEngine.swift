@@ -411,7 +411,6 @@ final class RelayEngine {
     }
 
     private func drainLANSocket(_ socketFD: Int32) {
-        guard socketFD >= 0 else { return }
         // Receive the complete UDP datagram before validation. A max-sized
         // buffer would truncate an oversized packet to a potentially valid
         // authenticated prefix, hiding the forbidden trailing bytes.
@@ -444,12 +443,19 @@ final class RelayEngine {
 
     private func processLANDatagram(_ datagram: Data, peer: PeerAddress) {
         var decoded = mqvpn_relay_frame_t()
+        var payload = Data()
         let decodeResult = key.withUnsafeBytes { keyBytes in
-            datagram.withUnsafeBytes { bytes in
-                mqvpn_relay_decode(
+            datagram.withUnsafeBytes { bytes -> mqvpn_relay_result_t in
+                let result = mqvpn_relay_decode(
                     keyBytes.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     bytes.baseAddress!.assumingMemoryBound(to: UInt8.self), bytes.count,
                     MQVPN_RELAY_MAC_TO_IPHONE, nil, &decoded)
+                // decoded.payload aliases `bytes` (relay_protocol.h contract)
+                // and dies with this closure — copy it before returning.
+                if result == MQVPN_RELAY_OK, decoded.payload_length > 0 {
+                    payload = Data(bytes: decoded.payload, count: decoded.payload_length)
+                }
+                return result
             }
         }
         guard decodeResult == MQVPN_RELAY_OK else {
@@ -488,12 +494,6 @@ final class RelayEngine {
             }
         }
 
-        let payload: Data
-        if decoded.payload_length == 0 {
-            payload = Data()
-        } else {
-            payload = Data(bytes: decoded.payload, count: decoded.payload_length)
-        }
         let inbound = RelayInboundFrame(
             type: type, sessionID: decoded.session_id, sequence: decoded.sequence,
             payload: payload, peer: peer.identity, authenticated: true,
@@ -531,13 +531,9 @@ final class RelayEngine {
         let sent = payload.withUnsafeBytes { bytes in
             send(serverFD, bytes.baseAddress, bytes.count, 0)
         }
-        if sent == payload.count {
+        // UDP send is all-or-nothing: a nonnegative return is the whole datagram.
+        if sent >= 0 {
             state.recordServerSend(sent)
-        } else if sent >= 0 {
-            state.recordError("Cellular server partial datagram")
-            closeServerSocket()
-            _ = state.updateInterfaces(wifi: state.snapshot.listenerInterface,
-                                       cellular: nil)
         } else if errno != EAGAIN && errno != EWOULDBLOCK {
             state.recordError("Cellular server send failed")
             closeServerSocket()
@@ -618,14 +614,9 @@ final class RelayEngine {
                 }
             }
         }
-        if sent == outputLength {
+        // UDP sendto is all-or-nothing: a nonnegative return is the whole datagram.
+        if sent >= 0 {
             state.recordLanSend(sent)
-        } else if sent >= 0 {
-            state.recordError("Wi-Fi relay partial datagram")
-            closeLANSocket()
-            _ = state.updateInterfaces(wifi: nil,
-                                       cellular: state.snapshot.cellularInterface)
-            eraseSessionSecurityState()
         } else if errno != EAGAIN && errno != EWOULDBLOCK {
             state.recordError("Wi-Fi relay send failed")
             closeLANSocket()
@@ -647,22 +638,10 @@ final class RelayEngine {
         let relay = state.snapshot
         let snapshot = TunnelSnapshot(
             timestamp: now, clientState: -1, connectedSince: startedAt,
-            footprint: Self.physicalFootprint(), paths: [], seq: snapshotSequence,
+            footprint: SnapshotCache.physFootprint(), paths: [], seq: snapshotSequence,
             operatingMode: .macRelay, relay: relay)
         snapshotLock.lock()
         latest = snapshot
         snapshotLock.unlock()
-    }
-
-    private static func physicalFootprint() -> UInt64 {
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-            }
-        }
-        return result == KERN_SUCCESS ? info.phys_footprint : 0
     }
 }

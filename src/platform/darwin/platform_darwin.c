@@ -52,14 +52,6 @@
 #  define SOCK_BUF_SIZE       65536
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
 
-static void
-relay_activity_cb(void *context)
-{
-    platform_ctx_t *p = context;
-    mqvpn_client_tick(p->client);
-    schedule_next_tick(p);
-}
-
 /* ================================================================
  *  Socket pinning to a specific egress interface
  * ================================================================ */
@@ -340,9 +332,21 @@ cb_send_packet_ex(mqvpn_path_handle_t path, const uint8_t *packet, size_t length
 {
     (void)peer;
     (void)peer_length;
-    platform_ctx_t *p = user_ctx;
+    platform_ctx_t *p = (platform_ctx_t *)user_ctx;
     if (!p->relay_adapter) return -ENODEV;
     return darwin_relay_adapter_send_packet(p->relay_adapter, path, packet, length);
+}
+
+/* Relay-adapter activity callback (not a libmqvpn callback, but it feeds
+ * the same engine): the adapter just injected received datagrams via
+ * mqvpn_client_on_socket_recv, so drive the engine and re-arm the tick
+ * exactly as on_socket_read does. */
+static void
+relay_activity_cb(void *context)
+{
+    platform_ctx_t *p = (platform_ctx_t *)context;
+    mqvpn_client_tick(p->client);
+    schedule_next_tick(p);
 }
 
 static void

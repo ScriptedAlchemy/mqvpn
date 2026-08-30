@@ -84,17 +84,6 @@ typedef struct {
     int server_port;
     int has_v6;
 
-    /* Optional authenticated iPhone relay endpoint. Its LAN route is owned
-     * separately from the server and catch-all routes so cleanup can remove
-     * only what this process installed. */
-    int relay_enabled;
-    char relay_ip[INET_ADDRSTRLEN];
-    int relay_port;
-    char relay_iface[IFNAMSIZ];
-    char relay_route_gateway[INET_ADDRSTRLEN];
-    char relay_route_iface[IFNAMSIZ];
-    int relay_route_configured;
-
     /* DNS */
     mqvpn_dns_t dns;
 
@@ -116,6 +105,18 @@ typedef struct {
     int rt_fd; /* PF_ROUTE socket, -1 if unavailable */
     struct event *ev_route;
     struct darwin_relay_adapter_s *relay_adapter;
+
+    /* Optional authenticated iPhone relay endpoint. Its LAN route is owned
+     * separately from the server and catch-all routes so cleanup can remove
+     * only what this process installed. Darwin-only (pattern: udp_gro
+     * above): consumed solely by darwin/{routing,killswitch}.c and
+     * platform_darwin.c, so Linux/Windows would carry dead fields. */
+    int relay_enabled;
+    char relay_ip[INET_ADDRSTRLEN];
+    int relay_port;
+    char relay_iface[IFNAMSIZ];
+    char relay_route_iface[IFNAMSIZ];
+    int relay_route_configured;
 #endif
 } platform_ctx_t;
 

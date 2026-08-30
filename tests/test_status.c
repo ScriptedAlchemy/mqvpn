@@ -305,7 +305,7 @@ TEST(print_client_goodput_bytes_per_second)
         "\"connected_sec\":1,\"bytes_tx\":0,\"bytes_rx\":0,"
         "\"performance\":\"throughput\",\"n_paths\":1,\"paths\":[{"
         "\"path_id\":7,\"srtt_ms\":1,\"min_rtt_ms\":1,\"cwnd\":1,"
-        "\"state_label\":\"active\",\"goodput_Bps\":123456,"
+        "\"state_label\":\"active\",\"goodput_bps\":123456,"
         "\"warmup\":false,\"weight_pct\":20}]}";
 
     int capture[2];

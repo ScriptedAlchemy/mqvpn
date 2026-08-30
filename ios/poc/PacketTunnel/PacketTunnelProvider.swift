@@ -241,68 +241,64 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // repeated gate runs a zero state start.
         providerLog.notice("STOP_BEGIN")
         let reporter = liveActivityReporter
-        await LiveActivityStopSequence.perform(
-            transportTeardown: {
-                await self.stopTransport()
-            },
-            activityCleanup: {
-                await reporter?.stop()
-                self.liveActivityReporter = nil
-            })
+        // ActivityKit is ancillary UI: it must never delay or precede the
+        // packet/relay transport teardown, so its cleanup is awaited second.
+        await stopTransport()
+        await reporter?.stop()
+        liveActivityReporter = nil
     }
 
+    /// Detaches engine callbacks and shuts the transport down, but leaves the
+    /// provider's strong refs (engine/binder/snapshot/snapshotReader) in
+    /// place: handleAppMessage reads snapshotReader from an arbitrary NE
+    /// thread, so clearing fields here would be an unsynchronized cross-thread
+    /// mutation for no benefit — the extension process exits right after
+    /// stopTunnel returns.
     private func stopTransport() async {
         defaultPathObservation?.invalidate()
         defaultPathObservation = nil
         if let relayEngine {
             relayEngine.stop()
-            self.relayEngine = nil
-            self.snapshotReader = nil
-            self.snapshot = nil
-            self.engine = nil
-            self.binder = nil
-            self.metrics = nil
             providerLog.notice("STOP_FINISHED relay=true")
             return
         }
         await withCheckedContinuation { cont in
             let engine = self.engine
             let binder = self.binder
-            StopLifecycle.performOrFinish(
-                perform: { body in engine?.perform(body) ?? false },
-                accepted: { [weak self] in
-                    providerLog.notice("STOP_DISPATCHED accepted=true")
-                    // Detach the closed-callback first: disconnect fires
-                    // tunnel_closed synchronously, and re-entering
-                    // cancelTunnelWithError during a system-initiated stop is
-                    // unwanted.
-                    engine?.onTunnelClosed = nil
-                    StopLifecycle.performTransportFirst(
-                        stopPaths: { done in binder?.stop(completion: done) ?? done() },
-                        shutdownEngine: { engine?.shutdown() },
-                        completion: {
-                            self?.engine = nil
-                            self?.binder = nil
-                            self?.metrics = nil
-                            self?.snapshot = nil
-                            self?.snapshotReader = nil
-                            providerLog.notice("STOP_FINISHED accepted=true")
-                            cont.resume()
-                        })
-                },
-                rejected: { [weak self] in
-                    // A completed/absent tick thread cannot safely run the
-                    // tick-confined binder teardown. The provider still must
-                    // release its local ownership and return to NE promptly.
-                    providerLog.notice("STOP_DISPATCHED accepted=false")
-                    self?.engine = nil
-                    self?.binder = nil
-                    self?.metrics = nil
-                    self?.snapshot = nil
-                    self?.snapshotReader = nil
-                    providerLog.notice("STOP_FINISHED accepted=false")
+            // The engine retains these callbacks and applyConfig captures the
+            // engine and the provider, so leaving them attached leaks the
+            // whole graph after stop. Detach the closed-callback first:
+            // disconnect fires tunnel_closed synchronously, and re-entering
+            // cancelTunnelWithError during a system-initiated stop is
+            // unwanted.
+            let detachCallbacks = {
+                engine?.onTunnelClosed = nil
+                engine?.onTunnelConfig = nil
+                engine?.onTunOutput = nil
+            }
+            let dispatched = engine?.perform {
+                providerLog.notice("STOP_DISPATCHED accepted=true")
+                detachCallbacks()
+                // PathBinder owns asynchronous DispatchSource cancellation.
+                // Keep the mqvpn engine alive until every fd is closed and
+                // reported back to it, so shutdown runs in stop's completion.
+                let done = {
+                    engine?.shutdown()
+                    providerLog.notice("STOP_FINISHED accepted=true")
                     cont.resume()
-                })
+                }
+                binder?.stop(completion: done) ?? done()
+            } ?? false
+            if !dispatched {
+                // A completed/absent tick thread cannot safely run the
+                // tick-confined binder teardown, and with that thread gone the
+                // callbacks can never fire again — detaching off-thread here
+                // is race-free and still breaks the retain cycle.
+                providerLog.notice("STOP_DISPATCHED accepted=false")
+                detachCallbacks()
+                providerLog.notice("STOP_FINISHED accepted=false")
+                cont.resume()
+            }
         }
     }
 

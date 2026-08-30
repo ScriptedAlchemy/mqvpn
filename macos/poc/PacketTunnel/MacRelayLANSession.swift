@@ -72,24 +72,22 @@ final class MacRelayLANSession {
     }
 
     private func reconcile(relayIPv4: String, isStopping: @escaping () -> Bool) {
-        let desired = pickInterface(relayIPv4)
-        switch MacRelayRebindPolicy.decide(current: interfaceName, desired: desired) {
-        case .keep:
-            return
-        case .unbind:
-            takeBinderForTeardown()?.stop()
-        case let .rebind(name):
-            let old = takeBinderForTeardown()
-            let install: () -> Void = { [weak self] in
-                self?.queue.async {
-                    guard let self, !isStopping(), self.binder == nil else { return }
-                    guard self.install(relayIPv4: relayIPv4), self.interfaceName == name else {
-                        self.onUnavailable?()
-                        return
-                    }
+        guard MacRelayRebindPolicy.rebindTarget(current: interfaceName,
+                                                desired: pickInterface(relayIPv4)) != nil
+        else { return }
+        let old = takeBinderForTeardown()
+        let install: () -> Void = { [weak self] in
+            self?.queue.async {
+                guard let self, !isStopping(), self.binder == nil else { return }
+                // install() re-picks the interface itself; landing on a
+                // different live interface than the probe that triggered the
+                // rebind is still a working binder. Only a failed install is
+                // genuinely "unavailable".
+                if !self.install(relayIPv4: relayIPv4) {
+                    self.onUnavailable?()
                 }
             }
-            if let old { old.stop(completion: install) } else { install() }
         }
+        if let old { old.stop(completion: install) } else { install() }
     }
 }

@@ -319,7 +319,7 @@ typedef struct {
     int n_paths;
     struct {
         uint64_t path_id;
-        uint64_t goodput_Bps;
+        uint64_t goodput_bps;
         uint8_t weight_pct;
         uint8_t warmup;
     } paths[MQVPN_MAX_PATHS];

@@ -1367,13 +1367,15 @@ validate_relay_config(mqvpn_file_config_t *cfg)
 #  endif
     );
     if (fd < 0) {
-        LOG_ERR("config: cannot open relay key file");
+        LOG_ERR("config: cannot open relay key file '%s': %m", cfg->relay_key_file);
         return -1;
     }
     struct stat st;
     if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
         (st.st_mode & (S_IRGRP | S_IROTH)) != 0) {
-        LOG_ERR("config: relay key file must be regular and not group/world readable");
+        LOG_ERR("config: relay key file '%s' must be regular and not group/world "
+                "readable",
+                cfg->relay_key_file);
         close(fd);
         return -1;
     }
@@ -1385,7 +1387,9 @@ validate_relay_config(mqvpn_file_config_t *cfg)
     if (got <= 0 || more != 0 ||
         decode_relay_key(encoded, (size_t)got, cfg->relay_key) < 0) {
         memset(cfg->relay_key, 0, sizeof(cfg->relay_key));
-        LOG_ERR("config: relay key file must contain exactly one Base64 32-byte key");
+        LOG_ERR("config: relay key file '%s' must contain exactly one Base64 32-byte "
+                "key",
+                cfg->relay_key_file);
         return -1;
     }
     cfg->relay_key_loaded = 1;
@@ -1490,7 +1494,6 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
     int lineno = 0;
     int section = SEC_NONE;
     int relay_sections = 0;
-    int fatal = 0;
     char *line = strtok(buf, "\n");
     while (line) {
         lineno++;
@@ -1517,8 +1520,8 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
                 section = sec;
                 if (section == SEC_RELAY && ++relay_sections > 1) {
                     LOG_ERR("%s:%d: duplicate [Relay] section", path, lineno);
-                    fatal = 1;
-                    section = SEC_NONE;
+                    free(buf);
+                    return -1;
                 }
                 /* Each [ReorderRule] occurrence pushes a fresh rule slot that
                  * its keys then fill (mirrors WireGuard repeated [Peer]). */
@@ -1548,6 +1551,5 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
     }
 
     free(buf);
-    if (fatal) return -1;
     return validate_optimize_for(cfg) == 0 ? validate_relay_config(cfg) : -1;
 }

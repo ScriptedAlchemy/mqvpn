@@ -23,7 +23,6 @@ enum LiveActivityInterfaceKind: String, Codable, Hashable, CaseIterable {
 struct InterfaceByteCounter: Equatable {
     let name: String
     let totalBytes: UInt64
-    let active: Bool
 }
 
 struct InterfaceSpeed: Equatable {
@@ -65,7 +64,7 @@ struct LiveActivityRateSampler {
         // total went backwards, the monotonic guard below rejected it, and
         // the readout fell back to "--" instead of a speed.
         var current: [LiveActivityInterfaceKind: InterfaceByteCounter] = [:]
-        for counter in counters where counter.active {
+        for counter in counters {
             guard let kind = LiveActivityInterfaceKind(interfaceName: counter.name)
             else { continue }
             if let running = current[kind] {
@@ -73,8 +72,7 @@ struct LiveActivityRateSampler {
                     running.totalBytes.addingReportingOverflow(counter.totalBytes)
                 current[kind] = InterfaceByteCounter(
                     name: running.name,
-                    totalBytes: overflow ? UInt64.max : total,
-                    active: true)
+                    totalBytes: overflow ? UInt64.max : total)
             } else {
                 current[kind] = counter
             }
@@ -137,17 +135,21 @@ enum LiveActivityCounterSource {
     static func counters(from snapshot: TunnelSnapshot) -> [InterfaceByteCounter] {
         switch snapshot.operatingMode {
         case .vpn:
-            // MQVPN_PATH_ACTIVE is raw value 1 in libmqvpn.h. The app target
-            // intentionally does not link libmqvpn, so the wire uses Int32.
+            // Sum EVERY present flow on a physical interface, regardless of
+            // path status: per-path byte counters are monotonic while the
+            // path entry exists, but a flow dipping from ACTIVE to
+            // degraded/pending during failover used to leave a
+            // status-filtered sum, shrink the interface total, trip the
+            // sampler's monotonic guard, and blank the island to "--" for a
+            // cycle. ACTIVE feeds only the phase decision in
+            // LiveActivityContentFactory, never byte accounting.
             return snapshot.paths.compactMap { path in
-                guard path.status == 1,
-                      LiveActivityInterfaceKind(interfaceName: path.name) != nil else {
+                guard LiveActivityInterfaceKind(interfaceName: path.name) != nil else {
                     return nil
                 }
                 return InterfaceByteCounter(
                     name: path.name,
-                    totalBytes: sum(path.txBytes, path.rxBytes),
-                    active: true)
+                    totalBytes: sum(path.txBytes, path.rxBytes))
             }
         case .macRelay:
             guard let relay = snapshot.relay else { return [] }
@@ -155,14 +157,12 @@ enum LiveActivityCounterSource {
             if relay.wifiAvailable, let name = relay.listenerInterface {
                 counters.append(InterfaceByteCounter(
                     name: name,
-                    totalBytes: sum(relay.lanRxBytes, relay.lanTxBytes),
-                    active: true))
+                    totalBytes: sum(relay.lanRxBytes, relay.lanTxBytes)))
             }
             if relay.cellularAvailable, let name = relay.cellularInterface {
                 counters.append(InterfaceByteCounter(
                     name: name,
-                    totalBytes: sum(relay.serverRxBytes, relay.serverTxBytes),
-                    active: true))
+                    totalBytes: sum(relay.serverRxBytes, relay.serverTxBytes)))
             }
             return counters
         }
@@ -186,6 +186,8 @@ enum LiveActivityContentFactory {
         let phase: LiveActivityPhase
         switch snapshot.operatingMode {
         case .vpn:
+            // MQVPN_PATH_ACTIVE is raw value 1 in libmqvpn.h. The app target
+            // intentionally does not link libmqvpn, so the wire uses Int32.
             let hasActivePhysicalPath = snapshot.paths.contains {
                 $0.status == 1 && LiveActivityInterfaceKind(interfaceName: $0.name) != nil
             }

@@ -28,8 +28,11 @@ enum MacLANInterfaceEnumerator {
     }
 
     static func candidates() -> [MacLANInterfaceCandidate] {
-        let kinds = Dictionary(uniqueKeysWithValues: (SCNetworkInterfaceCopyAll() as NSArray)
-            .compactMap { $0 as! SCNetworkInterface? }
+        // Element-wise `as?` to a CF type is a compile error ("always
+        // succeeds"); the collection-level conditional cast is the checked
+        // bridge Swift accepts for a CFArray of SCNetworkInterface.
+        let interfaces = (SCNetworkInterfaceCopyAll() as? [SCNetworkInterface]) ?? []
+        let pairs = interfaces
             .compactMap { interface -> (String, MacLANInterfaceKind)? in
                 guard let name = SCNetworkInterfaceGetBSDName(interface) as String?,
                       let type = SCNetworkInterfaceGetInterfaceType(interface) as String?
@@ -37,7 +40,13 @@ enum MacLANInterfaceEnumerator {
                 if type == kSCNetworkInterfaceTypeIEEE80211 as String { return (name, .wifi) }
                 if type == kSCNetworkInterfaceTypeEthernet as String { return (name, .wiredEthernet) }
                 return nil
-            })
+            }
+        // SCNetworkInterfaceCopyAll can report the same BSD device more than
+        // once (one entry per configured service); uniqueKeysWithValues would
+        // fatal-error on that. Ties keep the kind the relay selector prefers.
+        let kinds = Dictionary(pairs) { lhs, rhs in
+            lhs.rawValue <= rhs.rawValue ? lhs : rhs
+        }
         guard !kinds.isEmpty else { return [] }
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0, let list else { return [] }

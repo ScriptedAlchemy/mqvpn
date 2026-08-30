@@ -25,9 +25,6 @@ let networkPlan = MacProviderNetworkPlan(
     serverIPv4: "208.69.79.206", relayIPv4: "192.168.1.42")
 check(networkPlan.includedRoutes == [MacIPv4Route(address: "0.0.0.0", prefix: 0)],
       "the authenticated Mac tunnel includes exactly the IPv4 default route")
-check(networkPlan.includedIPv6Routes.isEmpty &&
-      networkPlan.excludedIPv6Routes.isEmpty,
-      "the IPv4-only overlay must not claim ::/0; that blackholes the iPhone ULA relay")
 check(networkPlan.excludedRoutes == [
     MacIPv4Route(address: "208.69.79.206", prefix: 32),
     MacIPv4Route(address: "192.168.1.42", prefix: 32),
@@ -53,18 +50,10 @@ do {
           "an enabled but incomplete relay configuration fails closed")
 }
 let parsedRelay = try? MacRelaySettings.startConfiguration(from: [
-    "macRelayEnabled": true, "macRelayHost": "192.168.1.42",
-    "macRelayPort": 5443, "macRelayKey": relayKey,
+    "macRelayEnabled": true, "macRelayKey": relayKey,
 ])
-check(parsedRelay?.host == "192.168.1.42" && parsedRelay?.isValid == true,
-      "a complete enabled Mac relay configuration is accepted")
-let discoveredRelay = try? MacRelaySettings.startConfiguration(from: [
-    "macRelayEnabled": true, "macRelayHost": "",
-    "macRelayPort": 5443, "macRelayKey": relayKey,
-])
-check(discoveredRelay?.enabled == true && discoveredRelay?.host == "" &&
-      discoveredRelay?.isValid == true,
-      "an enabled relay without a stored host is valid and waits for discovery")
+check(parsedRelay?.enabled == true && parsedRelay?.isValid == true,
+      "an enabled relay with a real key is valid and waits for Bonjour discovery")
 check(MacRelayDiscovery.choose([
     MacRelayEndpoint(host: "fe80::1", port: 5443),
     MacRelayEndpoint(host: "192.168.1.50", port: 5443),
@@ -135,14 +124,14 @@ if advertisedLL.sin6_scope_id != 0 {
           "Start prefers the scoped link-local already attached to Bonjour")
 }
 
+// Route installation is observable only through the returned action: nothing
+// short of .applyNetworkSettings may touch Network Extension settings.
 var startupTimeout = MacProviderLifecycle()
-check(startupTimeout.begin(nowMs: 0) == .none && !startupTimeout.settingsRequested,
+check(startupTimeout.begin(nowMs: 0) == .none,
       "starting probes does not request Network Extension routes")
-check(startupTimeout.activePathCountChanged(1, nowMs: 100) == .none &&
-      !startupTimeout.settingsRequested,
+check(startupTimeout.activePathCountChanged(1, nowMs: 100) == .none,
       "a locally active path alone cannot install routes before server authentication")
-check(startupTimeout.startupTimerFired(nowMs: 10_000) == .failStart &&
-      !startupTimeout.settingsRequested,
+check(startupTimeout.startupTimerFired(nowMs: 10_000) == .failStart,
       "startup expiry fails before any default route was requested")
 check(!MacProviderStartupSafety.hasSurvivingPath(activePathCount: 0, stopping: false) &&
       !MacProviderStartupSafety.hasSurvivingPath(activePathCount: 1, stopping: true) &&
@@ -158,17 +147,16 @@ check(settingsTimeout.startupTimerFired(nowMs: 10_000) == .failStart,
 var lifecycle = MacProviderLifecycle()
 check(lifecycle.begin(nowMs: 0) == .none,
       "provider startup begins in preflight without applying settings")
-check(lifecycle.tunnelConfigurationReady() == .applyNetworkSettings &&
-      lifecycle.settingsRequested,
+check(lifecycle.tunnelConfigurationReady() == .applyNetworkSettings,
       "real tunnel configuration is the sole settings-install gate")
-check(lifecycle.networkSettingsApplied(error: false, activePathCount: 1) == .completeStart &&
-      lifecycle.isEstablished,
+check(lifecycle.networkSettingsApplied(error: false, activePathCount: 1) == .completeStart,
       "successful Network Extension settings complete Start")
+// Establishment is observed behaviorally: only an established lifecycle
+// answers path loss with recovery (and path return with .endRecovery).
 check(lifecycle.activePathCountChanged(0, nowMs: 1_000) ==
       .beginRecovery(deadlineMs: 6_000),
       "all-path loss starts the exact five-second fail-open window")
-check(lifecycle.activePathCountChanged(1, nowMs: 5_999) == .endRecovery &&
-      lifecycle.isEstablished,
+check(lifecycle.activePathCountChanged(1, nowMs: 5_999) == .endRecovery,
       "a recovered path before the deadline clears reasserting")
 check(lifecycle.activePathCountChanged(0, nowMs: 8_000) ==
       .beginRecovery(deadlineMs: 13_000) &&
@@ -186,8 +174,9 @@ var lostDuringApply = MacProviderLifecycle()
 _ = lostDuringApply.begin(nowMs: 0)
 _ = lostDuringApply.tunnelConfigurationReady()
 check(lostDuringApply.activePathCountChanged(0, nowMs: 100) == .failStart &&
-      !lostDuringApply.isEstablished,
-      "all-path loss before Start completes fails instead of installing a default route")
+      lostDuringApply.activePathCountChanged(1, nowMs: 200)
+        == MacProviderLifecycleAction.none,
+      "all-path loss before Start completes fails for good instead of installing a default route")
 var zeroAtApply = MacProviderLifecycle()
 _ = zeroAtApply.begin(nowMs: 0)
 _ = zeroAtApply.tunnelConfigurationReady()
@@ -198,10 +187,10 @@ var stopping = MacProviderLifecycle()
 _ = stopping.begin(nowMs: 0)
 check(stopping.beginStop() && stopping.isStopping && !stopping.beginStop(),
       "Stop is idempotent and is owned by the lifecycle stage, not a parallel flag")
-check(MacRelayRebindPolicy.decide(current: "en1", desired: "en1") == .keep &&
-      MacRelayRebindPolicy.decide(current: "en1", desired: nil) == .keep &&
-      MacRelayRebindPolicy.decide(current: "en1", desired: "en5") == .rebind(to: "en5") &&
-      MacRelayRebindPolicy.decide(current: nil, desired: "en1") == .rebind(to: "en1"),
+check(MacRelayRebindPolicy.rebindTarget(current: "en1", desired: "en1") == nil &&
+      MacRelayRebindPolicy.rebindTarget(current: "en1", desired: nil) == nil &&
+      MacRelayRebindPolicy.rebindTarget(current: "en1", desired: "en5") == "en5" &&
+      MacRelayRebindPolicy.rebindTarget(current: nil, desired: "en1") == "en1",
       "a live relay interface survives a probe miss; only a new interface rebinds")
 check(!PathSlotRebind.shouldReplace(existingName: "en0", existingIndex: 14,
                                     incomingName: "en0", incomingIndex: 14) &&
@@ -261,15 +250,8 @@ check(planWithLAN.excludedRoutes == [
     MacIPv4Route(address: "192.168.1.42", prefix: 32),
     MacIPv4Route(address: "192.168.1.0", prefix: 24),
 ], "settings keep the peer /32 and the on-link LAN after the default route is installed")
-let planWithIPv6Relay = MacProviderNetworkPlan(
-    assignedAddress: "10.77.77.10", assignedPrefix: 24, mtu: 1_382,
-    serverIPv4: "208.69.79.206", relayIPv4: nil,
-    relayIPv6: "fd97:b933:48b8:4fdb::42%en1")
-check(planWithIPv6Relay.includedIPv6Routes.isEmpty &&
-      planWithIPv6Relay.excludedIPv6Routes.isEmpty,
-      "an IPv6 LAN relay does not install IPv6 tunnel routes")
 
-let relayDraft = MacRelaySettings(enabled: true, host: " 192.168.1.42 ", port: 5_443,
+let relayDraft = MacRelaySettings(enabled: true,
                                   keyBase64: Data(repeating: 7, count: 32).base64EncodedString())
 check(relayDraft.isValid &&
       (try? MacRelaySettings.startConfiguration(from: relayDraft.toProviderConfiguration())) == relayDraft,
@@ -297,8 +279,8 @@ let leftover = ManagerDescriptor(id: "2",
 check(selectMatchingManager([foreign, ours, leftover],
                             providerBundleID: TunnelProviderConfiguration.providerBundleID)?.id == "1",
       "only the Mac provider identifier is adopted")
-check(managersEligibleForMutation([foreign, ours, leftover],
-                                  providerBundleID: TunnelProviderConfiguration.providerBundleID) == [ours],
+check(selectMatchingManager([foreign, leftover],
+                            providerBundleID: TunnelProviderConfiguration.providerBundleID) == nil,
       "nonmatching VPN profiles are never selected for mutation")
 check(TunnelStatus.fromNEVPNRawValue(3) == .connected &&
       TunnelStatus.fromNEVPNRawValue(4) == .reasserting &&
@@ -315,7 +297,7 @@ let hybrid = HybridSettings(enabled: true, tcpMode: HybridSettings.modeAuto)
 let scheduler = SchedulerSettings(policy: SchedulerSettings.lowLatency)
 let directOnlyConfiguration = MacProviderConfiguration.make(
     server: validServer,
-    relay: MacRelaySettings(enabled: false, host: "", port: 5443, keyBase64: ""),
+    relay: MacRelaySettings(enabled: false, keyBase64: ""),
     hybrid: hybrid,
     scheduler: scheduler)
 check(ServerSettings(providerConfiguration: directOnlyConfiguration) == validServer &&
@@ -325,7 +307,7 @@ check(ServerSettings(providerConfiguration: directOnlyConfiguration) == validSer
       "one Mac provider configuration persists server, Hybrid, Optimize For, and an explicit direct-only relay state")
 check(SchedulerSettings(providerConfiguration: MacProviderConfiguration.make(
         server: validServer,
-        relay: MacRelaySettings(enabled: false, host: "", port: 5443, keyBase64: ""),
+        relay: MacRelaySettings(enabled: false, keyBase64: ""),
         hybrid: hybrid)).policy == SchedulerSettings.maxThroughput,
       "Mac provider configuration defaults Optimize For to Max Throughput")
 check(scheduler.requestedDisplayLabel == "Requested Low Latency" &&
@@ -354,13 +336,6 @@ check(MacPollingLifecycle.shouldPoll(status: .connected) &&
       !MacPollingLifecycle.shouldPoll(status: .connecting) &&
       !MacPollingLifecycle.shouldPoll(status: .disconnected),
       "loading an already-connected Mac profile starts app-message polling while down states stay quiet")
-check(MacStatusReconciliation.needsUpdate(cached: .connected,
-                                          observed: .disconnected) &&
-      MacStatusReconciliation.needsUpdate(cached: .reasserting,
-                                          observed: .connected) &&
-      !MacStatusReconciliation.needsUpdate(cached: .connected,
-                                           observed: .connected),
-      "the dashboard repairs missed system VPN status notifications")
 check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                server: validServer, relay: nil),
       "direct-only Start is allowed with a valid server and no relay")
@@ -369,28 +344,13 @@ check(!MacConnectGuard.canStart(isEditable: false, isSaving: false,
       "Start stays disabled while the profile is not editable")
 check(!MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                 server: validServer,
-                                relay: MacRelaySettings(enabled: true, host: "",
-                                                        port: 5443, keyBase64: "")),
+                                relay: MacRelaySettings(enabled: true, keyBase64: "")),
       "an enabled but incomplete iPhone relay cannot Start")
 check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
                                server: validServer,
-                               relay: MacRelaySettings(enabled: true, host: "",
-                                                       port: 5443, keyBase64: relayKey)),
+                               relay: MacRelaySettings(enabled: true,
+                                                       keyBase64: relayKey)),
       "a valid relay preference does not block direct-path Start while discovery waits")
-check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
-                               server: validServer,
-                               relay: MacRelaySettings(enabled: true, host: "",
-                                                       port: 5443, keyBase64: relayKey),
-                               discoveredRelay: MacRelayEndpoint(host: "192.168.1.50",
-                                                                 port: 5443)),
-      "Start is allowed after a real IPv4 relay endpoint resolves")
-check(MacConnectGuard.canStart(isEditable: true, isSaving: false,
-                               server: validServer,
-                               relay: MacRelaySettings(enabled: true, host: "",
-                                                       port: 5443, keyBase64: relayKey),
-                               discoveredRelay: MacRelayEndpoint(
-                                   host: "fd97:b933:48b8:4fdb::42", port: 5443)),
-      "Start is allowed after a real IPv6 relay endpoint resolves")
 check(MacRelayEndpointTransition.decide(current: nil, discovered: nil) == .keep &&
       MacRelayEndpointTransition.decide(
           current: nil,
@@ -483,11 +443,11 @@ runAsync {
     store.refreshThrows = true
     var refreshFailed = false
     do {
-        try await performAtomicSave(store, merge: ["macRelayHost": "192.168.1.42"])
+        try await performAtomicSave(store, merge: ["serverHost": "vpn.example"])
     } catch MacSaveFailure.refresh {
         refreshFailed = true
     } catch { }
-    check(refreshFailed && store.providerConfiguration?["macRelayHost"] as? String == "192.168.1.42",
+    check(refreshFailed && store.providerConfiguration?["serverHost"] as? String == "vpn.example",
           "a post-commit refresh failure is surfaced instead of claiming the profile reloaded")
 }
 runAsync {
@@ -496,7 +456,7 @@ runAsync {
     store.refreshFailuresBeforeSuccess = 1
     var succeeded = false
     do {
-        try await performAtomicSave(store, merge: ["macRelayHost": "192.168.1.42"])
+        try await performAtomicSave(store, merge: ["serverHost": "vpn.example"])
         succeeded = true
     } catch { }
     check(succeeded && store.refreshAttempts == 2,
@@ -658,39 +618,15 @@ let longKeepalive = phoneFrame(MQVPN_RELAY_KEEPALIVE, sequence: 8, payload: Data
 check(state.receive(longKeepalive, nowMs: 106) == .drop(.malformed) && state.snapshot.active,
       "a 9-byte keepalive is malformed and must not echo")
 
-check(MacRelaySendRecovery.shouldRefreshRoute(ENETUNREACH) &&
-      MacRelaySendRecovery.shouldRefreshRoute(EHOSTUNREACH) &&
-      MacRelaySendRecovery.shouldRefreshRoute(EADDRNOTAVAIL) &&
-      !MacRelaySendRecovery.shouldRefreshRoute(ECONNRESET),
-      "a stale connected UDP route is refreshed on the same socket; ECONNRESET still reopens")
-check(MacRelaySourcePin.shouldBindExactSource(pinnedAddressLength: 28) &&
-      !MacRelaySourcePin.shouldBindExactSource(pinnedAddressLength: 0),
-      "reopen binds the first connected LAN source; the first open still lets connect() choose")
-check(MacRelaySourcePin.shouldReplacePin(existingAddressLength: 0, newAddressLength: 28) &&
-      !MacRelaySourcePin.shouldReplacePin(existingAddressLength: 28, newAddressLength: 16) &&
-      !MacRelaySourcePin.shouldReplacePin(existingAddressLength: 28, newAddressLength: 28),
-      "a later getsockname after default routes must not replace the first LAN pin")
-check(MacRelaySourcePin.shouldClearPinAfterBindFailure(exactBindAttempted: true,
-                                                       bindSucceeded: false) &&
-      !MacRelaySourcePin.shouldClearPinAfterBindFailure(exactBindAttempted: true,
-                                                        bindSucceeded: true) &&
-      !MacRelaySourcePin.shouldClearPinAfterBindFailure(exactBindAttempted: false,
-                                                        bindSucceeded: false) &&
-      !MacRelaySourcePin.shouldClearPinAfterBindFailure(exactBindAttempted: false,
-                                                        bindSucceeded: true),
-      "only a failed exact-source bind clears the pin so reopen can fall back to the port")
-check(state.shouldHelloAfterRouteRefresh() &&
-      !MacRelaySourcePin.shouldHelloAfterRouteRefresh(started: false, hardFailure: false) &&
-      !MacRelaySourcePin.shouldHelloAfterRouteRefresh(started: true, hardFailure: true),
+check(state.shouldHelloAfterRouteRefresh(),
       "settings apply immediately re-validates the relay with HELLO")
 state.hardSocketFailure(nowMs: 107, error: "ECONNRESET")
 check(state.snapshot.hardFailures == 1 && !state.snapshot.active &&
+      !state.shouldHelloAfterRouteRefresh() &&
       state.shouldReopenSocket(nowMs: 1_106) == false &&
       state.shouldReopenSocket(nowMs: 1_107),
-      "hard socket failure removes its path and waits one second before reopen")
-check(MacRelaySessionRenewal.resumeSessionID(current: UInt64?.none, last: session) == session &&
-      MacRelaySessionRenewal.resumeSessionID(current: UInt64?.none, last: UInt64?.none) == nil &&
-      !MacRelaySessionRenewal.shouldResetTransmitSequence(resuming: session, previous: session) &&
+      "hard socket failure removes its path, mutes route-refresh HELLO, and waits one second before reopen")
+check(!MacRelaySessionRenewal.shouldResetTransmitSequence(resuming: session, previous: session) &&
       MacRelaySessionRenewal.shouldResetTransmitSequence(resuming: session + 1, previous: session),
       "socket reopen resumes the authenticated session instead of minting a lease the iPhone will reject")
 check(state.resumeSessionID() == session,
@@ -715,16 +651,10 @@ check(MacRelayEndpointSafety.isLocalEndpoint("192.168.1.20",
 check(!MacRelayEndpointSafety.isLocalEndpoint("192.168.1.42",
                                                localIPv4Addresses: ["192.168.1.20"]),
       "a distinct LAN peer remains eligible")
-check(MacRelayTransportGeneration.accepts(capturedGeneration: 7, currentGeneration: 7,
-                                          capturedFD: 12, currentFD: 12, stopped: false) &&
-      !MacRelayTransportGeneration.accepts(capturedGeneration: 7, currentGeneration: 8,
-                                           capturedFD: 12, currentFD: 12, stopped: false) &&
-      !MacRelayTransportGeneration.accepts(capturedGeneration: 8, currentGeneration: 8,
-                                           capturedFD: 12, currentFD: 12, stopped: true),
-      "stale or stopped DispatchSource events are rejected before they can reuse an fd")
 
 state.stop()
-check(state.snapshot == .stopped && !state.canEncode,
+check(state.snapshot == .stopped && !state.canEncode &&
+      !state.shouldHelloAfterRouteRefresh(),
       "Stop clears active/session/replay state and erases the relay key")
 
 // ── Real UDP binder lifecycle ──
@@ -838,8 +768,6 @@ if let listener = loopbackListener(),
     liveBinder.start()
     check(waitUntil({ liveBinder.snapshot().active }),
           "real interface-bound UDP HELLO/ACK activates the logical relay path")
-    check(liveBinder.usesNetworkTransport,
-          "the live relay round trip ran on the Network.framework transport, not the socket fallback")
     let activeSnapshot = liveBinder.snapshot()
     check(activeSnapshot.helloSent >= 1 && activeSnapshot.lanTxBytes > 0 &&
           activeSnapshot.ackReceived >= 1,

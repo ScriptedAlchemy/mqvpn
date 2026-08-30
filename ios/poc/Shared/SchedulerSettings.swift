@@ -14,8 +14,6 @@ struct SchedulerSettings: Equatable {
     static let lowLatency = 1
     static let `default` = SchedulerSettings(policy: maxThroughput)
 
-    static let headerThroughput = "throughput"
-    static let headerLatency = "latency"
     static let labelThroughput = "Max Throughput"
     static let labelLatency = "Low Latency"
     static let pickerTitle = "Optimize For"
@@ -41,15 +39,10 @@ struct SchedulerSettings: Equatable {
         self.init(policy: policy)
     }
 
-    static func headerValue(for policy: Int) -> String {
-        policy == lowLatency ? headerLatency : headerThroughput
-    }
-
     static func displayLabel(for policy: Int) -> String {
         policy == lowLatency ? labelLatency : labelThroughput
     }
 
-    var headerValue: String { Self.headerValue(for: policy) }
     var displayLabel: String { Self.displayLabel(for: policy) }
 
     /// Dashboards show the persisted request, not server-effective policy.

@@ -45,11 +45,6 @@ func selectMatchingManager(_ managers: [ManagerDescriptor],
     managers.first { $0.providerBundleID == providerBundleID }
 }
 
-func managersEligibleForMutation(_ managers: [ManagerDescriptor],
-                                 providerBundleID: String) -> [ManagerDescriptor] {
-    managers.filter { $0.providerBundleID == providerBundleID }
-}
-
 enum SaveError: Error, Equatable { case inProgress, notEditable, notReady }
 
 func saveGuard(isSaving: Bool, isEditable: Bool, hasManager: Bool) -> SaveError? {
@@ -97,21 +92,19 @@ func performAtomicSave(_ store: MacConfigStore, merge: [String: Any],
 }
 
 enum MacConnectGuard {
+    /// Deliberately independent of relay discovery state: relay is an
+    /// additive path, and a temporarily absent iPhone must not block the
+    /// direct Mac path. The provider keeps discovering while the tunnel is
+    /// running and attaches the relay when it appears.
     static func canStart(isEditable: Bool, isSaving: Bool,
                          server: ServerSettings?,
                          relay: MacRelaySettings?,
                          relayConfigurationIsValid: Bool = true,
-                         profileIsCurrent: Bool = true,
-                         discoveredRelay: MacRelayEndpoint? = nil) -> Bool {
+                         profileIsCurrent: Bool = true) -> Bool {
         guard isEditable, !isSaving, server?.isValid == true,
               relayConfigurationIsValid, profileIsCurrent else { return false }
         guard let relay else { return true }
-        guard !relay.enabled || relay.isValid else { return false }
-        // Relay is an additive path. A temporarily absent iPhone must not
-        // block the direct Mac path; the provider keeps discovering while the
-        // tunnel is running and attaches the relay when it appears.
-        _ = discoveredRelay
-        return true
+        return !relay.enabled || relay.isValid
     }
 }
 
@@ -134,13 +127,6 @@ enum MacProviderConfiguration {
 enum MacPollingLifecycle {
     static func shouldPoll(status: TunnelStatus) -> Bool {
         status == .connected || status == .reasserting
-    }
-}
-
-enum MacStatusReconciliation {
-    static func needsUpdate(cached: TunnelStatus,
-                            observed: TunnelStatus) -> Bool {
-        cached != observed
     }
 }
 

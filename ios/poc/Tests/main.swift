@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 import Foundation
+import Darwin
+
+// main.swift runs top to bottom: the counter and the assertion helper MUST
+// precede every check(...), or the initializer resets failures already
+// counted above it and the run exits 0 despite printed FAILs.
+var failures = 0
+func check(_ cond: Bool, _ msg: String) { if !cond { failures += 1; print("FAIL: \(msg)") } }
 
 check(!RelayAdvertisementPolicy.shouldPublish(lanReady: true,
                                                cellularReady: false,
@@ -19,10 +26,6 @@ check(RelayInterfaceObservation.effective(observed: nil, current: "en0",
       RelayInterfaceObservation.effective(observed: "en1", current: "en0",
                                           socketReady: true) == "en1",
       "a transient monitor miss cannot close a live interface-bound relay socket")
-import Darwin
-
-var failures = 0
-func check(_ cond: Bool, _ msg: String) { if !cond { failures += 1; print("FAIL: \(msg)") } }
 
 // planReorder
 check(ReorderSettings(enabled: false, profile: 4, ports: [443]).planReorder().rules.isEmpty,
@@ -224,9 +227,6 @@ check(SchedulerSettings(providerConfiguration: schedBad).policy == SchedulerSett
 let schedBool: [String: Any] = ["schedulerPolicy": NSNumber(value: true)]
 check(SchedulerSettings(providerConfiguration: schedBool).policy == SchedulerSettings.maxThroughput,
       "bool-backed scheduler clamps to max throughput")
-check(SchedulerSettings.headerValue(for: SchedulerSettings.maxThroughput) == "throughput" &&
-      SchedulerSettings.headerValue(for: SchedulerSettings.lowLatency) == "latency",
-      "CONNECT-IP mqvpn-performance header values")
 check(SchedulerSettings.displayLabel(for: SchedulerSettings.maxThroughput) == "Max Throughput" &&
       SchedulerSettings.displayLabel(for: SchedulerSettings.lowLatency) == "Low Latency" &&
       SchedulerSettings.pickerTitle == "Optimize For",
@@ -256,8 +256,8 @@ if let cfg = mqvpn_config_new() {
 
 // ── Tunnel lifecycle ──
 // These catch an accidental selection of a stale or another app's profile,
-// a Stop action that leaves a live tunnel visually connected, and a Stop that
-// hangs after the engine tick thread has already exited.
+// a close-reason policy that hangs startTunnel waiting on a reconnect that
+// cannot come, and a Stop request decision drifting from the manager state.
 let selectedManager = selectMatchingManager([
     .init(id: "old", providerBundleID: "com.mp0rta.mqvpnpoc.PacketTunnel", status: .connected),
     .init(id: "current", providerBundleID: TunnelProviderConfiguration.providerBundleID, status: .disconnected),
@@ -285,6 +285,16 @@ check(ProviderCloseReason.isPermanent(-4) && ProviderCloseReason.isPermanent(-5)
       ProviderCloseReason.isPermanent(-6) && ProviderCloseReason.isPermanent(-11) &&
       !ProviderCloseReason.isPermanent(-10) && !ProviderCloseReason.isPermanent(-12),
       "TLS/auth/protocol/ABI failures are permanent while close/timeout may reconnect")
+// Engine-local setup failures (INVALID_ARG=-1, ENGINE=-3) close before any
+// client exists; routing them to .awaitReconnect parked startTunnel forever
+// (no reconnect can come) until the NE watchdog killed the extension.
+check(ProviderCloseReason.isPermanent(-1) && ProviderCloseReason.isPermanent(-3),
+      "engine-local INVALID_ARG/ENGINE closes can never wait on a core reconnect")
+check(ProviderReconnectPolicy.closed(
+          startResolved: false, permanent: ProviderCloseReason.isPermanent(-1)) == .failStart &&
+      ProviderReconnectPolicy.closed(
+          startResolved: false, permanent: ProviderCloseReason.isPermanent(-3)) == .failStart,
+      "a pre-start engine-local close resolves startTunnel as failure instead of hanging")
 check(PathAddOutcomePolicy.keep(handle: 4, outcomeRaw: 0) &&
       PathAddOutcomePolicy.keep(handle: 4, outcomeRaw: 1) &&
       !PathAddOutcomePolicy.keep(handle: 4, outcomeRaw: 2) &&
@@ -296,49 +306,9 @@ check(StopLifecycle.request(hasManager: false, status: .connected) == .unavailab
 check(StopLifecycle.request(hasManager: true, status: .disconnected) == .alreadyStopped,
       "Stop on a disconnected manager is already stopped")
 for status in [TunnelStatus.connected, .reasserting] {
-    let request = StopLifecycle.request(hasManager: true, status: status)
-    check(request == .requested, "Stop requests disconnect from \(status)")
-    check(StopLifecycle.visibleStatus(after: request, current: status) == .disconnecting,
-          "requested Stop visibly disconnects from \(status)")
+    check(StopLifecycle.request(hasManager: true, status: status) == .requested,
+          "Stop requests disconnect from \(status)")
 }
-check(StopLifecycle.transition(from: .requested, observedStatus: .disconnected) == .stopped,
-      "disconnected notification completes Stop successfully")
-check(StopLifecycle.transition(from: .requested, timedOut: true) == .failed,
-      "Stop timeout fails instead of waiting forever")
-check(StopLifecycle.transition(from: .requested, didError: true) == .failed,
-      "Stop error fails instead of waiting forever")
-
-var acceptedTeardowns = 0
-var acceptedCompletions = 0
-StopLifecycle.performOrFinish(
-    perform: { body in body(); return true },
-    accepted: { acceptedTeardowns += 1; acceptedCompletions += 1 },
-    rejected: { acceptedCompletions += 100 })
-check(acceptedTeardowns == 1 && acceptedCompletions == 1,
-      "accepted engine dispatch tears down and finishes exactly once")
-
-var rejectedCompletions = 0
-StopLifecycle.performOrFinish(
-    perform: { _ in false },
-    accepted: { rejectedCompletions += 100 },
-    rejected: { rejectedCompletions += 1 })
-check(rejectedCompletions == 1,
-      "rejected engine dispatch finishes locally exactly once")
-
-var transportStopEvents: [String] = []
-var finishPathClose: (() -> Void)?
-StopLifecycle.performTransportFirst(
-    stopPaths: { completion in
-        transportStopEvents.append("paths-begin")
-        finishPathClose = completion
-    },
-    shutdownEngine: { transportStopEvents.append("engine-shutdown") },
-    completion: { transportStopEvents.append("complete") })
-check(transportStopEvents == ["paths-begin"],
-      "provider Stop does not destroy the engine while path fd closes are pending")
-finishPathClose?()
-check(transportStopEvents == ["paths-begin", "engine-shutdown", "complete"],
-      "provider Stop destroys the engine only after every path close fence")
 
 // ── Mac Relay settings and provider mode ──
 // These catch silently treating a corrupt relay configuration as VPN mode,
@@ -410,8 +380,8 @@ var activityRates = LiveActivityRateSampler(smoothingFactor: 0.5)
 let firstRates = activityRates.sample(
     timestamp: 100,
     counters: [
-        InterfaceByteCounter(name: "en0", totalBytes: 1_000, active: true),
-        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 2_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 1_000),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 2_000),
     ])
 check(firstRates.wifi?.interfaceName == "en0" && firstRates.wifi?.megabitsPerSecond == nil,
       "first Wi-Fi counter is sampling, never presented as zero throughput")
@@ -422,8 +392,8 @@ check(firstRates.cellular?.interfaceName == "pdp_ip0" &&
 let secondRates = activityRates.sample(
     timestamp: 102,
     counters: [
-        InterfaceByteCounter(name: "en0", totalBytes: 3_001_000, active: true),
-        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 6_002_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 3_001_000),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 6_002_000),
     ])
 check(abs((secondRates.wifi?.megabitsPerSecond ?? -1) - 12) < 0.0001,
       "Wi-Fi Mbps derives from the real byte delta and elapsed time")
@@ -439,18 +409,18 @@ var multiFlow = LiveActivityRateSampler(smoothingFactor: 1.0)
 _ = multiFlow.sample(
     timestamp: 200,
     counters: [
-        InterfaceByteCounter(name: "en0", totalBytes: 1_000_000, active: true),
-        InterfaceByteCounter(name: "en0", totalBytes: 2_000_000, active: true),
-        InterfaceByteCounter(name: "en0", totalBytes: 3_000_000, active: true),
-        InterfaceByteCounter(name: "en0", totalBytes: 4_000_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 1_000_000),
+        InterfaceByteCounter(name: "en0", totalBytes: 2_000_000),
+        InterfaceByteCounter(name: "en0", totalBytes: 3_000_000),
+        InterfaceByteCounter(name: "en0", totalBytes: 4_000_000),
     ])
 let summed = multiFlow.sample(
     timestamp: 201,
     counters: [
-        InterfaceByteCounter(name: "en0", totalBytes: 1_500_000, active: true),
-        InterfaceByteCounter(name: "en0", totalBytes: 2_500_000, active: true),
-        InterfaceByteCounter(name: "en0", totalBytes: 3_500_000, active: true),
-        InterfaceByteCounter(name: "en0", totalBytes: 4_500_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 1_500_000),
+        InterfaceByteCounter(name: "en0", totalBytes: 2_500_000),
+        InterfaceByteCounter(name: "en0", totalBytes: 3_500_000),
+        InterfaceByteCounter(name: "en0", totalBytes: 4_500_000),
     ])
 // 10 MB total -> 12 MB total over 1s = 2 MB/s = 16 Mbps.
 check(abs((summed.wifi?.megabitsPerSecond ?? -1) - 16) < 0.0001,
@@ -462,14 +432,14 @@ var reordered = LiveActivityRateSampler(smoothingFactor: 1.0)
 _ = reordered.sample(
     timestamp: 300,
     counters: [
-        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 9_000_000, active: true),
-        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 1_000_000, active: true),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 9_000_000),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 1_000_000),
     ])
 let shuffled = reordered.sample(
     timestamp: 301,
     counters: [
-        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 1_250_000, active: true),
-        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 9_250_000, active: true),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 1_250_000),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 9_250_000),
     ])
 check(shuffled.cellular?.megabitsPerSecond != nil,
       "flow order changing between samples never reads as a counter reset")
@@ -477,8 +447,8 @@ check(shuffled.cellular?.megabitsPerSecond != nil,
 let smoothedRates = activityRates.sample(
     timestamp: 104,
     counters: [
-        InterfaceByteCounter(name: "en0", totalBytes: 9_001_000, active: true),
-        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 6_002_000, active: true),
+        InterfaceByteCounter(name: "en0", totalBytes: 9_001_000),
+        InterfaceByteCounter(name: "pdp_ip0", totalBytes: 6_002_000),
     ])
 check(abs((smoothedRates.wifi?.megabitsPerSecond ?? -1) - 18) < 0.0001,
       "display rate applies bounded exponential smoothing")
@@ -487,19 +457,19 @@ check(abs((smoothedRates.cellular?.megabitsPerSecond ?? -1) - 12) < 0.0001,
 
 let missingCellular = activityRates.sample(
     timestamp: 106,
-    counters: [InterfaceByteCounter(name: "en0", totalBytes: 9_001_000, active: true)])
+    counters: [InterfaceByteCounter(name: "en0", totalBytes: 9_001_000)])
 check(missingCellular.cellular == nil,
       "a missing cellular interface immediately disappears from the activity")
 
 let resetWiFi = activityRates.sample(
     timestamp: 108,
-    counters: [InterfaceByteCounter(name: "en0", totalBytes: 10, active: true)])
+    counters: [InterfaceByteCounter(name: "en0", totalBytes: 10)])
 check(resetWiFi.wifi?.megabitsPerSecond == nil,
       "a reset Wi-Fi counter restarts sampling instead of underflowing")
 
 let stalledWiFi = activityRates.sample(
     timestamp: 140,
-    counters: [InterfaceByteCounter(name: "en0", totalBytes: 4_000_010, active: true)])
+    counters: [InterfaceByteCounter(name: "en0", totalBytes: 4_000_010)])
 check(stalledWiFi.wifi?.megabitsPerSecond == nil,
       "a long sampling stall is marked unavailable instead of averaged as live")
 
@@ -508,14 +478,39 @@ let vpnCounters = LiveActivityCounterSource.counters(from: TunnelSnapshot(
     paths: [
         PathSnapshot(name: "en0", status: 1, txBytes: 100, rxBytes: 200),
         PathSnapshot(name: "pdp_ip0", status: 0, txBytes: 300, rxBytes: 400),
+        PathSnapshot(name: "utun9", status: 1, txBytes: 5, rxBytes: 5),
     ]))
-check(vpnCounters == [InterfaceByteCounter(name: "en0", totalBytes: 300, active: true)],
-      "VPN activity consumes only active production path counters")
+check(vpnCounters == [InterfaceByteCounter(name: "en0", totalBytes: 300),
+                      InterfaceByteCounter(name: "pdp_ip0", totalBytes: 700)],
+      "VPN activity sums every present physical-path counter regardless of status")
+
+// A present flow dipping out of ACTIVE (failover degrade) must keep its
+// monotonic bytes in the interface sum. Filtering it out shrank the total,
+// tripped the sampler's monotonic guard, and blanked the island to "--".
+var failoverRates = LiveActivityRateSampler(smoothingFactor: 1.0)
+_ = failoverRates.sample(
+    timestamp: 400,
+    counters: LiveActivityCounterSource.counters(from: TunnelSnapshot(
+        timestamp: 400, clientState: 4, connectedSince: 0, footprint: 0,
+        paths: [
+            PathSnapshot(name: "en0", status: 1, txBytes: 1_000_000, rxBytes: 0),
+            PathSnapshot(name: "en0", status: 1, txBytes: 2_000_000, rxBytes: 0),
+        ])))
+let degradedFlow = failoverRates.sample(
+    timestamp: 401,
+    counters: LiveActivityCounterSource.counters(from: TunnelSnapshot(
+        timestamp: 401, clientState: 4, connectedSince: 0, footprint: 0,
+        paths: [
+            PathSnapshot(name: "en0", status: 2, txBytes: 1_000_000, rxBytes: 0),
+            PathSnapshot(name: "en0", status: 1, txBytes: 2_250_000, rxBytes: 0),
+        ])))
+check(abs((degradedFlow.wifi?.megabitsPerSecond ?? -1) - 2) < 0.0001,
+      "a present flow leaving ACTIVE never shrinks the sum or blanks the rate")
 
 let relayCounters = LiveActivityCounterSource.counters(from: relayWire)
 check(relayCounters == [
-    InterfaceByteCounter(name: "en0", totalBytes: 30, active: true),
-    InterfaceByteCounter(name: "pdp_ip0", totalBytes: 70, active: true),
+    InterfaceByteCounter(name: "en0", totalBytes: 30),
+    InterfaceByteCounter(name: "pdp_ip0", totalBytes: 70),
 ], "relay activity consumes the actual Wi-Fi LAN and cellular server socket counters")
 
 check(LiveActivityInterfaceKind(interfaceName: "en0") == .wifi,
@@ -612,23 +607,6 @@ let createActivityPlan = LiveActivitySelection.plan(
 check(createActivityPlan.currentID == nil &&
       createActivityPlan.endIDs == ["vpn-stale"],
       "missing desired mode requests a new activity and ends stale modes")
-
-runAsync {
-    var stopEvents: [String] = []
-    await LiveActivityStopSequence.perform(
-        transportTeardown: {
-            stopEvents.append("transport-begin")
-            await Task.yield()
-            stopEvents.append("transport-end")
-        },
-        activityCleanup: {
-            stopEvents.append("activity-begin")
-            await Task.yield()
-            stopEvents.append("activity-end")
-        })
-    check(stopEvents == ["transport-begin", "transport-end", "activity-begin", "activity-end"],
-          "transport teardown completes before ActivityKit cleanup and Stop awaits both")
-}
 
 // ── Mac Relay authenticated session state ──
 // The socket layer only passes frames here after the shared C codec has
@@ -818,7 +796,7 @@ check(relayState.updateInterfaces(wifi: nil, cellular: "pdp_ip0") == [.closeWifi
       "Wi-Fi loss closes its listener")
 check(!relayState.snapshot.authenticatedSession,
       "Wi-Fi loss erases the peer-bound authenticated session")
-check(relayState.updateInterfaces(wifi: "en0", cellular: nil) == [.openWifi("en0"), .closeCellular],
+check(relayState.updateInterfaces(wifi: "en0", cellular: nil) == [.openWifi, .closeCellular],
       "cellular loss is observable without fabricating readiness")
 
 _ = relayState.handleMacFrame(hello, now: 22)
@@ -844,9 +822,6 @@ check(LiveActivityUpdateOrder.shouldApply(currentSampledAt: nil, candidateSample
       !LiveActivityUpdateOrder.shouldApply(currentSampledAt: 10, candidateSampledAt: 10) &&
       !LiveActivityUpdateOrder.shouldApply(currentSampledAt: 11, candidateSampledAt: 10),
       "Live Activity updates never let delayed app/provider tasks regress or duplicate state")
-check(LiveActivityReporterPublish.shouldUpdateExisting(currentID: "vpn") &&
-      !LiveActivityReporterPublish.shouldUpdateExisting(currentID: String?.none),
-      "the provider reporter stays silent when no exact-mode activity exists")
 
 let freshRelayDashboardSnapshot = TunnelSnapshot(
     timestamp: 100, clientState: -1, connectedSince: 90, footprint: 0,

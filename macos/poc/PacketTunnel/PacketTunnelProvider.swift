@@ -33,7 +33,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private var relayDiscoveryInFlight = false
     private var relayTransitionInFlight = false
     private var startContinuation: CheckedContinuation<Void, Error>?
-    private var settingsApplyInFlight = false
+    /// Count, not a flag: a reconnect re-apply may overlap a relay-attach
+    /// apply, and the first completion must not wake Stop's settings waiters
+    /// while the second is still installing routes.
+    private var settingsAppliesInFlight = 0
     private var settingsApplyWaiters: [() -> Void] = []
     private var startResolved = false
     private var transportStopTask: Task<Void, Never>?
@@ -66,12 +69,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         guard let server = ServerSettings(providerConfiguration: rawConfig) else {
             throw Self.error(10, "server not configured")
         }
-        let relaySettings: MacRelaySettings?
-        do {
-            relaySettings = try MacRelaySettings.startConfiguration(from: rawConfig)
-        } catch {
-            throw error
-        }
+        let relaySettings = try MacRelaySettings.startConfiguration(from: rawConfig)
         guard let resolvedServer = await Task.detached(priority: .userInitiated, operation: {
             resolveServer(server.host, server.port)
         }).value, let serverIPv4 = resolvedServer.ipString else {
@@ -96,12 +94,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                 self.relaySettings = relaySettings
                 _ = self.lifecycle.begin(nowMs: Self.nowMs())
                 self.startRuntime(server: server, serverIPv4: serverIPv4,
+                                  resolvedServer: resolvedServer,
                                   relaySettings: relaySettings)
             }
         }
     }
 
     private func startRuntime(server: ServerSettings, serverIPv4: String,
+                              resolvedServer: ResolvedServerAddress,
                               relaySettings: MacRelaySettings?) {
         let engine = MqvpnEngine()
         let direct = PathBinder(engine: engine, interfaceTypes: [.wifi, .wiredEthernet])
@@ -148,7 +148,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                      reorder: ReorderSettings(providerConfiguration: providerConfiguration()) ?? .disabled,
                      hybrid: HybridSettings(providerConfiguration: providerConfiguration()) ?? .disabled,
                      scheduler: SchedulerSettings(providerConfiguration: providerConfiguration()),
-                     serverAddr: serverAddress!)
+                     serverAddr: resolvedServer)
 
         direct.start()
         armStartupTimeout()
@@ -191,20 +191,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         guard relaySettings != nil, !lifecycle.isStopping,
               !relayDiscoveryInFlight else { return }
         relayDiscoveryInFlight = true
-        let lookup = Task.detached(priority: .utility) { () -> DiscoveredRelayAddress? in
-            guard let endpoint = MacRelayBonjourResolver.resolve(timeout: 1.5),
-                  let address = resolveRelayEndpoint(endpoint.host, endpoint.port),
-                  let ip = address.ipString,
-                  let chosen = MacRelayDiscovery.choose([
-                      MacRelayEndpoint(host: ip, port: endpoint.port)
-                  ])
-            else { return nil }
-            return DiscoveredRelayAddress(endpoint: chosen, address: address)
-        }
-        Task { [weak self] in
-            let result = await lookup.value
+        // One detached task keeps the blocking Bonjour/getaddrinfo work off
+        // the lifecycle queue and hops its own result back.
+        Task.detached(priority: .utility) { [weak self] in
+            let discovered: DiscoveredRelayAddress?
+            if let endpoint = MacRelayBonjourResolver.resolve(timeout: 1.5),
+               let address = resolveRelayEndpoint(endpoint.host, endpoint.port),
+               let ip = address.ipString,
+               let chosen = MacRelayDiscovery.choose([
+                   MacRelayEndpoint(host: ip, port: endpoint.port)
+               ]) {
+                discovered = DiscoveredRelayAddress(endpoint: chosen, address: address)
+            } else {
+                discovered = nil
+            }
             self?.lifecycleQueue.async { [weak self] in
-                self?.relayDiscoveryCompleted(result)
+                self?.relayDiscoveryCompleted(discovered)
             }
         }
     }
@@ -226,32 +228,46 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     /// then create the LAN socket. This keeps HELLO/ACK off the tunnel even
     /// when the iPhone appears after the default route is already installed.
     private func prepareRelayRouteAndAttach(_ discovered: DiscoveredRelayAddress) {
-        guard !settingsApplyInFlight else { return }
+        guard settingsAppliesInFlight == 0 else { return }
         relayTransitionInFlight = true
         guard let info = currentTunnelInfo, let serverIPv4 = resolvedServerIPv4,
               let relayIP = discovered.address.ipString else {
             replaceRelayTransport(with: discovered)
             return
         }
-        settingsApplyInFlight = true
         let settings = Self.makeSettings(from: info, serverIPv4: serverIPv4,
                                          relayIPv4: relayIP)
+        applyTunnelNetworkSettings(settings) { [weak self] error in
+            guard let self, !self.lifecycle.isStopping else { return }
+            guard error == nil else {
+                self.relayTransitionInFlight = false
+                self.snapshotCache?.updateLifecycle(
+                    reasserting: self.reasserting,
+                    error: "iPhone relay route update failed")
+                return
+            }
+            self.replaceRelayTransport(with: discovered)
+        }
+    }
+
+    /// Lifecycle-queue-only funnel for every `setTunnelNetworkSettings`
+    /// apply (start, reconnect re-apply, relay route attach). The in-flight
+    /// count is what `waitForSettingsApplication()` blocks Stop on; an apply
+    /// that bypassed it could still be installing a default route while Stop
+    /// clears settings. `completion` runs on the lifecycle queue.
+    private func applyTunnelNetworkSettings(_ settings: NEPacketTunnelNetworkSettings,
+                                            completion: @escaping (Error?) -> Void) {
+        settingsAppliesInFlight += 1
         setTunnelNetworkSettings(settings) { [weak self] error in
             self?.lifecycleQueue.async {
                 guard let self else { return }
-                self.settingsApplyInFlight = false
-                let waiters = self.settingsApplyWaiters
-                self.settingsApplyWaiters.removeAll()
-                waiters.forEach { $0() }
-                guard !self.lifecycle.isStopping else { return }
-                guard error == nil else {
-                    self.relayTransitionInFlight = false
-                    self.snapshotCache?.updateLifecycle(
-                        reasserting: self.reasserting,
-                        error: "iPhone relay route update failed")
-                    return
+                self.settingsAppliesInFlight -= 1
+                if self.settingsAppliesInFlight == 0 {
+                    let waiters = self.settingsApplyWaiters
+                    self.settingsApplyWaiters.removeAll()
+                    waiters.forEach { $0() }
                 }
-                self.replaceRelayTransport(with: discovered)
+                completion(error)
             }
         }
     }
@@ -311,14 +327,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             // may have been assigned a different tunnel address.
             let settings = Self.makeSettings(from: info, serverIPv4: serverIPv4,
                                              relayIPv4: relayAddress?.ipString)
-            setTunnelNetworkSettings(settings) { [weak self] error in
-                self?.lifecycleQueue.async {
-                    guard let self, !self.lifecycle.isStopping else { return }
-                    if self.lifecycle.reconnectSettingsApplied(error: error != nil)
-                        == .completeReconnect {
-                        self.refreshRelayRouteAfterSettings { [weak self] in
-                            self?.lifecycleQueue.async { self?.completeReconnect() }
-                        }
+            applyTunnelNetworkSettings(settings) { [weak self] error in
+                guard let self, !self.lifecycle.isStopping else { return }
+                if self.lifecycle.reconnectSettingsApplied(error: error != nil)
+                    == .completeReconnect {
+                    self.refreshRelayRouteAfterSettings { [weak self] in
+                        self?.lifecycleQueue.async { self?.completeReconnect() }
                     }
                 }
             }
@@ -340,33 +354,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         }
         let settings = Self.makeSettings(from: info, serverIPv4: serverIPv4,
                                          relayIPv4: relayAddress?.ipString)
-        settingsApplyInFlight = true
-        setTunnelNetworkSettings(settings) { [weak self] error in
-            self?.lifecycleQueue.async {
-                guard let self else { return }
-                self.settingsApplyInFlight = false
-                let waiters = self.settingsApplyWaiters
-                self.settingsApplyWaiters.removeAll()
-                waiters.forEach { $0() }
-                guard !self.lifecycle.isStopping, !self.startResolved else {
-                    // If an earlier bounded wait gave up, this completion may
-                    // be the one that actually installed settings. Queue a
-                    // final explicit clear so a late success cannot retain a
-                    // default route after Start/Stop has terminated.
-                    if error == nil {
-                        Task { await self.clearTunnelNetworkSettings() }
-                    }
-                    return
+        applyTunnelNetworkSettings(settings) { [weak self] error in
+            guard let self else { return }
+            guard !self.lifecycle.isStopping, !self.startResolved else {
+                // If an earlier bounded wait gave up, this completion may
+                // be the one that actually installed settings. Queue a
+                // final explicit clear so a late success cannot retain a
+                // default route after Start/Stop has terminated.
+                if error == nil {
+                    Task { await self.clearTunnelNetworkSettings() }
                 }
-                let action = self.lifecycle.networkSettingsApplied(
-                    error: error != nil, activePathCount: self.lastPathCount)
-                if action == .completeStart {
-                    self.refreshRelayRouteAfterSettings { [weak self] in
-                        self?.lifecycleQueue.async { self?.completeStart() }
-                    }
-                } else if action == .failStart {
-                    self.failStart(error ?? Self.error(16, "failed to apply tunnel settings"))
+                return
+            }
+            let action = self.lifecycle.networkSettingsApplied(
+                error: error != nil, activePathCount: self.lastPathCount)
+            if action == .completeStart {
+                self.refreshRelayRouteAfterSettings { [weak self] in
+                    self?.lifecycleQueue.async { self?.completeStart() }
                 }
+            } else if action == .failStart {
+                self.failStart(error ?? Self.error(16, "failed to apply tunnel settings"))
             }
         }
     }
@@ -592,11 +599,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     }
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
-        let stop = await withCheckedContinuation {
-            (continuation: CheckedContinuation<(Task<Void, Never>, CheckedContinuation<Void, Error>?, Bool), Never>) in
+        let (stopTask, pendingStart) = await withCheckedContinuation {
+            (continuation: CheckedContinuation<(Task<Void, Never>?, CheckedContinuation<Void, Error>?), Never>) in
             lifecycleQueue.async { [weak self] in
                 guard let self else {
-                    continuation.resume(returning: (Task {}, nil, false))
+                    // Provider already deallocated: nothing to tear down and
+                    // no Start caller to cancel, so there is no work to await.
+                    continuation.resume(returning: (nil, nil))
                     return
                 }
                 let pendingStart: CheckedContinuation<Void, Error>?
@@ -611,14 +620,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                     pendingStart = self.startContinuation
                     self.startContinuation = nil
                 }
-                let needsPreclear = pendingStart != nil
                 continuation.resume(returning: (
-                    self.ensureTransportStopTask(clearNetworkSettingsFirst: needsPreclear),
-                    pendingStart, needsPreclear))
+                    self.ensureTransportStopTask(clearNetworkSettingsFirst: pendingStart != nil),
+                    pendingStart))
             }
         }
-        await stop.0.value
-        stop.1?.resume(throwing: CancellationError())
+        await stopTask?.value
+        pendingStart?.resume(throwing: CancellationError())
     }
 
     /// Lifecycle-queue-only shared teardown. Repeated Stop calls and a Start
@@ -652,20 +660,35 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     /// callback path to be gone before direct sockets, snapshot timer, and
     /// core shutdown. That order prevents a late logical callback from using a
     /// closed/reused UDP fd.
+    ///
+    /// Every provider-field access here hops to `lifecycleQueue`: the
+    /// packetFlow read loop and the lifecycle timer handlers read `engine`/
+    /// `snapshotCache` concurrently with this Task, and `@unchecked Sendable`
+    /// means nothing orders a Task-executor write against those reads (the
+    /// class already treats `snapshotReader` this way via `readerLock`).
     private func stopTransport() async {
-        relaySession.cancelMonitor()
-        let relay = relaySession.takeBinderForTeardown()
+        let (relay, engine, direct, snapshots) = await withCheckedContinuation {
+            (continuation: CheckedContinuation<
+                (MacRelayBinder?, MqvpnEngine?, PathBinder?, SnapshotCache?), Never>) in
+            lifecycleQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: (nil, nil, nil, nil))
+                    return
+                }
+                self.relaySession.cancelMonitor()
+                continuation.resume(returning: (self.relaySession.takeBinderForTeardown(),
+                                                self.engine, self.directBinder,
+                                                self.snapshotCache))
+            }
+        }
         if let relay {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 relay.stop { continuation.resume() }
             }
         }
-        let engine = engine
-        let direct = directBinder
-        let snapshots = snapshotCache
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             guard let engine else { continuation.resume(); return }
-            let queued = engine.perform { [weak self] in
+            let queued = engine.perform {
                 engine.onTunnelClosed = nil
                 engine.onPathEvent = nil
                 engine.onTunOutput = nil
@@ -675,22 +698,27 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                     // Only then may core/snapshot destruction run.
                     snapshots?.stop()
                     engine.shutdown()
-                    self?.setSnapshotReader(nil)
                     continuation.resume()
                 }
             }
             if !queued { continuation.resume() }
         }
-        self.engine = nil
-        self.directBinder = nil
-        self.snapshotCache = nil
-        self.serverAddress = nil
-        self.relayAddress = nil
-        self.relayEndpoint = nil
-        self.relaySettings = nil
-        self.currentTunnelInfo = nil
-        self.resolvedServerIPv4 = nil
-        setSnapshotReader(nil)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lifecycleQueue.async { [weak self] in
+                defer { continuation.resume() }
+                guard let self else { return }
+                self.engine = nil
+                self.directBinder = nil
+                self.snapshotCache = nil
+                self.serverAddress = nil
+                self.relayAddress = nil
+                self.relayEndpoint = nil
+                self.relaySettings = nil
+                self.currentTunnelInfo = nil
+                self.resolvedServerIPv4 = nil
+                self.setSnapshotReader(nil)
+            }
+        }
         macProviderLog.notice("STOP_COMPLETE")
     }
 
@@ -701,7 +729,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private func waitForSettingsApplication() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             lifecycleQueue.async { [weak self] in
-                guard let self, self.settingsApplyInFlight else {
+                guard let self, self.settingsAppliesInFlight > 0 else {
                     continuation.resume()
                     return
                 }
@@ -753,11 +781,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                              serverIPv4: String,
                              relayIPv4: String?) -> NEPacketTunnelNetworkSettings {
         let address = "\(info.assigned_ip.0).\(info.assigned_ip.1).\(info.assigned_ip.2).\(info.assigned_ip.3)"
-        let relayPeer = relayIPv4
-        let relayIPv4 = relayPeer.flatMap {
+        // Discovery may hand this an IPv6 relay endpoint; the IPv4 exclusion
+        // plan only accepts a dotted quad.
+        let validatedRelayIPv4 = relayIPv4.flatMap {
             MacRelayDiscovery.isIPv4($0) ? $0 : nil
         }
-        let relayLAN = relayIPv4.flatMap {
+        let relayLAN = validatedRelayIPv4.flatMap {
             MacLANInterfaceSelector.onLinkRoute(relayIPv4: $0,
                                                 candidates: MacLANInterfaceEnumerator.candidates())
         }
@@ -765,7 +794,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                                           assignedPrefix: info.assigned_prefix,
                                           mtu: Int(info.mtu),
                                           serverIPv4: serverIPv4,
-                                          relayIPv4: relayIPv4,
+                                          relayIPv4: validatedRelayIPv4,
                                           relayLAN: relayLAN)
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverIPv4)
         let ipv4 = NEIPv4Settings(addresses: [plan.assignedAddress], subnetMasks: [plan.subnetMask])
@@ -778,6 +807,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         settings.ipv4Settings = ipv4
         settings.mtu = NSNumber(value: plan.mtu)
         settings.dnsSettings = NEDNSSettings(servers: plan.dnsServers)
+        // Deliberately no NEIPv6Settings: the overlay is IPv4-only. Claiming
+        // ::/0 blackholes AAAA traffic and, worse, steals the iPhone ULA
+        // relay hop after HELLO/ACK. IPv6 stays on the LAN.
         return settings
     }
 

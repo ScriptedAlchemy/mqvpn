@@ -20,7 +20,9 @@
 #  include <basetsd.h>
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
-typedef SSIZE_T ssize_t;
+#  ifdef _MSC_VER
+typedef SSIZE_T ssize_t; /* MinGW ships ssize_t; only MSVC lacks it. */
+#  endif
 #else
 #  include <sys/types.h>  /* ssize_t */
 #  include <sys/socket.h> /* socklen_t, struct sockaddr */

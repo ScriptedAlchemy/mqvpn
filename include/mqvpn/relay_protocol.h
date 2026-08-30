@@ -11,6 +11,10 @@
 extern "C" {
 #endif
 
+/* Deliberately duplicates libmqvpn.h's MQVPN_API: this header is consumed
+ * standalone by the iPhone/macOS relay apps (via their bridging headers,
+ * with no libmqvpn dependency), so it must not pull in the full public
+ * header for one macro. */
 #ifdef _WIN32
 #  define MQVPN_RELAY_API __declspec(dllexport)
 #else

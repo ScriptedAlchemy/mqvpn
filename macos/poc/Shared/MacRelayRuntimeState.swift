@@ -100,8 +100,10 @@ struct MacRelayRuntimeState {
 
     var canEncode: Bool { key != nil && started && sessionID != nil }
 
+    /// Reopen and idle recovery must keep the iPhone's live lease. A new
+    /// random session is rejected as `.session` until that 15s lease expires.
     func resumeSessionID() -> UInt64? {
-        MacRelaySessionRenewal.resumeSessionID(current: sessionID, last: lastSessionID)
+        sessionID ?? lastSessionID
     }
 
     var snapshot: MacRelayRuntimeSnapshot {
@@ -271,9 +273,11 @@ struct MacRelayRuntimeState {
         return nowMs - lastProbeMs >= Self.idleProbeMs
     }
 
+    /// HELLO is the path-validation analogue. After settings apply or a
+    /// transport rebind, send one immediately so the iPhone can migrate the
+    /// peer before idle expiry. A hard-failed or unstarted relay must not.
     func shouldHelloAfterRouteRefresh() -> Bool {
-        sessionID != nil &&
-            MacRelaySourcePin.shouldHelloAfterRouteRefresh(started: started, hardFailure: hardFailure)
+        sessionID != nil && started && !hardFailure
     }
 
     @discardableResult
@@ -305,11 +309,8 @@ struct MacRelayRuntimeState {
     }
 
     mutating func stop() {
-        if var key {
-            key.resetBytes(in: 0..<key.count)
-            self.key = key
-        }
-        key = nil
+        // No in-place key scrub: Data's copy-on-write means resetBytes would
+        // zero a fresh copy while the original key bytes are freed unzeroed.
         self = MacRelayRuntimeState(key: Data(), idleTimeoutMs: idleTimeoutMs)
     }
 
@@ -329,49 +330,10 @@ struct MacRelayRuntimeState {
 }
 
 enum MacRelaySessionRenewal {
-    /// Reopen and idle recovery must keep the iPhone's live lease. A new
-    /// random session is rejected as `.session` until that 15s lease expires.
-    static func resumeSessionID(current: UInt64?, last: UInt64?) -> UInt64? {
-        current ?? last
-    }
-
+    /// Continuing the same lease keeps the transmit sequence and replay
+    /// window; a genuinely new session must reset both.
     static func shouldResetTransmitSequence(resuming: UInt64, previous: UInt64?) -> Bool {
         previous != resuming
-    }
-}
-
-enum MacRelaySendRecovery {
-    /// After Network Extension installs the default route, a connected UDP
-    /// socket can fail with a cached unreachable route. Refresh that route on
-    /// the same fd; do not treat it as a reason to allocate a new source port.
-    static func shouldRefreshRoute(_ code: Int32) -> Bool {
-        code == ENETUNREACH || code == EHOSTUNREACH || code == EADDRNOTAVAIL
-    }
-}
-
-enum MacRelaySourcePin {
-    static func shouldBindExactSource(pinnedAddressLength: socklen_t) -> Bool {
-        pinnedAddressLength > 0
-    }
-
-    /// The first successful connect is the LAN source. Later getsockname
-    /// after default routes can report utun; that must not replace the pin.
-    static func shouldReplacePin(existingAddressLength: socklen_t,
-                                 newAddressLength: socklen_t) -> Bool {
-        existingAddressLength == 0 && newAddressLength > 0
-    }
-
-    /// HELLO is the path-validation analogue. After settings apply, send one
-    /// immediately so the iPhone can migrate the peer before idle expiry.
-    static func shouldHelloAfterRouteRefresh(started: Bool, hardFailure: Bool) -> Bool {
-        started && !hardFailure
-    }
-
-    /// Exact-source bind can fail with EADDRNOTAVAIL after a default-route
-    /// change. Clear the stored address so reopen can fall back to port-only.
-    static func shouldClearPinAfterBindFailure(exactBindAttempted: Bool,
-                                               bindSucceeded: Bool) -> Bool {
-        exactBindAttempted && !bindSucceeded
     }
 }
 
@@ -381,15 +343,5 @@ enum MacRelayEndpointSafety {
         return localIPv4Addresses.contains {
             $0.trimmingCharacters(in: .whitespacesAndNewlines) == normalized
         }
-    }
-}
-
-/// Descriptor numbers are reusable. A read handler captured for an old socket
-/// is allowed to run after cancellation, so it must match both identity and a
-/// monotonically increasing transport generation before touching relay state.
-enum MacRelayTransportGeneration {
-    static func accepts(capturedGeneration: UInt64, currentGeneration: UInt64,
-                        capturedFD: Int32, currentFD: Int32, stopped: Bool) -> Bool {
-        !stopped && capturedGeneration == currentGeneration && capturedFD == currentFD
     }
 }

@@ -179,11 +179,13 @@ enum RelayDropReason: Equatable {
 /// Effects emitted by the pure state machine and executed by RelayEngine on
 /// its serial queue. The server-forwarding action intentionally contains no
 /// address: the production socket is connected once to the configured server,
-/// making arbitrary destinations unrepresentable.
+/// making arbitrary destinations unrepresentable. Open actions carry no
+/// interface name either — RelayEngine binds the probed NWInterface it
+/// already holds, so a name here would be an ignored second source of truth.
 enum RelayStateAction: Equatable {
-    case openWifi(String)
+    case openWifi
     case closeWifi
-    case openCellular(String)
+    case openCellular
     case closeCellular
     case sendHelloAck(sessionID: UInt64)
     case sendPathChallenge(nonce: Data)
@@ -234,12 +236,12 @@ struct RelaySessionState {
             if wifiInterface != nil { actions.append(.closeWifi) }
             wifiInterface = wifi
             clearSession()
-            if let wifi { actions.append(.openWifi(wifi)) }
+            if wifi != nil { actions.append(.openWifi) }
         }
         if cellular != cellularInterface {
             if cellularInterface != nil { actions.append(.closeCellular) }
             cellularInterface = cellular
-            if let cellular { actions.append(.openCellular(cellular)) }
+            if cellular != nil { actions.append(.openCellular) }
         }
         return actions
     }

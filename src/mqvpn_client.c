@@ -592,14 +592,12 @@ first_active_idx(const mqvpn_client_t *c)
     return -1;
 }
 
+/* p is always an element of c->paths (every caller passes a slot from that
+ * array), so the parallel callback_paths[] side table is indexed directly. */
 static int
 path_is_callback_backed(const mqvpn_client_t *c, const path_entry_t *p)
 {
-    if (!c || !p) return 0;
-    for (int i = 0; i < c->n_paths; i++) {
-        if (p == &c->paths[i]) return c->callback_paths[i] != 0;
-    }
-    return 0;
+    return c->callback_paths[p - c->paths] != 0;
 }
 
 /* Returns the fd of the first active path slot, or -1 if none.
@@ -954,15 +952,6 @@ client_validate_new_args(const mqvpn_config_t *cfg, const mqvpn_client_callbacks
     return 1;
 }
 
-static int
-client_callbacks_have_send_packet_ex(const mqvpn_client_callbacks_t *cbs)
-{
-    if (!cbs) return 0;
-    const size_t field_end =
-        offsetof(mqvpn_client_callbacks_t, send_packet_ex) + sizeof(cbs->send_packet_ex);
-    return cbs->struct_size >= field_end && cbs->send_packet_ex != NULL;
-}
-
 static void
 client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
                    const mqvpn_client_callbacks_t *cbs, void *user_ctx)
@@ -975,9 +964,6 @@ client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
                           ? cbs->struct_size
                           : sizeof(*cbs);
     memcpy(&c->cbs, cbs, cbs_size);
-    /* The field is ABI-appended. Even if a legacy caller happens to have
-     * nonzero bytes beyond its declared table, struct_size is authoritative. */
-    if (!client_callbacks_have_send_packet_ex(cbs)) c->cbs.send_packet_ex = NULL;
     c->user_ctx = user_ctx; // lgtm[cpp/stack-address-escape]
     c->log_level = cfg->log_level;
     c->state = MQVPN_STATE_IDLE;

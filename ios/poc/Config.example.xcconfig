@@ -10,6 +10,8 @@ MQVPN_POC_AUTH_KEY = changeme
 // 1 = skip TLS certificate verification (test-server only)
 MQVPN_POC_TLS_INSECURE = 1
 // HTTPS URL fetched through the tunnel for the multipath load gate.
+// TEST-NET placeholder (RFC 5737) — point it at a large file on a server
+// you control (or one that explicitly permits load testing).
 // NOTE: "//" starts a comment ANYWHERE on an xcconfig line — URLs must
 // break it with an empty substitution, or the value truncates to "http:".
-MQVPN_POC_BULK_URL = https:/$()/proof.ovh.net/files/100Mb.dat
+MQVPN_POC_BULK_URL = https:/$()/192.0.2.1/files/100Mb.dat

@@ -266,7 +266,7 @@ run_pfctl_capture(const char *const argv[], char *out, size_t outlen)
  * this is a syntax simplification, not a policy change.
  *
  * Returns 0 on success, -1 if `buf` was too small (defensive; ~1024 bytes
- * is generous for the <= 8 lines this ever produces).
+ * is generous for the <= 9 lines this ever produces).
  */
 static int
 build_pf_rules(const platform_ctx_t *p, char *buf, size_t buflen)
@@ -299,12 +299,12 @@ build_pf_rules(const platform_ctx_t *p, char *buf, size_t buflen)
         APPEND("pass out quick inet proto udp to %s port = %d\n", p->server_ip_str,
                p->server_port);
     if (p->relay_enabled) {
-        if (p->relay_iface[0] != '\0')
-            APPEND("pass out quick on %s inet proto udp to %s port = %d\n",
-                   p->relay_iface, p->relay_ip, p->relay_port);
-        else
-            APPEND("pass out quick inet proto udp to %s port = %d\n", p->relay_ip,
-                   p->relay_port);
+        /* relay_iface is never empty here: darwin_setup_relay_route runs
+         * fail-closed before connect and fills it from route discovery,
+         * and setup_killswitch is only reached at tunnel-up. An unscoped
+         * relay pass rule therefore has no reachable caller. */
+        APPEND("pass out quick on %s inet proto udp to %s port = %d\n", p->relay_iface,
+               p->relay_ip, p->relay_port);
     }
     APPEND("block drop out quick inet\n");
 

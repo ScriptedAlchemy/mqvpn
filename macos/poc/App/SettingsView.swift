@@ -27,7 +27,7 @@ struct SettingsView: View {
         _pskText = State(initialValue: server.authKey)
         _insecure = State(initialValue: server.insecure)
         let relay = controller.relaySettings ??
-            MacRelaySettings(enabled: false, host: "", port: 5443, keyBase64: "")
+            MacRelaySettings(enabled: false, keyBase64: "")
         _relayEnabled = State(initialValue: relay.enabled)
         _relayKeyText = State(initialValue: relay.keyBase64)
         _hybridEnabled = State(initialValue: controller.hybridSettings.enabled)
@@ -42,10 +42,7 @@ struct SettingsView: View {
     }
 
     private var relayDraft: MacRelaySettings {
-        MacRelaySettings(enabled: relayEnabled,
-                         host: "",
-                         port: 5443,
-                         keyBase64: relayKeyText)
+        MacRelaySettings(enabled: relayEnabled, keyBase64: relayKeyText)
     }
 
     private var hybridDraft: HybridSettings {

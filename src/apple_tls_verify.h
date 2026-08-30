@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
 
 #ifndef MQVPN_APPLE_TLS_VERIFY_H
 #define MQVPN_APPLE_TLS_VERIFY_H
@@ -17,4 +18,4 @@ int mqvpn_apple_tls_verify_server_chain(const unsigned char *const certs[],
 void mqvpn_apple_tls_set_evaluator_for_test(mqvpn_apple_tls_evaluator_fn evaluator);
 #endif
 
-#endif
+#endif /* MQVPN_APPLE_TLS_VERIFY_H */

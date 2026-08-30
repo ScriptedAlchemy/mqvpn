@@ -1155,8 +1155,8 @@ mqvpn_tcp_lane_on_relay_error(mqvpn_tcp_flow_t *f)
      * closing-notify, response gating) legally ignore the status. */
     /* The inner app experiences this as a bare RST mid-connection; without
      * this line a relay-error kill is indistinguishable in the field from a
-     * server reset or a tunnel-down abort (all three were silent through
-     * 2026-08). Ctx-free LOG_WRN — same idiom as lwip_glue.c. */
+     * server reset or a tunnel-down abort. Ctx-free LOG_WRN — same idiom as
+     * lwip_glue.c. */
     LOG_WRN("tcp_lane: relay error — resetting flow (state=%d dst_port=%u "
             "uplink_queued=%u withheld=%u)",
             (int)f->state, (unsigned)f->target_port, (unsigned)f->uplink_queued_bytes,

@@ -18,7 +18,6 @@ final class TunnelController: ObservableObject {
     @Published private(set) var isSaving = false
     @Published var showSettings = false
     @Published var relayDiscoveryText = "optional — not configured"
-    @Published private(set) var discoveredRelay: MacRelayEndpoint?
 
     private var manager: NETunnelProviderManager?
     private var relayBrowser: MacRelayBonjourBrowser?
@@ -37,8 +36,7 @@ final class TunnelController: ObservableObject {
         MacConnectGuard.canStart(isEditable: isEditable, isSaving: isSaving,
                                  server: serverSettings, relay: relaySettings,
                                  relayConfigurationIsValid: relayConfigurationIsValid,
-                                 profileIsCurrent: profileIsCurrent,
-                                 discoveredRelay: discoveredRelay)
+                                 profileIsCurrent: profileIsCurrent)
     }
     var isStoppable: Bool {
         StopLifecycle.canStop(hasManager: manager != nil,
@@ -202,7 +200,6 @@ final class TunnelController: ObservableObject {
     private func refreshRelayDiscovery() {
         relayBrowser?.stop()
         relayBrowser = nil
-        discoveredRelay = nil
         let enabled = relaySettings?.enabled == true
         relayDiscoveryText = MacRelayDiscovery.statusText(enabled: enabled, endpoint: nil)
         guard enabled else { return }
@@ -211,7 +208,6 @@ final class TunnelController: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 let found = MacRelayDiscovery.choose(endpoint.map { [$0] } ?? [])
-                self.discoveredRelay = found
                 self.relayDiscoveryText = MacRelayDiscovery.statusText(
                     enabled: self.relaySettings?.enabled == true, endpoint: found)
             }
@@ -254,12 +250,13 @@ final class TunnelController: ObservableObject {
         }
     }
 
+    /// Repairs missed NEVPNStatusDidChange notifications: apply only a status
+    /// that actually differs from the cached one.
     private func reconcileSystemStatus() {
         guard let observed = manager?.connection.status else { return }
         let cached = TunnelStatus.fromNEVPNRawValue(Int(status.rawValue))
         let actual = TunnelStatus.fromNEVPNRawValue(Int(observed.rawValue))
-        guard MacStatusReconciliation.needsUpdate(cached: cached,
-                                                  observed: actual) else { return }
+        guard cached != actual else { return }
         applyStatus(observed)
     }
 

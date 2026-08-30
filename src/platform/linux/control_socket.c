@@ -294,14 +294,14 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                 }
             }
 
-            uint64_t goodput_Bps = 0;
+            uint64_t goodput_bps = 0;
             int warmup = 0;
             unsigned weight_pct = 0;
             if (i < n_wlb) {
                 mqvpn_internal_client_wlb_t *wl = &wlb[i];
                 for (int wp = 0; wp < wl->n_paths; wp++) {
                     if (wl->paths[wp].path_id == ps->path_id) {
-                        goodput_Bps = wl->paths[wp].goodput_Bps;
+                        goodput_bps = wl->paths[wp].goodput_bps;
                         warmup = wl->paths[wp].warmup ? 1 : 0;
                         weight_pct = wl->paths[wp].weight_pct;
                         break;
@@ -314,12 +314,12 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                 ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
                 ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
                 ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
-                "\"reinject_tx_bytes\":%" PRIu64 ",\"goodput_Bps\":%" PRIu64
+                "\"reinject_tx_bytes\":%" PRIu64 ",\"goodput_bps\":%" PRIu64
                 ",\"warmup\":%s,\"weight_pct\":%u}",
                 ps->path_id, ps->srtt_us / 1000, ps->min_rtt_us / 1000, ps->cwnd,
                 ps->bytes_in_flight, ps->bytes_tx, ps->bytes_rx, ps->pkt_sent,
                 ps->pkt_recv, ps->pkt_lost, ps->state, mqvpn_path_state_label(ps->state),
-                reinject_tx_bytes, goodput_Bps, warmup ? "true" : "false", weight_pct);
+                reinject_tx_bytes, goodput_bps, warmup ? "true" : "false", weight_pct);
         }
 
         APPEND("]}");
