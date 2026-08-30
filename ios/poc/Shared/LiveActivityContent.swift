@@ -79,6 +79,59 @@ enum LiveActivityUpdateOrder {
     }
 }
 
+/// ActivityKit budgets background updates: a provider publishing every sample
+/// exhausts the budget within minutes (even with the frequent-updates
+/// entitlement), after which the system silently drops updates and the widget
+/// crosses its staleDate and greys out. The gate keeps SAMPLING at full
+/// cadence but publishes only when the reader could tell the difference:
+/// phase changes, an interface appearing/disappearing, a material rate move,
+/// or a heartbeat that renews staleDate. Pure and deterministic for host
+/// tests; the reporter owns the clock.
+enum LiveActivityPublishGate {
+    /// Publishes may not exceed one per `minimumInterval` even on change;
+    /// `heartbeatInterval` bounds how long the island can go without a
+    /// staleDate renewal. Both are far under the stale window.
+    static let minimumInterval: TimeInterval = 2
+    static let heartbeatInterval: TimeInterval = 30
+
+    /// A rate move counts as material when it would read differently at a
+    /// glance: at least 0.5 Mbps AND 15% away from the last published value.
+    /// nil<->value flips (sampling gaps, interface loss) always count.
+    static func materiallyDiffer(_ a: Double?, _ b: Double?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return false
+        case (nil, _), (_, nil): return true
+        case let (x?, y?):
+            let delta = abs(x - y)
+            return delta >= 0.5 && delta >= 0.15 * max(abs(x), abs(y))
+        }
+    }
+
+    private static func interfacesDiffer(_ a: LiveActivityInterfaceContent?,
+                                         _ b: LiveActivityInterfaceContent?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return false
+        case (nil, _), (_, nil): return true
+        case let (x?, y?):
+            if x.interfaceName != y.interfaceName { return true }
+            return materiallyDiffer(x.megabitsPerSecond, y.megabitsPerSecond)
+        }
+    }
+
+    static func shouldPublish(candidate: LiveActivityContentState,
+                              lastPublished: LiveActivityContentState?,
+                              lastPublishedAt: Double?) -> Bool {
+        guard let lastPublished, let lastPublishedAt else { return true }
+        let elapsed = candidate.sampledAt - lastPublishedAt
+        if elapsed < minimumInterval { return false }
+        if elapsed >= heartbeatInterval { return true }
+        if candidate.phase != lastPublished.phase { return true }
+        if interfacesDiffer(candidate.wifi, lastPublished.wifi) { return true }
+        if interfacesDiffer(candidate.cellular, lastPublished.cellular) { return true }
+        return false
+    }
+}
+
 /// Deterministic duplicate and mode-switch policy shared by the foreground
 /// requester and provider updater. There is exactly one current activity, and
 /// it must match the running mode.

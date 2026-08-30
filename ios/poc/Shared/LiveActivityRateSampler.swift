@@ -170,7 +170,12 @@ enum LiveActivityCounterSource {
 }
 
 enum LiveActivityContentFactory {
-    static let staleInterval: TimeInterval = 6
+    /// Staleness means "the tunnel stopped reporting", not "ActivityKit
+    /// dropped one update". With the publish gate's 30 s heartbeat, 75 s
+    /// tolerates two missed heartbeats under system throttling before the
+    /// widget hides the rates; the old 6 s window greyed the island the
+    /// moment the 1 Hz stream hit the ActivityKit update budget.
+    static let staleInterval: TimeInterval = 75
 
     static func make(snapshot: TunnelSnapshot,
                      sampler: inout LiveActivityRateSampler)

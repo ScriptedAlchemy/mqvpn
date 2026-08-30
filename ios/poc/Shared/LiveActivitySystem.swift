@@ -136,6 +136,11 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
     private var sampler = LiveActivityRateSampler()
     private var timer: DispatchSourceTimer?
     private var stopped = false
+    /// Publish-gate memory (queue-confined): the last state actually handed
+    /// to ActivityKit and when. Sampling stays at timer cadence; publishing
+    /// is budget-aware (see LiveActivityPublishGate).
+    private var lastPublished: LiveActivityContentState?
+    private var lastPublishedAt: Double?
 
     init(mode: OperatingMode,
          snapshotProvider: @escaping () -> TunnelSnapshot?) {
@@ -184,6 +189,18 @@ final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
         // steady-state, not an event worth logging every second.
         guard plan.currentID != nil else { return }
         let published = LiveActivityContentFactory.make(snapshot: snapshot, sampler: &sampler)
+        // Sample every tick (the sampler's EWMA needs continuity), publish
+        // only what a reader could distinguish: ActivityKit budgets
+        // background updates, and publishing every sample exhausted the
+        // budget within minutes — the island then missed its 6 s staleDate
+        // and sat grey for the rest of the session.
+        guard LiveActivityPublishGate.shouldPublish(candidate: published.state,
+                                                    lastPublished: lastPublished,
+                                                    lastPublishedAt: lastPublishedAt) else {
+            return
+        }
+        lastPublished = published.state
+        lastPublishedAt = published.state.sampledAt
         Task {
             _ = await MqvpnLiveActivityLifecycle.updateExisting(
                 mode: mode, state: published.state, staleDate: published.staleDate)

@@ -576,6 +576,40 @@ check(activeActivityState.phase == .active &&
       activeActivityState.cellular == nil,
       "active VPN content preserves the sampled physical-interface truth")
 
+// LiveActivityPublishGate: budget-aware publishing.
+func gateState(_ t: Double, phase: LiveActivityPhase = .active,
+               wifi: Double? = 20, cell: Double? = 10) -> LiveActivityContentState {
+    LiveActivityContentState(
+        phase: phase, sampledAt: t,
+        wifi: wifi.map { LiveActivityInterfaceContent(interfaceName: "en0", megabitsPerSecond: $0) },
+        cellular: cell.map { LiveActivityInterfaceContent(interfaceName: "pdp_ip0", megabitsPerSecond: $0) })
+}
+check(LiveActivityPublishGate.shouldPublish(candidate: gateState(100),
+                                            lastPublished: nil, lastPublishedAt: nil),
+      "gate publishes the first sample unconditionally")
+check(!LiveActivityPublishGate.shouldPublish(candidate: gateState(101, wifi: 200),
+                                             lastPublished: gateState(100), lastPublishedAt: 100),
+      "gate enforces the 2 s floor even on a large move")
+check(!LiveActivityPublishGate.shouldPublish(candidate: gateState(105, wifi: 20.4),
+                                             lastPublished: gateState(100), lastPublishedAt: 100),
+      "steady rates inside the material threshold stay unpublished")
+check(LiveActivityPublishGate.shouldPublish(candidate: gateState(105, wifi: 26),
+                                            lastPublished: gateState(100), lastPublishedAt: 100),
+      "a >=15% and >=0.5 Mbps move publishes")
+check(LiveActivityPublishGate.shouldPublish(candidate: gateState(105, phase: .waiting),
+                                            lastPublished: gateState(100), lastPublishedAt: 100),
+      "a phase change publishes")
+check(LiveActivityPublishGate.shouldPublish(candidate: gateState(105, cell: nil),
+                                            lastPublished: gateState(100), lastPublishedAt: 100),
+      "an interface disappearing publishes")
+check(LiveActivityPublishGate.shouldPublish(candidate: gateState(131),
+                                            lastPublished: gateState(100), lastPublishedAt: 100),
+      "the 30 s heartbeat publishes to renew staleDate")
+check(!LiveActivityPublishGate.materiallyDiffer(0.0, 0.4),
+      "sub-0.5 Mbps absolute moves are immaterial")
+check(LiveActivityPublishGate.materiallyDiffer(nil, 0.0),
+      "nil to measured-zero is a material (sampling-state) change")
+
 let waitingRelayState = LiveActivityContentFactory.make(
     snapshot: TunnelSnapshot(
         timestamp: 201, clientState: -1, connectedSince: 150, footprint: 0,
