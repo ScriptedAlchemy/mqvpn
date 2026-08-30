@@ -90,8 +90,9 @@
  * whole job is sweeping MQVPN_LWIP_RCV_SCALE, and whose DEFAULT sweep starts
  * at the 2 MiB reference — could no longer build its own reference point once
  * the shipped window dropped to 512 KiB (lwIP's sanity #error, init.c).
- * Shipped values are unchanged: iOS scale 2 -> 32, non-iOS scale 3 -> 64.
- * The sweep's other rungs now resolve too: scale 4 -> 128, scale 5 -> 256.
+ * Shipped values: iOS scale 4 -> 128 (32 back when iOS shipped scale 2),
+ * non-iOS scale 3 -> 64. The sweep's other rungs resolve too: scale 2 ->
+ * 32, scale 5 -> 256.
  * A scale above 6 overflows the ladder and is caught by that same lwIP
  * #error at compile time, which is the intended failure for a window nobody
  * has sized the rest of the budget for. */
@@ -139,10 +140,10 @@
  * RST) before the cap check ever ran. Raising the ceiling raises only what an operator
  * MAY configure — the config default stays 256 on every profile. */
 /* MEMP_NUM_TCP_SEG is a GLOBAL pool shared by all flows, sized per profile
- * (desktop/router 8192 / Android 2048 / iOS 512). Either way it covers
+ * (desktop/router 8192 / Android 2048 / iOS 1024). Either way it covers
  * only a few flows at full TCP_SND_BUF (TCP_SND_QUEUELEN caps one pcb at
  * 4*TCP_SND_BUF/MSS segments: 937 with the 2 MiB send buffer, iOS
- * scale=2 118 of 1024 ~ 8 flows). tcp_write() returns ERR_MEM on pool
+ * scale=4 469 of 1024 ~ 2 flows). tcp_write() returns ERR_MEM on pool
  * exhaustion — the TCP-lane relay (tcp_lane.c) MUST handle that as
  * backpressure (retry on sent-callback), it is not optional. The pool is
  * therefore a throughput knob, not a correctness one; it tracks the pcb
