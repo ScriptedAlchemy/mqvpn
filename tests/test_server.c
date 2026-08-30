@@ -481,6 +481,8 @@ TEST(server_get_client_info_no_clients)
     int n_clients = -1;
     ASSERT_EQ(mqvpn_server_get_client_info(s, info, 2, &n_clients), MQVPN_OK);
     ASSERT_EQ(n_clients, 0);
+    /* No clients -> the getter must not have touched out[] at all. */
+    ASSERT_EQ(((const uint8_t *)info)[0], 0xAB);
 
     mqvpn_server_destroy(s);
 }

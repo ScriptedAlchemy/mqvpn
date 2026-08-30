@@ -188,8 +188,9 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
 
 /* Build a canonical unspecified local endpoint for a received datagram when
  * a callback-backed path has no kernel socket address of its own. */
-MQVPN_INTERNAL socklen_t mqvpn_recv_fallback_local_addr(
-    struct sockaddr_storage *out, const struct sockaddr *peer, socklen_t peer_len);
+MQVPN_INTERNAL socklen_t mqvpn_recv_fallback_local_addr(struct sockaddr_storage *out,
+                                                        const struct sockaddr *peer,
+                                                        socklen_t peer_len);
 
 /* Returns "minrtt" / "wlb" / "wlb_udp_pin" / "backup_fec" / "unknown" —
  * caller-owned static string, do not free.
@@ -325,7 +326,6 @@ typedef struct {
 } mqvpn_internal_client_wlb_t;
 
 MQVPN_INTERNAL int mqvpn_server_get_client_wlb(const mqvpn_server_t *s,
-                                               mqvpn_internal_client_wlb_t *out,
-                                               int max);
+                                               mqvpn_internal_client_wlb_t *out, int max);
 
 #endif /* MQVPN_INTERNAL_H */

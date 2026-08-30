@@ -70,12 +70,11 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#define CTRL_MAX_REQ          4096 /* per-connection request buffer */
-#define CTRL_MAX_CONNS        8    /* max concurrent control connections */
-#define CTRL_READ_TIMEOUT_SEC 5    /* close idle connections after 5s */
-#define CTRL_WRITE_TIMEOUT_SEC 5   /* fail closed when a peer does not drain */
+#define CTRL_MAX_REQ            4096        /* per-connection request buffer */
+#define CTRL_MAX_CONNS          8           /* max concurrent control connections */
+#define CTRL_READ_TIMEOUT_SEC   5           /* close idle connections after 5s */
+#define CTRL_WRITE_TIMEOUT_SEC  5           /* fail closed when a peer does not drain */
 #define CTRL_WRITE_BUDGET_BYTES (64 * 1024) /* preserve UDP/libevent fairness */
-#define CTRL_WRITE_BUDGET_CALLS 16
 /* CTRL_MAX_RESP_BYTES moved to control_socket.h so test_control_response_bound
  * can verify the worst-case JSON size fits. */
 
@@ -109,7 +108,7 @@ struct ctrl_socket_s {
      * doc for why these do not travel through mqvpn_stats_t. NULL = report 0. */
     const uint64_t *gro_receives;
     const uint64_t *gro_datagrams;
-    int n_conns; /* active control connections */
+    int n_conns;        /* active control connections */
     ctrl_conn_t *conns; /* owned in-flight connections */
 };
 
@@ -274,8 +273,7 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                "\"performance\":\"%s\","
                "\"n_paths\":%d,\"paths\":[",
                ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
-               ci->performance[0] ? ci->performance : "throughput",
-               ci->n_paths);
+               ci->performance[0] ? ci->performance : "throughput", ci->n_paths);
 
         for (int p = 0; p < ci->n_paths; p++) {
             mqvpn_path_stats_t *ps = &ci->paths[p];
@@ -532,11 +530,6 @@ dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 
 /* ── Connection read handler ─────────────────────────────────────────────── */
 
-/* Common per-connection teardown: unhook the libevent event, close the fd,
- * release the connection's slot in the ctrl-socket's active-connection
- * count, and free the connection struct. conn->fd is set once in
- * ctrl_on_accept() and never changes, so it always matches the fd the
- * caller's event fired on. */
 static int
 ctrl_conn_unlink(ctrl_socket_t *cs, ctrl_conn_t *conn)
 {
@@ -552,6 +545,11 @@ ctrl_conn_unlink(ctrl_socket_t *cs, ctrl_conn_t *conn)
     return 0;
 }
 
+/* Common per-connection teardown: unhook both libevent events (read and
+ * write), close the fd, release the connection's slot in the ctrl-socket's
+ * active-connection count, and free the connection struct. conn->fd is set
+ * once in ctrl_on_accept() and never changes, so it always matches the fd
+ * the caller's event fired on. */
 static void
 ctrl_conn_close(ctrl_conn_t *conn)
 {
@@ -588,28 +586,22 @@ ctrl_on_write(evutil_socket_t fd, short what, void *arg)
         return;
     }
 
-    size_t callback_bytes = 0;
-    int calls = 0;
-    while (conn->resp_off < conn->resp_len &&
-           callback_bytes < CTRL_WRITE_BUDGET_BYTES &&
-           calls++ < CTRL_WRITE_BUDGET_CALLS) {
-        size_t remaining = conn->resp_len - conn->resp_off;
-        size_t allowance = CTRL_WRITE_BUDGET_BYTES - callback_bytes;
-        if (remaining > allowance) remaining = allowance;
-        ssize_t n = send(fd, conn->resp + conn->resp_off, remaining, MSG_NOSIGNAL);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
-            ctrl_conn_close(conn);
-            return;
-        }
-        if (n == 0) {
-            ctrl_conn_close(conn);
-            return;
-        }
-        conn->resp_off += (size_t)n;
-        callback_bytes += (size_t)n;
+    /* One bounded send per callback: EV_PERSIST refires while the socket
+     * stays writable, so a loop here would only trade event-loop fairness
+     * for fewer wakeups. EINTR falls back to the refire too. */
+    size_t remaining = conn->resp_len - conn->resp_off;
+    if (remaining > CTRL_WRITE_BUDGET_BYTES) remaining = CTRL_WRITE_BUDGET_BYTES;
+    ssize_t n = send(fd, conn->resp + conn->resp_off, remaining, MSG_NOSIGNAL);
+    if (n < 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) return;
+        ctrl_conn_close(conn);
+        return;
     }
+    if (n == 0) {
+        ctrl_conn_close(conn);
+        return;
+    }
+    conn->resp_off += (size_t)n;
 
     if (conn->resp_off == conn->resp_len) {
         ctrl_conn_close(conn);
@@ -623,13 +615,12 @@ ctrl_start_response(ctrl_conn_t *conn, size_t len)
     conn->resp_off = 0;
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
-        conn->write_deadline_ms =
-            (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000 +
-            CTRL_WRITE_TIMEOUT_SEC * 1000;
+        conn->write_deadline_ms = (uint64_t)now.tv_sec * 1000 +
+                                  (uint64_t)now.tv_nsec / 1000000 +
+                                  CTRL_WRITE_TIMEOUT_SEC * 1000;
     }
     event_del(conn->ev);
-    conn->ev_write = event_new(conn->cs->eb, conn->fd,
-                               EV_WRITE | EV_PERSIST | EV_TIMEOUT,
+    conn->ev_write = event_new(conn->cs->eb, conn->fd, EV_WRITE | EV_PERSIST | EV_TIMEOUT,
                                ctrl_on_write, conn);
     if (!conn->ev_write) return -1;
     struct timeval tv = {.tv_sec = CTRL_WRITE_TIMEOUT_SEC};
@@ -712,11 +703,11 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
          * client doesn't see a malformed body, and emit a warning. */
         static const char too_large[] =
             "{\"ok\":false,\"error\":\"response too large\"}\n";
-        memcpy(conn->resp, too_large, sizeof(too_large) - 1);
-        if (ctrl_start_response(conn, sizeof(too_large) - 1) == 0) return;
         LOG_WRN(
             "control: dispatch response truncated (would have been %d bytes, max %zu)",
             rlen, (size_t)CTRL_MAX_RESP_BYTES - 2);
+        memcpy(conn->resp, too_large, sizeof(too_large) - 1);
+        if (ctrl_start_response(conn, sizeof(too_large) - 1) == 0) return;
     } else {
         conn->resp[rlen] = '\n';
         conn->resp[rlen + 1] = '\0';
@@ -785,10 +776,12 @@ ctrl_addr_is_loopback(const char *addr)
     struct in_addr v4;
     struct in6_addr v6;
     if (!addr) return 0;
+    /* The whole 127/8 net is loopback (RFC 1122 §3.2.1.3), and binding the
+     * control API to e.g. 127.0.0.2 is a legitimate way to run several
+     * servers on the same port — only exact-127.0.0.1 was accepted before. */
     if (inet_pton(AF_INET, addr, &v4) == 1)
-        return v4.s_addr == htonl(INADDR_LOOPBACK);
-    if (inet_pton(AF_INET6, addr, &v6) == 1)
-        return IN6_IS_ADDR_LOOPBACK(&v6);
+        return (ntohl(v4.s_addr) >> 24) == IN_LOOPBACKNET;
+    if (inet_pton(AF_INET6, addr, &v6) == 1) return IN6_IS_ADDR_LOOPBACK(&v6);
     return 0;
 }
 

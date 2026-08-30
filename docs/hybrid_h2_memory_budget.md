@@ -306,32 +306,32 @@ ceiling above what the connection would reach anyway.
 
 ### 5c. iOS-profile budget table
 
-Shipped constants for `MQVPN_LWIP_IOS_PROFILE` at the default scale (2) and
+Shipped constants for `MQVPN_LWIP_IOS_PROFILE` at the default scale (4) and
 `tcp_max_flows` = 64:
 
-| Constant | Source | Value (scale 2) | Note |
+| Constant | Source | Value (scale 4) | Note |
 |---|---|---|---|
-| `TCP_RCV_SCALE` (`MQVPN_LWIP_IOS_RCV_SCALE`) | lwipopts.h | 2 (default) | down from the non-iOS 3 (which was itself 5 through v0.13.4) |
-| `TCP_WND` | lwipopts.h | `65535 << 2` = 262,140 B (≈256 KiB) | shared derivation (§1) at iOS scale |
-| `TCP_SND_BUF` | lwipopts.h | `65536 << 2` = 262,144 B (256 KiB) | down from 2 MiB |
+| `TCP_RCV_SCALE` (`MQVPN_LWIP_IOS_RCV_SCALE`) | lwipopts.h | 4 (default; raised from 2 in 2026-08 — the lane withholds `tcp_recved` until QUIC drains, so window/RTT capped one flow near 5 Mbps measured over a 120 ms WAN) | above the non-iOS 3 (which was itself 5 through v0.13.4) |
+| `TCP_WND` | lwipopts.h | `65535 << 4` = 1,048,560 B (≈1 MiB) | shared derivation (§1) at iOS scale |
+| `TCP_SND_BUF` | lwipopts.h | `65536 << 4` = 1,048,576 B (1 MiB) | down from 2 MiB |
 | `MEMP_NUM_TCP_PCB` | mqvpn_lwip_profile.h | 128 (`tcp_max_flows`=64 + headroom) | down from 8192 desktop/router, 512 Android |
 | `MEMP_NUM_TCP_SEG` | mqvpn_lwip_profile.h | 1024, shared send+OOSEQ pool (raised from 512 in 2026-08: 512 covered ~4 send-saturated flows and starved SYN-ACK allocation under 12-flow bursts; +16 KiB .bss) | down from 8192 desktop/router, 2048 Android |
-| `PBUF_POOL_SIZE` | lwipopts.h | 32 (power-of-2 ladder off `TCP_WND`) | down from 256 |
-| `MQVPN_TCP_LANE_BP_HIGH_WATER` | tcp_lane.h | `TCP_WND`/2 ≈ 131,070 B | down from the fixed 256 KiB |
-| `MQVPN_TCP_LANE_BP_LOW_WATER` | tcp_lane.h | `TCP_WND`/8 ≈ 32,767 B | down from 64 KiB |
+| `PBUF_POOL_SIZE` | lwipopts.h | 128 (power-of-2 ladder off `TCP_WND`) | down from 256 |
+| `MQVPN_TCP_LANE_BP_HIGH_WATER` | tcp_lane.h | `TCP_WND`/2 ≈ 524,280 B | tracks the window (was the fixed 256 KiB) |
+| `MQVPN_TCP_LANE_BP_LOW_WATER` | tcp_lane.h | `TCP_WND`/8 ≈ 131,070 B | up from 64 KiB |
 | `TCP_LANE_RAW_MARKER_CAP` / `TCP_LANE_CLOSING_CAP` | tcp_lane.h | 256 each | down from 4096 each |
 
 Derived subtotal at 64 concurrent flows:
 
 | Component | Size | Basis |
 |---|---|---|
-| 64 × `TCP_WND` (receive) | ≈ 16 MiB | 64 × 262,140 B |
-| Shared TCP segment pool (`MEMP_NUM_TCP_SEG`) | ≈ 4.4 MiB | 512-segment cap, shared send+OOSEQ |
-| `PBUF_POOL` (32 pbufs) | ≈ 0.29 MiB | 32 × `PBUF_POOL_BUFSIZE` |
+| 64 × `TCP_WND` (receive) | ≈ 64 MiB | 64 × 1,048,560 B |
+| Shared TCP segment pool (`MEMP_NUM_TCP_SEG`) | ≈ 8.8 MiB | 1024-segment cap, shared send+OOSEQ |
+| `PBUF_POOL` (128 pbufs) | ≈ 1.2 MiB | 128 × `PBUF_POOL_BUFSIZE` |
 | Marker tables (RAW + CLOSING, 256 each) | ≈ 0.1 MiB | §4 shape, iOS caps (512 × 200 B) |
 | 64 × `TCP_MSS` downlink stash | ≈ 0.55 MiB | one stashed downlink chunk per flow (§3) |
 | PCB pool (`MEMP_NUM_TCP_PCB` = 128) | ≈ 0.04 MiB | measured: `struct tcp_pcb` = 312 B × 128 |
-| **Subtotal** | **≈ 21.4 MiB** | lower-bound-leaning, see below |
+| **Subtotal** | **≈ 74.7 MiB** | flow-cap worst case, not the shipped expectation — see below |
 
 **Not counted in this subtotal** — it is lower-bound-leaning, not a hard ceiling: per-flow
 `mqvpn_tcp_flow_t` uplink-queue/relay objects and stash bytes beyond the one downlink chunk
@@ -339,10 +339,15 @@ already counted, pbuf metadata/struct overhead on top of the payload-only accoun
 and the hash bucket array (§4 — small, fixed, unaffected by the iOS marker-cap shrink).
 Final authority is on-device measurement, not this arithmetic.
 
-Add the QUIC-side receive-rate cap (§5b) on top: typically ≈ 7.15 MiB (`rate × srtt` at
-60 ms), up to the 16 MiB clamp in the worst case. All-up: ≈ 21.4 MiB (lwIP iOS profile)
-+ up to 16 MiB (QUIC cap, worst case) ≈ 37.4 MiB against the 50 MB Network Extension
-ceiling, leaving headroom for process/runtime overhead outside this doc's scope.
+Since the 2026-08 scale raise, the 64-flow worst case above exceeds the 50 MB Network
+Extension ceiling on paper. The shipped budget leans on three facts instead of the flow
+cap: a flow only holds a full window while it is actually QUIC-backpressured, the field
+workload holds ~12 concurrent flows (2026-08-27, ≈ 12 MiB of windows), and the QUIC
+connection receive window is now pinned at 8 MiB (`MQVPN_CONN_FC_WINDOW`,
+mqvpn_conn_settings.c) rather than the 16 MiB autotune clamp §5b measured. All-up at the
+measured workload: ≈ 12 + 8.8 + 1.2 + 0.7 MiB (lwIP) + 8 MiB (QUIC) ≈ 31 MiB against
+the 50 MB ceiling. A deployment that wants the hard-bounded shape back rebuilds with
+`-DMQVPN_LWIP_IOS_RCV_SCALE=2`, restoring the old ≈ 21 MiB flow-cap subtotal.
 
 ### 5d. Router-topology window measurement (desktop/router scale 5 → 3)
 

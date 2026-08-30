@@ -17,10 +17,10 @@ extern "C" {
 #  define MQVPN_RELAY_API __attribute__((visibility("default")))
 #endif
 
-#define MQVPN_RELAY_VERSION          1u
-#define MQVPN_RELAY_KEY_SIZE         32u
-#define MQVPN_RELAY_HEADER_SIZE      28u
-#define MQVPN_RELAY_TAG_SIZE         16u
+#define MQVPN_RELAY_VERSION     1u
+#define MQVPN_RELAY_KEY_SIZE    32u
+#define MQVPN_RELAY_HEADER_SIZE 28u
+#define MQVPN_RELAY_TAG_SIZE    16u
 /* Must cover the complete encrypted UDP datagram xquic hands to write_socket_ex,
  * not only max_pkt_out_size. The current absolute bound is 1452 bytes
  * (1420-byte packet budget + 16-byte ACK space + 16-byte AEAD overhead).

@@ -120,7 +120,6 @@ if [ "$PHASE" = "mqvpn" ] || [ "$PHASE" = "all" ]; then
     cmake -S "$SCRIPT_DIR" -B "$MQVPN_BUILD" "${IOS_CMAKE_FLAGS[@]}" \
         -DANDROID_CROSS_COMPILE=ON \
         -DMQVPN_LWIP_IOS_PROFILE=ON \
-        -DMQVPN_LWIP_IOS_RCV_SCALE=4 \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DXQUIC_BUILD_DIR="$XQUIC_BUILD" \
         -DBORINGSSL_BUILD_DIR="$BSSL_BUILD"

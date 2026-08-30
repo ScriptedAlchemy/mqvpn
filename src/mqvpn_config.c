@@ -151,7 +151,7 @@ mqvpn_config_new(void)
     cfg->reconnect_interval_sec = 5;
     cfg->max_clients = 64;
     cfg->listen_port = 443;
-    cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
+    cfg->init_max_path_id = 0; /* 0 = mqvpn default grant (32) */
     cfg->udp_gso = 1;          /* TX GSO/batch enabled by default */
 
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
@@ -344,7 +344,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "optimize_for");
     if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
         mqvpn_performance_mode_t mode = MQVPN_PERF_MAX_THROUGHPUT;
-        if (mqvpn_performance_mode_parse(tmp, strlen(tmp), &mode) != MQVPN_OK) {
+        if (mqvpn_performance_from_name(tmp, strlen(tmp), &mode) != MQVPN_OK) {
             return MQVPN_ERR_INVALID_ARG;
         }
         cfg->performance_mode = mode;

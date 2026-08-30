@@ -8,7 +8,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-int main(void)
+int
+main(void)
 {
     char key_path[] = "/tmp/mqvpn-relay-key-XXXXXX";
     int key_fd = mkstemp(key_path);

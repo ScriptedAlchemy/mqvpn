@@ -1534,8 +1534,7 @@ cli_masque_start_tunnel(cli_conn_t *conn)
         hdr_count++;
     }
     {
-        const char *perf = mqvpn_performance_mode_name(c->config.performance_mode);
-        if (!perf) perf = MQVPN_PERFORMANCE_THROUGHPUT;
+        const char *perf = mqvpn_performance_to_name(c->config.performance_mode);
         hdrs[hdr_count].name =
             (struct iovec){.iov_base = (void *)MQVPN_PERFORMANCE_HDR_NAME,
                            .iov_len = sizeof(MQVPN_PERFORMANCE_HDR_NAME) - 1};
@@ -1578,16 +1577,17 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     cli_conn_t *conn = c->conn;
     if (!conn || !conn->h3_conn) {
         /* Accept fired without a live H3 connection (teardown race / a
-         * reconnect window) — the flow can never become real. Logged (was
-         * silent through 2026-08): lwIP has ALREADY completed the local
-         * 3-way handshake by the time accept fires, so the inner app saw
-         * connect() succeed and now gets an immediate RST — from the app's
-         * side this is an "instant connection failure", and without this
-         * line the field signature (bursts of instant failures while the
-         * tunnel reconnects) was invisible in client logs. */
-        LOG_W(c, "connect-tcp: inner flow accepted while tunnel is down "
-                 "(conn=%d h3=%d) — resetting it",
-              conn != NULL, conn && conn->h3_conn ? 1 : 0);
+         * reconnect window) — the flow can never become real. Logged
+         * because lwIP has ALREADY completed the local 3-way handshake by
+         * the time accept fires, so the inner app saw connect() succeed and
+         * now gets an immediate RST — from the app's side this is an
+         * "instant connection failure", and without this line the field
+         * signature (bursts of instant failures while the tunnel
+         * reconnects) is invisible in client logs. */
+        LOG_W(c,
+              "connect-tcp: inner flow accepted while tunnel is down "
+              "(conn=%d), resetting it",
+              conn != NULL);
         return mqvpn_tcp_lane_abort_pending(flow_handle);
     }
 
@@ -1853,10 +1853,9 @@ cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err, void *use
         /* Server-initiated RESET is one of the few paths that kills an
          * ESTABLISHED inner flow from the app's point of view (it sees a
          * bare RST mid-session); log it with xquic's error code so field
-         * captures can tell it apart from local relay errors (was silent
-         * through 2026-08). */
+         * captures can tell it apart from local relay errors. */
         LOG_W(stream->conn->client,
-              "connect-tcp: server reset stream %" PRIu64 " (err=%d) — "
+              "connect-tcp: server reset stream %" PRIu64 " (err=%d), "
               "resetting inner flow",
               xqc_h3_stream_id(h3_request), (int)err);
         mqvpn_tcp_lane_on_h3_closing(stream->conn->tcp_lane, stream);
@@ -2238,10 +2237,10 @@ cli_connect_tcp_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * distinct rejection causes (503 caps, 502/504 egress connect
          * refused/timeout, 403 ACL — svr_tcp_egress_errno_to_status) and
          * the inner app just sees a bare RST either way, so log it here
-         * where it is last visible (was silent through 2026-08). */
+         * where it is last visible. */
         LOG_W(stream->conn->client,
               "connect-tcp: server rejected flow with status %d (stream %" PRIu64
-              ") — resetting inner flow",
+              "), resetting inner flow",
               status, xqc_h3_stream_id(h3_request));
         mqvpn_tcp_lane_on_stream_rejected(stream->conn->tcp_lane, stream);
     }
@@ -3635,23 +3634,20 @@ tun_validate_src(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t
  * terminally-closed states (CLOSED_DROPPED / CLOSED_FREE). Same slot array
  * mqvpn_client_get_paths() aggregates.
  *
- * This deliberately does NOT count only PATH_LC_ACTIVE (as it did through
- * 2026-08). The tcp=auto SYN verdict is a per-flow SNAPSHOT that is never
- * re-evaluated (hybrid_tcp_syn_policy below), and a want_tcp=0 verdict
- * plants a sticky-RAW marker for the 5-tuple — so sampling the
- * INSTANTANEOUS active count coupled every new connection's LANE CHOICE to
- * path-probe churn: on a multipath phone whose second path oscillates
- * through VALIDATING/DEGRADED/CLOSED_RECOVERABLE (exactly the WLB/probe
- * flapping this branch has been hardening against), connects opened during
- * a dip were routed RAW while siblings seconds apart were laned TCP.
- * Observed in the field (2026-08-27, iOS + LAN relay): the app's 12
- * concurrent WebSocket flows churned 235 server-side TCP-lane flows in 2 h
- * with only 3 alive, and connects failed instantly-or-slowly depending on
- * which lane the dip assigned them. A path in a transient/recoverable
- * state is still provisioned multipath INTENT — the lane decision should
- * track that intent (stable across probe noise), not the scheduler's
- * momentary opinion. A genuinely single-path client still counts 1 here
- * and keeps the RAW verdict under tcp=auto, unchanged. */
+ * This deliberately does NOT count only PATH_LC_ACTIVE. The tcp=auto SYN
+ * verdict is a per-flow SNAPSHOT that is never re-evaluated
+ * (hybrid_tcp_syn_policy below), and a want_tcp=0 verdict plants a
+ * sticky-RAW marker for the 5-tuple — so sampling the INSTANTANEOUS active
+ * count couples every new connection's LANE CHOICE to path-probe churn: on
+ * a multipath phone whose second path oscillates through
+ * VALIDATING/DEGRADED/CLOSED_RECOVERABLE, connects opened during a dip are
+ * routed RAW while siblings seconds apart are laned TCP, so the app sees
+ * connects fail instantly-or-slowly depending on which lane the dip
+ * assigned them. A path in a transient/recoverable state is still
+ * provisioned multipath INTENT — the lane decision should track that
+ * intent (stable across probe noise), not the scheduler's momentary
+ * opinion. A genuinely single-path client still counts 1 here and keeps
+ * the RAW verdict under tcp=auto, unchanged. */
 static int
 provisioned_paths_count(const mqvpn_client_t *c)
 {
@@ -3965,8 +3961,8 @@ recv_sockaddr_canonical_len(const struct sockaddr *addr, socklen_t supplied_len)
 }
 
 socklen_t
-mqvpn_recv_fallback_local_addr(struct sockaddr_storage *out,
-                                const struct sockaddr *peer, socklen_t peer_len)
+mqvpn_recv_fallback_local_addr(struct sockaddr_storage *out, const struct sockaddr *peer,
+                               socklen_t peer_len)
 {
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
@@ -4010,8 +4006,8 @@ mqvpn_client_on_socket_recv(mqvpn_client_t *c, mqvpn_path_handle_t path,
         pe->bytes_rx += len;
         if (pe->local_addr_len > 0) {
             memcpy(&local_addr, &pe->local_addr, pe->local_addr_len);
-            local_len = recv_sockaddr_canonical_len(
-                (const struct sockaddr *)&local_addr, pe->local_addr_len);
+            local_len = recv_sockaddr_canonical_len((const struct sockaddr *)&local_addr,
+                                                    pe->local_addr_len);
         }
     }
     if (local_len == 0) {

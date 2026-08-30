@@ -21,8 +21,8 @@
  * packets AND framed-but-unsent backlog, and it is the deepest queue on the
  * upload path: at MQVPN_MAX_PKT_OUT_SIZE (1400 B) the old shared 16384-packet
  * cap is ~23 MiB, which a 15 Mbit/s uplink drains in ~12.8 s — measured on
- * device as 13.3 s loaded upload latency (2026-08-27 speedtest through the
- * tunnel), i.e. the queue really did fill to its cap. Everything behind it
+ * device as 13.3 s loaded upload latency through the tunnel, i.e. the queue
+ * really does fill to its cap. Everything behind it
  * (datagram-lane pings included — the sndq is FIFO across lanes) waited that
  * long.
  *
@@ -76,13 +76,14 @@
  *  - hard cap on total sent-but-unread bytes across ALL streams of one
  *    connection ==> per-connection stream receive-buffer memory bound of
  *    8 MiB. iOS NE budget arithmetic: 8 MiB is 16% of the ~50 MB resident
- *    ceiling; the lwIP side worst case adds TCP_WND (256 KiB, iOS profile)
- *    x 64 flows = 16 MiB (see docs/hybrid_h2_memory_budget.md), leaving
- *    >26 MB for everything else. Without this cap the theoretical exposure
- *    was 64 flows x 16 MiB.
+ *    ceiling; the lwIP side adds TCP_WND (1 MiB at the shipped iOS scale)
+ *    per QUIC-backpressured flow, ~12 MiB at the measured ~12-flow
+ *    workload (docs/hybrid_h2_memory_budget.md §5c has the flow-cap worst
+ *    case). Without this cap the theoretical exposure was 64 flows x
+ *    16 MiB.
  *  - aggregate stream throughput ceiling 8 MiB/RTT: ~670 Mbit/s @ 100 ms,
- *    ~210 Mbit/s @ 320 ms — above the 175 Mbit/s download measured through
- *    the tunnel on 2026-08-27, so no regression on the healthy direction.
+ *    ~210 Mbit/s @ 320 ms — above the ~175 Mbit/s download measured through
+ *    the tunnel, so no regression on the healthy direction.
  *  - also bounds the aggregate upload standing queue at 8 MiB even if many
  *    flows saturate at once (6 flows x 1 MiB = 6 MiB < 8 MiB: per-stream
  *    caps bind first at the real flow counts). */
@@ -240,15 +241,15 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
         break;
     case MQVPN_CC_BBR2:
         out->cong_ctrl_callback = xqc_bbr2_cb;
-        /* RTTVAR_COMPENSATION is deliberately NOT set (it was, through
-         * 2026-08). It adds bw * (srtt - min_rtt) to target cwnd
+        /* RTTVAR_COMPENSATION is deliberately NOT set. It adds
+         * bw * (srtt - min_rtt) to target cwnd
          * (xqc_bbr2_compensate_cwnd_for_rttvar) — meant to ride out wireless
          * RTT spikes that are NOT congestion. But on a bufferbloated uplink
          * srtt - min_rtt IS our own standing queue's delay, so the addition
          * equals the bytes already sitting in the queue: queue -> srtt up ->
          * cwnd up -> deeper queue, a positive feedback loop with no fixed
-         * point below the so_sndbuf cwnd clamp. Observed on device
-         * (2026-08-27): cwnd pinned at the 8 MiB clamp with srtt inflated
+         * point below the so_sndbuf cwnd clamp. Observed on device: cwnd
+         * pinned at the 8 MiB clamp with srtt inflated
          * 100 ms -> 13.3 s under upload load. Without the flag, cwnd tracks
          * cwnd_gain (2.0) x BDP(min_rtt) + ack-aggregation headroom, i.e.
          * bottleneck queue ~= 1x BDP (~100 ms extra at any rate) instead of

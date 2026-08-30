@@ -303,8 +303,7 @@ cli_send_connect_ip(xqc_h3_request_t *req, int svr_port, const char *auth,
     char auth_value[128];
     if (auth) {
         snprintf(auth_value, sizeof(auth_value), "Bearer %s", auth);
-        hdrs[hdr_count].name =
-            (struct iovec){.iov_base = "authorization", .iov_len = 13};
+        hdrs[hdr_count].name = (struct iovec){.iov_base = "authorization", .iov_len = 13};
         hdrs[hdr_count].value =
             (struct iovec){.iov_base = auth_value, .iov_len = strlen(auth_value)};
         hdrs[hdr_count].flags = 0;
@@ -332,8 +331,7 @@ cli_send_connect_ip(xqc_h3_request_t *req, int svr_port, const char *auth,
  * mqvpn_server_get_client_info. Returns 0 if the API succeeded (*n_out
  * and buf filled; n==0 leaves buf empty); -1 if the API failed. */
 static int
-cli_get_live_performance(const mqvpn_server_t *svr, char *buf, size_t buflen,
-                         int *n_out)
+cli_get_live_performance(const mqvpn_server_t *svr, char *buf, size_t buflen, int *n_out)
 {
     mqvpn_client_info_t info;
     memset(&info, 0, sizeof(info));
@@ -732,9 +730,8 @@ main(void)
     } else {
         xqc_h3_request_t *req0 =
             xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req0);
-        if (!req0 ||
-            cli_send_connect_ip(req0, ntohs(svr_addr.sin_port), "wrong-test-psk",
-                                MQVPN_PERFORMANCE_LATENCY) != 0) {
+        if (!req0 || cli_send_connect_ip(req0, ntohs(svr_addr.sin_port), "wrong-test-psk",
+                                         MQVPN_PERFORMANCE_LATENCY) != 0) {
             printf("FAIL: send invalid-PSK request\n");
             rc = 1;
         } else {
@@ -746,8 +743,7 @@ main(void)
                 .counter = NULL,
                 .counter_target = 0,
             };
-            pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS,
-                       &rejected_auth);
+            pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &rejected_auth);
             {
                 char perf[16] = {0};
                 int n_info = -1;
@@ -757,9 +753,8 @@ main(void)
                     printf("  invalid PSK: status=%d closed=%d clients=%d "
                            "connected_calls=%d n_info=%d perf=%s "
                            "(expected 403/0/0/0) FAIL\n",
-                           g_req0.status, g_req0.closed,
-                           mqvpn_server_get_n_clients(svr), g_client_connected_calls,
-                           n_info, perf);
+                           g_req0.status, g_req0.closed, mqvpn_server_get_n_clients(svr),
+                           g_client_connected_calls, n_info, perf);
                     rc = 1;
                 } else {
                     printf("  invalid PSK 403 before latency policy (clients=0) "
@@ -774,16 +769,14 @@ main(void)
          * receipts do not depend on the rejected request's stream lifetime. */
         g_handshake_finished = 0;
         const xqc_cid_t *authed_cid =
-            xqc_h3_connect(g_cli_engine, &cs, NULL, 0, "mqvpn-test.invalid", 0,
-                           &ssl_cfg, (struct sockaddr *)&svr_addr, sizeof(svr_addr),
-                           NULL);
+            xqc_h3_connect(g_cli_engine, &cs, NULL, 0, "mqvpn-test.invalid", 0, &ssl_cfg,
+                           (struct sockaddr *)&svr_addr, sizeof(svr_addr), NULL);
         if (!authed_cid) {
             printf("FAIL: reconnect after invalid PSK\n");
             rc = 1;
         } else {
             memcpy(&g_cli_cid, (const void *)authed_cid, sizeof(g_cli_cid));
-            pump_wait(svr, svr_fd, &cli_addr, cli_fd, 2000,
-                      &g_handshake_finished);
+            pump_wait(svr, svr_fd, &cli_addr, cli_fd, 2000, &g_handshake_finished);
             if (!g_handshake_finished) {
                 printf("FAIL: authenticated connection handshake never finished\n");
                 rc = 1;
@@ -943,8 +936,7 @@ main(void)
         char perf[16] = {0};
         int n_info = -1;
         if (cli_get_live_performance(svr, perf, sizeof(perf), &n_info) != 0 ||
-            n_info != 1 || n_clients != 1 ||
-            !perf_is(perf, MQVPN_PERFORMANCE_LATENCY)) {
+            n_info != 1 || n_clients != 1 || !perf_is(perf, MQVPN_PERFORMANCE_LATENCY)) {
             printf("  duplicate mutated live performance: n=%d perf=%s "
                    "n_clients=%d (expected latency/1/1)                   FAIL\n",
                    n_info, perf, n_clients);
@@ -1000,9 +992,8 @@ main(void)
     uint64_t req3_stream_id = 0;
     if (rc == 0) {
         req3 = xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req3);
-        if (!req3 ||
-            cli_send_connect_ip(req3, ntohs(svr_addr.sin_port), "correct-test-psk",
-                                "unknown") != 0) {
+        if (!req3 || cli_send_connect_ip(req3, ntohs(svr_addr.sin_port),
+                                         "correct-test-psk", "unknown") != 0) {
             printf("FAIL: send request #3\n");
             rc = 1;
         } else {
@@ -1170,9 +1161,8 @@ main(void)
 
         xqc_h3_request_t *req_omit =
             xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req_omit);
-        if (!req_omit ||
-            cli_send_connect_ip(req_omit, ntohs(svr_addr.sin_port),
-                                "correct-test-psk", NULL) != 0) {
+        if (!req_omit || cli_send_connect_ip(req_omit, ntohs(svr_addr.sin_port),
+                                             "correct-test-psk", NULL) != 0) {
             printf("FAIL: send omitted-performance request\n");
             rc = 1;
         } else {

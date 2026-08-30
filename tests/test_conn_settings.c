@@ -165,9 +165,11 @@ test_propagation_init_max_path_id(void)
         .init_max_path_id = 0,
     };
 
-    /* 0 -> field stays 0 (xquic default applies inside xqc_server_set_conn_settings) */
+    /* 0 -> mqvpn's own default of 32 (not xquic's 8): the client opens
+     * several replica sockets per interface, so a two-interface phone
+     * already needs 16 path IDs — see mqvpn_build_conn_settings(). */
     mqvpn_build_conn_settings(&in, &cs);
-    ASSERT_EQ(cs.init_max_path_id, 0);
+    ASSERT_EQ(cs.init_max_path_id, 32);
 
     in.init_max_path_id = 16;
     mqvpn_build_conn_settings(&in, &cs);

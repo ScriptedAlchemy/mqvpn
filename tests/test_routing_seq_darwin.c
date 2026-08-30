@@ -264,10 +264,9 @@ test_relay_route_is_scoped_idempotent_and_owned(fake_cmd_env_t *e)
 
     char log[4096];
     fake_cmd_read_log(e, log, sizeof(log));
-    ASSERT_TRUE(strstr(log,
-                       "route|-n|add|-ifscope|en0|192.168.1.195/32|-interface|en0") !=
-                    NULL,
-                "relay endpoint pinned outside utun on LAN interface");
+    ASSERT_TRUE(
+        strstr(log, "route|-n|add|-ifscope|en0|192.168.1.195/32|-interface|en0") != NULL,
+        "relay endpoint pinned outside utun on LAN interface");
     const char *second = strstr(log, "192.168.1.195/32");
     second = second ? strstr(second + 1, "192.168.1.195/32") : NULL;
     ASSERT_TRUE(second == NULL, "relay route idempotence avoids duplicate command");
@@ -298,8 +297,7 @@ test_relay_route_add_failure_never_claims_or_deletes_existing_route(fake_cmd_env
 
     ASSERT_EQ_INT(darwin_setup_relay_route(&p), -1,
                   "relay route add failure fails closed");
-    ASSERT_EQ_INT(p.relay_route_configured, 0,
-                  "failed add never claims route ownership");
+    ASSERT_EQ_INT(p.relay_route_configured, 0, "failed add never claims route ownership");
     darwin_cleanup_relay_route(&p);
 
     char log[4096];

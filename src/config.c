@@ -1262,14 +1262,14 @@ parse_private_ipv4(const char *text)
 {
     unsigned int a, b, c, d;
     char tail;
-    if (!text || sscanf(text, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4 ||
-        a > 255 || b > 255 || c > 255 || d > 255)
+    if (!text || sscanf(text, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4 || a > 255 ||
+        b > 255 || c > 255 || d > 255)
         return -1;
     char canonical[16];
     snprintf(canonical, sizeof(canonical), "%u.%u.%u.%u", a, b, c, d);
     if (strcmp(canonical, text) != 0) return -1;
-    if (a == 10 || (a == 172 && b >= 16 && b <= 31) ||
-        (a == 192 && b == 168) || (a == 169 && b == 254))
+    if (a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168) ||
+        (a == 169 && b == 254))
         return 0;
     return -1;
 }
@@ -1326,8 +1326,8 @@ static int
 validate_optimize_for(const mqvpn_file_config_t *cfg)
 {
     mqvpn_performance_mode_t mode = MQVPN_PERF_MAX_THROUGHPUT;
-    if (mqvpn_performance_mode_parse(cfg->optimize_for, strlen(cfg->optimize_for),
-                                     &mode) != MQVPN_OK) {
+    if (mqvpn_performance_from_name(cfg->optimize_for, strlen(cfg->optimize_for),
+                                    &mode) != MQVPN_OK) {
         LOG_ERR("config: [Multipath] OptimizeFor must be 'throughput' or 'latency'");
         return -1;
     }
@@ -1363,7 +1363,7 @@ validate_relay_config(mqvpn_file_config_t *cfg)
 #else
     int fd = open(cfg->relay_key_file, O_RDONLY | O_CLOEXEC
 #  ifdef O_NOFOLLOW
-                                         | O_NOFOLLOW
+                                           | O_NOFOLLOW
 #  endif
     );
     if (fd < 0) {

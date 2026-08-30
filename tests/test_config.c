@@ -130,10 +130,10 @@ test_defaults(void)
 static void
 test_relay_valid_ini(void)
 {
-    char *key_path = write_tmp_mode(
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0600);
-    ASSERT_TRUE(key_path != NULL, "relay valid key file created");
-    if (!key_path) return;
+    /* base64 of bytes 0x00..0x1f — distinctive so the decoded-bytes loop
+     * below cannot pass against the zeroed defaults. */
+    char *key_path =
+        write_tmp_mode("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n", 0600);
 
     char ini[1024];
     snprintf(ini, sizeof(ini),
@@ -155,7 +155,7 @@ test_relay_valid_ini(void)
     ASSERT_EQ_STR(cfg.relay_interface, "en1", "relay interface parsed");
     ASSERT_EQ_INT(cfg.relay_key_loaded, 1, "relay key loaded");
     for (size_t i = 0; i < sizeof(cfg.relay_key); i++)
-        ASSERT_EQ_INT(cfg.relay_key[i], 0, "relay key decoded exactly");
+        ASSERT_EQ_INT(cfg.relay_key[i], (int)i, "relay key decoded exactly");
 #else
     ASSERT_EQ_INT(rc, -1, "enabled relay rejected on non-Apple platform");
 #endif
@@ -169,8 +169,7 @@ load_relay_ini(const char *endpoint, const char *key_path, int duplicate)
     snprintf(ini, sizeof(ini),
              "[Server]\nAddress = 198.51.100.10:443\n"
              "[Relay]\nEnabled = true\nEndpoint = %s\nKeyFile = %s\n%s",
-             endpoint, key_path,
-             duplicate ? "[Relay]\nEnabled = true\n" : "");
+             endpoint, key_path, duplicate ? "[Relay]\nEnabled = true\n" : "");
     char *cfg_path = write_tmp(ini);
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
@@ -182,10 +181,8 @@ load_relay_ini(const char *endpoint, const char *key_path, int duplicate)
 static void
 test_relay_rejects_invalid_config(void)
 {
-    char *good_key = write_tmp_mode(
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0600);
-    ASSERT_TRUE(good_key != NULL, "relay invalid-case key file created");
-    if (!good_key) return;
+    char *good_key =
+        write_tmp_mode("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0600);
 
     ASSERT_EQ_INT(load_relay_ini("iphone.local:5443", good_key, 0), -1,
                   "relay hostname rejected");
@@ -201,8 +198,8 @@ test_relay_rejects_invalid_config(void)
     ASSERT_EQ_INT(load_relay_ini("192.168.1.195:5443", "/no/such/relay.key", 0), -1,
                   "missing relay key rejected");
 
-    char *public_key = write_tmp_mode(
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0644);
+    char *public_key =
+        write_tmp_mode("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0644);
     ASSERT_EQ_INT(load_relay_ini("192.168.1.195:5443", public_key, 0), -1,
                   "group/world-readable relay key rejected");
     unlink(public_key);
@@ -218,10 +215,8 @@ test_relay_rejects_invalid_config(void)
 static void
 test_relay_valid_json(void)
 {
-    char *key_path = write_tmp_mode(
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0600);
-    ASSERT_TRUE(key_path != NULL, "relay JSON key file created");
-    if (!key_path) return;
+    char *key_path =
+        write_tmp_mode("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", 0600);
 
     char json[1024];
     snprintf(json, sizeof(json),

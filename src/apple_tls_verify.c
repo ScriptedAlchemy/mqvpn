@@ -28,18 +28,18 @@ evaluate_with_system_trust(const unsigned char *const certs[], const size_t cert
     if (!chain) goto cleanup;
 
     for (size_t i = 0; i < certs_len; i++) {
-        CFDataRef der = CFDataCreate(kCFAllocatorDefault, certs[i],
-                                     (CFIndex)cert_len[i]);
+        CFDataRef der = CFDataCreate(kCFAllocatorDefault, certs[i], (CFIndex)cert_len[i]);
         if (!der) goto cleanup;
-        SecCertificateRef certificate = SecCertificateCreateWithData(kCFAllocatorDefault, der);
+        SecCertificateRef certificate =
+            SecCertificateCreateWithData(kCFAllocatorDefault, der);
         CFRelease(der);
         if (!certificate) goto cleanup;
         CFArrayAppendValue(chain, certificate);
         CFRelease(certificate);
     }
 
-    hostname_string = CFStringCreateWithCString(kCFAllocatorDefault, hostname,
-                                                kCFStringEncodingUTF8);
+    hostname_string =
+        CFStringCreateWithCString(kCFAllocatorDefault, hostname, kCFStringEncodingUTF8);
     if (!hostname_string) goto cleanup;
     policy = SecPolicyCreateSSL(true, hostname_string);
     if (!policy) goto cleanup;

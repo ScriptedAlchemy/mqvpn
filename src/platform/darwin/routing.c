@@ -401,8 +401,8 @@ darwin_cleanup_relay_route(platform_ctx_t *p)
     if (!p->relay_route_configured) return;
     char host_cidr[INET_ADDRSTRLEN + 4];
     snprintf(host_cidr, sizeof(host_cidr), "%s/32", p->relay_ip);
-    const char *argv[] = {"route", "-n", "delete", "-ifscope",
-                          p->relay_route_iface, host_cidr, NULL};
+    const char *argv[] = {"route",   "-n", "delete", "-ifscope", p->relay_route_iface,
+                          host_cidr, NULL};
     (void)run_route_cmd(argv);
     p->relay_route_configured = 0;
     p->relay_route_gateway[0] = '\0';

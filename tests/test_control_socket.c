@@ -279,9 +279,8 @@ record_timer_latency(evutil_socket_t fd, short what, void *arg)
     (void)arg;
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    g_timer_elapsed_ms =
-        (uint64_t)(now.tv_sec - g_timer_started.tv_sec) * 1000 +
-        (uint64_t)(now.tv_nsec - g_timer_started.tv_nsec) / 1000000;
+    g_timer_elapsed_ms = (uint64_t)(now.tv_sec - g_timer_started.tv_sec) * 1000 +
+                         (uint64_t)(now.tv_nsec - g_timer_started.tv_nsec) / 1000000;
 }
 
 /* A maximum get_status response must not monopolize the libevent thread when
@@ -327,8 +326,10 @@ test_large_response_does_not_stall_event_loop(void)
                (n = read(sv[1], response + used, CTRL_MAX_RESP_BYTES - 1 - used)) > 0) {
             used += (size_t)n;
         }
+        char needle[32];
+        snprintf(needle, sizeof(needle), "\"n_clients\":%d", MQVPN_MAX_USERS);
         int ok = response && used > 0 && response[used - 1] == '\n' &&
-                 strstr(response, "\"n_clients\":64") != NULL;
+                 strstr(response, needle) != NULL;
         free(response);
         close(sv[1]);
         _exit(ok ? 0 : 1);

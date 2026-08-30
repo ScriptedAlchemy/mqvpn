@@ -7,8 +7,8 @@
  * Two independent axes:
  *   - WINDOW sizing (TCP_RCV_SCALE / TCP_SND_BUF / PBUF_POOL_SIZE), a
  *     two-way iOS-vs-rest split kept in lwipopts.h. MQVPN_LWIP_IOS_PROFILE
- *     (CMake option) selects it; MQVPN_LWIP_IOS_RCV_SCALE (default 2 =
- *     ~256 KiB window) is the ONLY per-value override allowed.
+ *     (CMake option) selects it; MQVPN_LWIP_IOS_RCV_SCALE (default 4 =
+ *     ~1 MiB window) is the ONLY per-value override allowed.
  *   - POOL sizing (the two pool constants below), a three-way split, because
  *     the pcb pool is what bounds the concurrent-flow cap: tcp_lane.c clamps
  *     hybrid.tcp_max_flows to MQVPN_LWIP_TCP_PCB_POOL / 2.
@@ -58,15 +58,19 @@
 /* iOS NE (~50 MB resident ceiling): flow cap 64.
  *
  * SEG pool 1024 (was 512 through 2026-08): the pool is GLOBAL across
- * flows while TCP_SND_QUEUELEN caps ONE pcb at 118 pbufs (scale 2), and
- * SYN-ACKs for NEW connections draw from this same pool — on exhaustion
- * tcp_listen_input silently tcp_abandon()s the freshly-accepted pcb
- * (vendored tcp_in.c), so concurrent-open bursts stall behind SYN
- * retransmits exactly when a few downlink-saturated flows are already
- * holding their queues. 512 covered only ~4 saturated flows; the field
- * workload (2026-08-27) holds 12 concurrent inner flows. 1024 covers ~8
- * saturated flows plus handshake headroom for the rest, at 32 B/seg =
- * +16 KiB of .bss — noise against the 50 MB NE ceiling. */
+ * flows while TCP_SND_QUEUELEN caps ONE pcb at ceil(4*TCP_SND_BUF/TCP_MSS)
+ * segments — 118 at the scale-2 window this pool was first sized against,
+ * 469 at the shipped scale 4 (65536<<4 send buffer) — and SYN-ACKs for NEW
+ * connections draw from this same pool: on exhaustion tcp_listen_input
+ * silently tcp_abandon()s the freshly-accepted pcb (vendored tcp_in.c), so
+ * concurrent-open bursts stall behind SYN retransmits exactly when a few
+ * downlink-saturated flows are already holding their queues. At scale 2,
+ * 512 covered only ~4 saturated flows and 1024 covered ~8; at scale 4 one
+ * saturated pcb takes 469 segs, so 1024 covers ~2 saturated flows plus
+ * handshake headroom — the rest of the 12-concurrent field workload
+ * (2026-08-27) rides tcp_write()'s ERR_MEM backpressure instead of
+ * stalling handshakes. Cost: 32 B/seg = +16 KiB of .bss over 512 — noise
+ * against the 50 MB NE ceiling. */
 #  define MQVPN_LWIP_TCP_PCB_POOL 128
 #  define MQVPN_LWIP_TCP_SEG_POOL 1024
 #elif defined(__ANDROID__)

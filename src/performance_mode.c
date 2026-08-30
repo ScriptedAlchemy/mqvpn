@@ -7,19 +7,17 @@
 #include <string.h>
 
 const char *
-mqvpn_performance_mode_name(mqvpn_performance_mode_t mode)
+mqvpn_performance_to_name(mqvpn_performance_mode_t mode)
 {
     switch (mode) {
-    case MQVPN_PERF_MAX_THROUGHPUT:
-        return MQVPN_PERFORMANCE_THROUGHPUT;
-    case MQVPN_PERF_LOW_LATENCY:
-        return MQVPN_PERFORMANCE_LATENCY;
+    case MQVPN_PERF_MAX_THROUGHPUT: return MQVPN_PERFORMANCE_THROUGHPUT;
+    case MQVPN_PERF_LOW_LATENCY: return MQVPN_PERFORMANCE_LATENCY;
     }
-    return NULL;
+    return "unknown";
 }
 
 int
-mqvpn_performance_mode_parse(const char *text, size_t len, mqvpn_performance_mode_t *out)
+mqvpn_performance_from_name(const char *text, size_t len, mqvpn_performance_mode_t *out)
 {
     static const struct {
         const char *name;
@@ -35,8 +33,8 @@ mqvpn_performance_mode_parse(const char *text, size_t len, mqvpn_performance_mod
         size_t name_len = strlen(modes[m].name);
         if (len != name_len) continue;
         size_t i = 0;
-        while (i < len
-               && tolower((unsigned char)text[i]) == (unsigned char)modes[m].name[i]) {
+        while (i < len &&
+               tolower((unsigned char)text[i]) == (unsigned char)modes[m].name[i]) {
             i++;
         }
         if (i == len) {
@@ -56,7 +54,7 @@ mqvpn_performance_header_match(const void *name, size_t name_len, const void *va
     if (!name || !value || !out) return 0;
     if (name_len != sizeof(hdr) - 1) return 0;
     if (memcmp(name, hdr, sizeof(hdr) - 1) != 0) return 0;
-    if (mqvpn_performance_mode_parse((const char *)value, value_len, out) != MQVPN_OK) {
+    if (mqvpn_performance_from_name((const char *)value, value_len, out) != MQVPN_OK) {
         *out = MQVPN_PERF_MAX_THROUGHPUT;
     }
     return 1;

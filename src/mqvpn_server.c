@@ -1427,11 +1427,8 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
             stream->conn->performance_status = SVR_PERF_APPLIED;
         } else if (rc == -XQC_EPARAM) {
             stream->conn->performance_status = SVR_PERF_ADMIN_OVERRIDE;
-            LOG_I(s,
-                  "performance mode %s left administrative scheduler unchanged",
-                  mqvpn_performance_mode_name(hdrs->performance_mode)
-                      ? mqvpn_performance_mode_name(hdrs->performance_mode)
-                      : MQVPN_PERFORMANCE_THROUGHPUT);
+            LOG_I(s, "performance mode %s left administrative scheduler unchanged",
+                  mqvpn_performance_to_name(hdrs->performance_mode));
         } else {
             stream->conn->performance_status = SVR_PERF_UNAVAILABLE;
             LOG_W(s, "xqc_conn_set_wlb_policy failed rc=%d", rc);
@@ -1439,9 +1436,7 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
     }
 
     LOG_I(s, "Extended CONNECT for connect-ip received (performance=%s)",
-          mqvpn_performance_mode_name(hdrs->performance_mode)
-              ? mqvpn_performance_mode_name(hdrs->performance_mode)
-              : MQVPN_PERFORMANCE_THROUGHPUT);
+          mqvpn_performance_to_name(hdrs->performance_mode));
     if (svr_masque_send_response(h3_request, stream) < 0) return -1;
     return 0;
 }
@@ -2968,8 +2963,7 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
         snprintf(ci->username, sizeof(ci->username), "%s", conn->username);
         const char *effective = "unavailable";
         if (conn->performance_status == SVR_PERF_APPLIED) {
-            const char *applied = mqvpn_performance_mode_name(conn->performance_mode);
-            if (applied) effective = applied;
+            effective = mqvpn_performance_to_name(conn->performance_mode);
         } else if (conn->performance_status == SVR_PERF_ADMIN_OVERRIDE) {
             effective = "admin_override";
         }
@@ -3076,8 +3070,8 @@ mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
 }
 
 int
-mqvpn_server_get_client_wlb(const mqvpn_server_t *s,
-                            mqvpn_internal_client_wlb_t *out, int max)
+mqvpn_server_get_client_wlb(const mqvpn_server_t *s, mqvpn_internal_client_wlb_t *out,
+                            int max)
 {
     if (!s || !out || max <= 0) return -1;
 
@@ -3093,8 +3087,8 @@ mqvpn_server_get_client_wlb(const mqvpn_server_t *s,
 
         xqc_wlb_path_stats_t snap[MQVPN_MAX_PATHS];
         size_t n = 0;
-        if (xqc_conn_get_wlb_path_stats(srv->engine, &conn->cid, snap,
-                                        MQVPN_MAX_PATHS, &n) == XQC_OK) {
+        if (xqc_conn_get_wlb_path_stats(srv->engine, &conn->cid, snap, MQVPN_MAX_PATHS,
+                                        &n) == XQC_OK) {
             if (n > (size_t)MQVPN_MAX_PATHS) n = (size_t)MQVPN_MAX_PATHS;
             for (size_t p = 0; p < n; p++) {
                 e->paths[e->n_paths].path_id = snap[p].path_id;

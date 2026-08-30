@@ -22,7 +22,7 @@ typedef struct {
     bool enable_multipath; /* server callers pass true */
     mqvpn_scheduler_t scheduler;
     mqvpn_cc_t cc;                    /* congestion control algorithm */
-    uint64_t init_max_path_id;        /* 0 = leave xquic default */
+    uint64_t init_max_path_id;        /* 0 = mqvpn default grant (32) */
     uint64_t recv_rate_bytes_per_sec; /* 0 = no cap. Client-only: the
         builder hard-zeroes it for servers (a server-side conn-level cap
         would throttle client uplink). */

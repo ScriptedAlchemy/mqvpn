@@ -5,6 +5,17 @@ import Darwin
 import Foundation
 import Network
 
+// Harness first: main.swift runs top-level statements in order, so a `var`
+// declared mid-file would re-run its initializer mid-suite and silently reset
+// the failure count accumulated by every earlier check().
+var failures = 0
+func check(_ condition: Bool, _ message: String) {
+    if !condition {
+        failures += 1
+        print("FAIL: \(message)")
+    }
+}
+
 // The production changes these provider-plan tests catch are: installing a
 // full-tunnel route before server authentication, omitting either physical
 // endpoint exclusion, applying the wrong address/DNS/MTU, failing to bound an
@@ -531,14 +542,6 @@ check(relaySampler.ingest(id: MacPathIdentity.relayLANSampleID, timestamp: 10, t
 check(MacSnapshotFreshness.isFresh(receivedAt: 10, now: 12.9) &&
       !MacSnapshotFreshness.isFresh(receivedAt: 10, now: 13.1),
       "a missing provider response expires displayed rates instead of retaining stale throughput")
-
-var failures = 0
-func check(_ condition: Bool, _ message: String) {
-    if !condition {
-        failures += 1
-        print("FAIL: \(message)")
-    }
-}
 
 let key = Data(repeating: 0x5a, count: Int(MQVPN_RELAY_KEY_SIZE))
 let session: UInt64 = 0x0102_0304_0506_0708

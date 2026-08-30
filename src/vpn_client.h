@@ -32,7 +32,7 @@ typedef struct mqvpn_client_cfg_s {
     int reconnect_interval;     /* base reconnect interval in seconds (default 5) */
     int kill_switch;            /* 1=block traffic outside tunnel (default 0) */
     int manage_routes; /* 1=manage host routes (default 1), 0=skip routing setup */
-    uint64_t init_max_path_id;         /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
+    uint64_t init_max_path_id;         /* draft-21 §4.6 TP cap, 0=mqvpn default 32 */
     int tun_mtu;                       /* 0=auto (MSS-derived), >0=cap (floor 1280) */
     int cc;                            /* mqvpn_cc_t: congestion control algorithm */
     int reinjection;                   /* mqvpn_reinjection_t; 0=off (default) */
@@ -48,8 +48,8 @@ typedef struct mqvpn_client_cfg_s {
     int relay_enabled;            /* [Relay] Enabled */
     const char *relay_ip;         /* validated numeric private IPv4 */
     int relay_port;
-    const char *relay_interface;  /* optional LAN interface */
-    const uint8_t *relay_key;     /* exactly 32 decoded bytes */
+    const char *relay_interface; /* optional LAN interface */
+    const uint8_t *relay_key;    /* exactly 32 decoded bytes */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */

@@ -192,7 +192,7 @@ main(int argc, char *argv[])
     const char *log_level_str = NULL;
     const char *scheduler_str = NULL;
     const char *cc_str = NULL;
-    uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
+    uint64_t init_max_path_id = 0; /* 0 = unset → mqvpn default grant (32) */
     int init_max_path_id_set = 0;
     int cli_mtu = -1;     /* -1 means "not set by CLI" */
     int max_clients = -1; /* -1 means "not set by CLI" */
@@ -515,13 +515,11 @@ main(int argc, char *argv[])
     }
 
     if (strcmp(eff_mode, "client") == 0) {
+        /* optimize_for was validated by validate_optimize_for() at config
+         * load (defaults are valid too), so this parse cannot fail. */
         mqvpn_performance_mode_t perf_mode = MQVPN_PERF_MAX_THROUGHPUT;
-        if (mqvpn_performance_mode_parse(file_cfg.optimize_for,
-                                         strlen(file_cfg.optimize_for),
-                                         &perf_mode) != MQVPN_OK) {
-            fprintf(stderr, "error: OptimizeFor must be 'throughput' or 'latency'\n");
-            return 1;
-        }
+        mqvpn_performance_from_name(file_cfg.optimize_for,
+                                    strlen(file_cfg.optimize_for), &perf_mode);
         if (!eff_server || eff_server[0] == '\0') {
             fprintf(stderr, "error: --server is required for client mode\n");
             return 1;
