@@ -985,8 +985,8 @@ if(BUILD_TESTING)
 
     add_executable(test_relay_adapter_darwin tests/test_relay_adapter_darwin.c
         src/platform/darwin/relay_adapter.c)
-    target_link_libraries(test_relay_adapter_darwin mqvpn_lib ${CRYPTO_LIB}
-        ${EVENT_LIB} stdc++)
+    target_link_libraries(test_relay_adapter_darwin mqvpn_lib ${XQUIC_LIB}
+        ${SSL_LIB} ${CRYPTO_LIB} ${EVENT_LIB} dl m stdc++)
     target_include_directories(test_relay_adapter_darwin PRIVATE
         ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/platform/darwin ${EVENT_INCLUDE_DIR})
