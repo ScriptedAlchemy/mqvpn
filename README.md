@@ -10,10 +10,27 @@
         width="400">
     </picture>
   </h1>
+
   <p><b>All your connections. One stronger connection.</b></p>
+
   <p>
     <a href="https://docs.mqvpn.org/">Documentation</a> |
-    <a href="https://discord.gg/rjEqtBNtF">Discord community</a>
+    <a href="https://discord.gg/5rsqnZfBqu">Discord community</a>
+  </p>
+
+  <p>
+    <a href="https://play.google.com/store/apps/details?id=org.mqvpn.app">
+      <img
+        src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png"
+        alt="Get it on Google Play"
+        height="80">
+    </a>
+    <a href="https://f-droid.org/packages/org.mqvpn.app/">
+      <img
+        src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
+        alt="Get it on F-Droid"
+        height="80">
+    </a>
   </p>
 </div>
 
@@ -79,7 +96,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 | [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
 | [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
 | iOS | iOS 15 | — | 🚧 | App Store planned |
-| [Android](https://github.com/mp0rta/mqvpn/releases) | Android 8.0 (API 26) | — | 🧪 | APK / F-Droid pending / Play Store planned |
+| [Android](https://f-droid.org/packages/org.mqvpn.app/) | Android 8.0 (API 26) | — | 🧪 | F-Droid / APK / Play Store planned |
 
 > ✅ Supported · 🧪 Experimental · 🚧 In development · 📋 Planned
 
@@ -748,7 +765,7 @@ mqvpn is designed to comply with the following RFCs as much as possible.
 
 ## Community
 
-Welcome to join the [mqvpn community on Discord](https://discord.gg/rjEqtBNtF) to ask questions, discuss use cases, share feedback, and contribute to the project.
+Welcome to join the [mqvpn community on Discord](https://discord.gg/5rsqnZfBqu) to ask questions, discuss use cases, share feedback, and contribute to the project.
 
 ## Disclaimer
 
