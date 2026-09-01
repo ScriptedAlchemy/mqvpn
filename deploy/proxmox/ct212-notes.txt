@@ -25,6 +25,15 @@ RESOURCE PRIORITY
   `pct config 212 | grep -E '^(cores|cpuunits|memory|swap):'`
   `systemctl show pve-container@212.service -p CPUWeight -p IOWeight`
 
+CURRENT DEPLOYMENT
+- Source fork: `ScriptedAlchemy/mqvpn`, consolidated through commit `95ce12fe1499f698e6a5bb16a6e0b36373b4a2d6`.
+- Installed server version: `mqvpn 0.16.2`.
+- Installed binary SHA-256: `6ad1cd64c58e2f41443e2e92e7b8416a0e9f3f5850e2df05ca053ddc6c350d6a`.
+- Rollback binary: `/usr/local/bin/mqvpn.pre-95ce12f`, SHA-256 `a845d1b135d8dc8bb803da0a7fb1a1cdaeac9eef12df28fd29fb2fa038ffe365`.
+- The production binary was built and tested inside CT 212's Debian 12 / glibc 2.36 environment. Do not deploy an Ubuntu 24.04 build: its newer glibc is incompatible with this container.
+- Verification on 2026-09-01: 35/35 Linux tests, service/listener/TUN/NAT checks, one authenticated eight-path client stable for more than five minutes, and over 600 MiB transferred in each direction after restart.
+- A manual stop of `mqvpn-server.service` also stops `mqvpn-zerofs-alias.service`; start the alias unit after bringing the main server back, then verify all three `mqvpn-zerofs-alias` iptables rules.
+
 SERVICES AND CHECKS
 - Main service: `mqvpn-server.service`.
 - Expected listener: UDP 0.0.0.0:443.
@@ -59,4 +68,4 @@ FAILURE BOUNDARIES
 - If tunnel connects without internet/private access, check forwarding, MASQUERADE, FORWARD rules, and the CT default route.
 - If the ZeroFS alias fails, verify CT 198 is listening on 10.10.10.55:8080 before changing mqvpn.
 
-Updated 2026-08-25 for Mac-main + iPhone-cellular relay, private ZeroFS routing, and maximum relative CPU/I/O priority.
+Updated 2026-09-01 for the consolidated production deployment, Mac-main + iPhone-cellular relay, private ZeroFS routing, and maximum relative CPU/I/O priority.
