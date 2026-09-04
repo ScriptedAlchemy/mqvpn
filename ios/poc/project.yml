@@ -45,6 +45,9 @@ targets:
         UILaunchScreen: {}
         NSSupportsLiveActivities: true
         NSSupportsLiveActivitiesFrequentUpdates: true
+        # Declared so the opt-in Live Activity keepalive (TunnelKeepAlive) may
+        # hold the app runnable while the tunnel is up; inert unless enabled.
+        UIBackgroundModes: [audio]
         NSLocalNetworkUsageDescription: Allow your Mac to send authenticated mqvpn relay datagrams to this iPhone.
         NSBonjourServices:
           - _mqvpn-relay._udp

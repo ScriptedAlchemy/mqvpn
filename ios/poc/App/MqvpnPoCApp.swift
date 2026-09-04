@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
+import AVFoundation
 import SwiftUI
+import os
 @preconcurrency import NetworkExtension
 
 @main
@@ -12,7 +14,8 @@ struct MqvpnPoCApp: App {
     var body: some Scene {
         WindowGroup {
             DashboardView(controller: controller, eventLog: controller.eventLog)
-                // Foreground-only polling: pause IPC when not active to avoid
+                // Poll while foregrounded OR while the tunnel keepalive holds the app
+                // alive; otherwise pause IPC to avoid
                 // battery drain and pointless sendProviderMessage churn.
                 .onChange(of: scenePhase) { phase in
                     controller.setScenePhaseActive(phase == .active)
@@ -56,6 +59,27 @@ final class TunnelController: ObservableObject {
     private var lastIngestedSeq: UInt64 = 0
     private var lastIngestedTimestamp: Double = 0
     private var liveActivityStarted = false
+    // Holds the app runnable while the tunnel is up so the Live Activity
+    // keeps receiving updates after the user leaves the app. The tunnel
+    // extension cannot update it — Activity.activities lists only the
+    // activities the calling process created, and this app is the creator —
+    // and the Aug-30 cleanup removed the app-side publisher entirely, so
+    // nothing anywhere could reach the island and it sat stale at "--".
+    private let keepAlive = TunnelKeepAlive()
+    /// Opt-in, default off. The tunnel itself needs no background execution —
+    /// the extension runs regardless — so this trades a silent audio session
+    /// for an island that keeps updating after the app is backgrounded.
+    static let keepAliveDefaultsKey = "liveActivityKeepAlive"
+    private var keepAliveEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.keepAliveDefaultsKey)
+    }
+    private var defaultsObserver: (any NSObjectProtocol)?
+    private var liveActivitySampler = LiveActivityRateSampler()
+    // Publish throttle, the same gate the extension's reporter uses:
+    // ActivityKit budgets background updates, and publishing every poll
+    // exhausted that budget within minutes.
+    private var lastPublished: LiveActivityContentState?
+    private var lastPublishedAt: Double?
 
     var isEditable: Bool { manager != nil && status == .disconnected }
     var isConnectable: Bool {
@@ -179,7 +203,7 @@ final class TunnelController: ObservableObject {
                 liveActivityStarted = MqvpnLiveActivityLifecycle.begin(mode: operatingMode)
             }
         }
-        reconcilePolling()
+        reconcileKeepAlive()
     }
 
     func start() {
@@ -288,9 +312,28 @@ final class TunnelController: ObservableObject {
 
     /// Single decision point: poll only while foregrounded AND the tunnel is
     /// up. When the tunnel is down, drop the snapshot so the UI shows no data.
+    /// Keepalive follows two inputs — tunnel up, and the user's opt-in — and
+    /// re-evaluates on either changing. The defaults observer is armed on
+    /// first use so a toggle flipped while connected takes effect at once.
+    private func reconcileKeepAlive() {
+        if defaultsObserver == nil {
+            defaultsObserver = NotificationCenter.default.addObserver(
+                forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.reconcileKeepAlive() }
+            }
+        }
+        if Self.isUp(status) && keepAliveEnabled {
+            keepAlive.begin()
+        } else {
+            keepAlive.end()
+        }
+        reconcilePolling()
+    }
+
     private func reconcilePolling() {
         let up = (status == .connected || status == .reasserting)
-        if scenePhaseActive && up {
+        if (scenePhaseActive || keepAlive.isActive) && up {
             startPolling()
         } else {
             stopPolling()
@@ -319,6 +362,9 @@ final class TunnelController: ObservableObject {
         lastIngestedSeq = 0
         lastIngestedTimestamp = 0
         eventLog.resetBaseline()
+        liveActivitySampler = LiveActivityRateSampler()
+        lastPublished = nil
+        lastPublishedAt = nil
     }
 
     private func poll() {
@@ -393,6 +439,31 @@ final class TunnelController: ObservableObject {
         prevSnapshot = snap
         snapshot = snap
         eventLog.ingest(snap)
+        publishLiveActivity(snap)
+    }
+
+    /// This app is the only process that can update the island, so every
+    /// ingested snapshot is a candidate. Same gate as the extension's
+    /// reporter used, for the same reason: publishing every 1.5 s poll blew
+    /// ActivityKit's background-update budget within minutes.
+    private func publishLiveActivity(_ snap: TunnelSnapshot) {
+        guard liveActivityStarted else { return }
+        if #available(iOS 16.2, *) {
+            let published = LiveActivityContentFactory.make(snapshot: snap,
+                                                            sampler: &liveActivitySampler)
+            guard LiveActivityPublishGate.shouldPublish(candidate: published.state,
+                                                        lastPublished: lastPublished,
+                                                        lastPublishedAt: lastPublishedAt) else {
+                return
+            }
+            lastPublished = published.state
+            lastPublishedAt = published.state.sampledAt
+            let mode = operatingMode
+            Task {
+                _ = await MqvpnLiveActivityLifecycle.updateExisting(
+                    mode: mode, state: published.state, staleDate: published.staleDate)
+            }
+        }
     }
 
     private static func describe(_ s: NEVPNStatus) -> String {
@@ -439,4 +510,91 @@ final class NEConfigStore: ReorderConfigStore {
     }
     func commit() async throws { try await manager.saveToPreferences() }
     func refresh() async throws { try await manager.loadFromPreferences() }
+}
+
+/// Holds the app runnable while the tunnel is up by looping silence.
+///
+/// iOS suspends an ordinary app moments after it leaves the foreground, and
+/// nothing else in this app can then publish to the Live Activity. An active
+/// audio session is the one first-class state that keeps a process running
+/// as long as it likes, so while the tunnel is connected we play a silent
+/// buffer on loop, mixed with (never ducking) whatever the user is actually
+/// listening to, and stop the moment the tunnel goes down. Same mechanism
+/// the ZeroFS Drop uploader relies on.
+@MainActor
+final class TunnelKeepAlive {
+    private static let log = Logger(subsystem: "mqvpn.poc", category: "keepalive")
+    private var player: AVAudioPlayer?
+    private var interruptionObserver: (any NSObjectProtocol)?
+
+    var isActive: Bool { player != nil }
+
+    func begin() {
+        guard player == nil else { return }
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback, mode: .default, options: [.mixWithOthers]
+            )
+            try AVAudioSession.sharedInstance().setActive(true)
+            let silent = try AVAudioPlayer(data: Self.silentWAV())
+            silent.numberOfLoops = -1
+            silent.volume = 0
+            silent.play()
+            player = silent
+            observeInterruptions()
+            Self.log.notice("tunnel keepalive: audio session active")
+        } catch {
+            player = nil
+            Self.log.error("tunnel keepalive failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// A phone call or Siri ends the audio session; without resuming, iOS
+    /// suspends the app seconds later and the island goes stale again.
+    private func observeInterruptions() {
+        guard interruptionObserver == nil else { return }
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+            Task { @MainActor in
+                guard let self, let player = self.player else { return }
+                try? AVAudioSession.sharedInstance().setActive(true)
+                player.play()
+                Self.log.notice("tunnel keepalive: resumed after interruption")
+            }
+        }
+    }
+
+    func end() {
+        guard player != nil else { return }
+        player?.stop()
+        player = nil
+        try? AVAudioSession.sharedInstance().setActive(
+            false, options: [.notifyOthersOnDeactivation]
+        )
+        Self.log.notice("tunnel keepalive: released")
+    }
+
+    /// One second of 16-bit mono silence at 8 kHz, built in memory so the
+    /// bundle carries no asset.
+    private static func silentWAV() -> Data {
+        let sampleRate: UInt32 = 8_000
+        let samples = Int(sampleRate)
+        let dataSize = UInt32(samples * 2)
+        var wav = Data()
+        func append<T: FixedWidthInteger>(_ value: T) {
+            withUnsafeBytes(of: value.littleEndian) { wav.append(contentsOf: $0) }
+        }
+        wav.append(contentsOf: Array("RIFF".utf8)); append(UInt32(36 + dataSize))
+        wav.append(contentsOf: Array("WAVE".utf8)); wav.append(contentsOf: Array("fmt ".utf8))
+        append(UInt32(16)); append(UInt16(1)); append(UInt16(1)); append(sampleRate)
+        append(sampleRate * 2); append(UInt16(2)); append(UInt16(16))
+        wav.append(contentsOf: Array("data".utf8)); append(dataSize)
+        wav.append(Data(count: samples * 2))
+        return wav
+    }
 }

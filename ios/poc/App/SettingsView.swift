@@ -10,6 +10,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var enabled: Bool
+    @AppStorage(TunnelController.keepAliveDefaultsKey) private var keepAliveEnabled = false
     @State private var profile: Int
     @State private var portsText: String
     @State private var bondTCP: Bool
@@ -86,6 +87,13 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .disabled(!controller.isEditable)
+                }
+                Section {
+                    Toggle("Keep Live Activity updating in background", isOn: $keepAliveEnabled)
+                } header: {
+                    Text("Live Activity")
+                } footer: {
+                    Text("The tunnel does not need this. It holds the app open with a silent audio session so the island keeps showing speeds after you leave the app; off means speeds update only while the app is open.")
                 }
                 Section("Server") {
                     TextField("Server Host/IP", text: $hostText)
