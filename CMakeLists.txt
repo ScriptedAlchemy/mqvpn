@@ -691,6 +691,12 @@ if(BUILD_TESTING)
         ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
     add_test(NAME test_config_relay_nonapple COMMAND test_config_relay_nonapple)
 
+    add_executable(test_path_metrics_selection tests/test_path_metrics_selection.c)
+    target_include_directories(test_path_metrics_selection PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include ${XQUIC_INCLUDE_DIR})
+    set_target_properties(test_path_metrics_selection PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_path_metrics_selection COMMAND test_path_metrics_selection)
+
     add_executable(test_conn_settings tests/test_conn_settings.c)
     target_link_libraries(test_conn_settings mqvpn_lib ${XQUIC_LIB} ${SSL_LIB}
                           ${CRYPTO_LIB} c++)
@@ -1070,6 +1076,12 @@ if(BUILD_TESTING)
     target_include_directories(test_conn_settings PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
     set_target_properties(test_conn_settings PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
+
+    add_executable(test_path_metrics_selection tests/test_path_metrics_selection.c)
+    target_include_directories(test_path_metrics_selection PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include ${XQUIC_INCLUDE_DIR})
+    set_target_properties(test_path_metrics_selection PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_path_metrics_selection COMMAND test_path_metrics_selection)
 
     # Server-side mqvpn-tcp dispatch test (real xquic engine, gated on the
     # server-side egress being built — see SVR_STREAM_ROLE_CONNECT_TCP).

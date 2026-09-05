@@ -51,6 +51,7 @@
 
 #include "addr_pool.h"
 #include "auth.h"
+#include "path_metrics_selection.h"
 #include "flow_sched.h"
 #include "icmp.h"
 #include "reorder.h"
@@ -3005,10 +3006,12 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
         for (uint32_t p = 0; st.paths_info && p < st.paths_info_count; p++)
             ci->bytes_rx += st.paths_info[p].path_recv_bytes;
 
+        size_t selected[MQVPN_MAX_PATHS];
+        size_t n_selected = mqvpn_select_path_metrics(
+            st.paths_info, st.paths_info_count, selected, MQVPN_MAX_PATHS);
         int np = 0;
-        for (uint32_t p = 0;
-             st.paths_info && p < st.paths_info_count && np < MQVPN_MAX_PATHS; p++) {
-            xqc_path_metrics_t *pm = &st.paths_info[p];
+        for (size_t p = 0; p < n_selected; p++) {
+            xqc_path_metrics_t *pm = &st.paths_info[selected[p]];
 
             mqvpn_path_stats_t *ps = &ci->paths[np];
             ps->struct_size = sizeof(*ps);
@@ -3054,10 +3057,11 @@ mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
         e->n_paths = 0;
 
         xqc_conn_stats_t st = xqc_conn_get_stats(srv->engine, &conn->cid);
-        for (uint32_t p = 0;
-             st.paths_info && p < st.paths_info_count && e->n_paths < MQVPN_MAX_PATHS;
-             p++) {
-            xqc_path_metrics_t *pm = &st.paths_info[p];
+        size_t selected[MQVPN_MAX_PATHS];
+        size_t n_selected = mqvpn_select_path_metrics(
+            st.paths_info, st.paths_info_count, selected, MQVPN_MAX_PATHS);
+        for (size_t p = 0; p < n_selected; p++) {
+            xqc_path_metrics_t *pm = &st.paths_info[selected[p]];
             e->paths[e->n_paths].path_id = pm->path_id;
             e->paths[e->n_paths].reinject_tx_bytes = pm->path_send_reinject_bytes;
             e->n_paths++;

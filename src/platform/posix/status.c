@@ -163,6 +163,8 @@ print_client(const char *obj)
             path_obj[plen] = '\0';
 
             int64_t srtt = json_read_int64(json_find_key(path_obj, "srtt_ms"));
+            const char *path_id_v = json_find_key(path_obj, "path_id");
+            int64_t path_id = path_id_v ? json_read_int64(path_id_v) : idx;
             int64_t min_rtt = json_read_int64(json_find_key(path_obj, "min_rtt_ms"));
             uint64_t cwnd = (uint64_t)json_read_int64(json_find_key(path_obj, "cwnd"));
 
@@ -188,13 +190,13 @@ print_client(const char *obj)
                     (unsigned)json_read_int64(json_find_key(path_obj, "weight_pct"));
                 int warmup = warmup_v && strncmp(warmup_v, "true", 4) == 0;
 
-                printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64
+                printf("  path %" PRId64 ": srtt=%" PRId64 "ms min_rtt=%" PRId64
                        "ms cwnd=%s %s goodput=%" PRIu64 "B/s warmup=%s weight=%u%%\n",
-                       idx, srtt, min_rtt, cwnd_str, state_str, goodput_bps,
+                       path_id, srtt, min_rtt, cwnd_str, state_str, goodput_bps,
                        warmup ? "true" : "false", weight_pct);
             } else {
-                printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64 "ms cwnd=%s %s\n",
-                       idx, srtt, min_rtt, cwnd_str, state_str);
+                printf("  path %" PRId64 ": srtt=%" PRId64 "ms min_rtt=%" PRId64 "ms cwnd=%s %s\n",
+                       path_id, srtt, min_rtt, cwnd_str, state_str);
             }
 
             p = end;

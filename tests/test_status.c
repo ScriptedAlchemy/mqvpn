@@ -325,6 +325,8 @@ TEST(print_client_goodput_bytes_per_second)
     ssize_t n = read(capture[0], output, sizeof(output) - 1);
     close(capture[0]);
     ASSERT_EQ(n > 0, 1);
+    ASSERT_EQ(strstr(output, "path 7:") != NULL, 1);
+    ASSERT_EQ(strstr(output, "path 0:") == NULL, 1);
     ASSERT_EQ(strstr(output, "goodput=123456B/s") != NULL, 1);
 }
 
