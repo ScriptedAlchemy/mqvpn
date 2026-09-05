@@ -1,5 +1,7 @@
 # Cellular contribution investigation, 2026-09-04
 
+Historical deployment receipt and traffic samples, not a live status page.
+
 ## Verified topology
 
 The Mac mqvpn profile was disconnected and Tailscale was connected. CT212

@@ -1,5 +1,9 @@
 # iOS per-interface Live Activity implementation report
 
+Historical build report, not current runtime guidance. The provider-update
+assumption below was superseded by the app-process publisher in `45342fc`.
+See [Apple clients](../apple-clients.md) for current limitations.
+
 Branch: `codex/ios-live-activity`  
 Worktree: `/Volumes/bigssd/projects/mqvpn-live-activity`  
 Base: `e50ef34`

@@ -1,5 +1,7 @@
 # RESOLVED: the 22 Mbps upload ceiling (2026-08-30)
 
+Historical diagnosis and measurements; deployment details describe the run below.
+
 > The original version of this document named the hybrid lwIP TCP lane as the
 > prime suspect and proposed disabling `[Hybrid]` on the server. Both were
 > wrong — kept here as a corrected record so nobody re-walks the dead ends.
@@ -76,10 +78,10 @@ filled, 0.34 % late-dropped, zero pool/overflow drops.
 2. **Hybrid-lane reset storm** (`close_msg:remote reset|err:268`): still
    open, still churning background TCP (Apple push/IMAP re-flows by the
    thousands). Not the upload path, but worth its own session.
-3. **Server per-path status is misleading**: `get_status` exposes only the
+3. **Server per-path status (fixed in `1dae499`)**: `get_status` exposed only the
    first 8 path slots; after path churn the live paths (higher IDs) are
-   invisible and the listed ones are stale/closed. Diagnose per-path traffic
-   with tcpdump by source port instead. Fix someday.
+   invisible and the listed ones were stale/closed. Active paths now take
+   priority in the bounded status list, and the CLI prints their actual IDs.
 4. `./build.sh` on Linux broke at `test_routing_seq_darwin` after the relay
    fields went Darwin-only; fixed by dropping the target from the non-Apple
    test block (this commit). `make -C build mqvpn` was the workaround.

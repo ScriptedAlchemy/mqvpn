@@ -166,7 +166,10 @@ Pre-built binaries are shipped for Windows amd64 and arm64. Download `mqvpn_<VER
 
 Pre-built CLI binaries are shipped for Apple silicon (arm64). Download `mqvpn_<VERSION>_darwin_arm64.tar.gz` from [Releases](https://github.com/mp0rta/mqvpn/releases/latest), extract, and follow the bundled `README.txt` (sudo required).
 
-A development Network Extension app that bonds the Mac's Wi-Fi/Ethernet path with an optional authenticated iPhone cellular relay lives under `macos/poc`. Build native libraries with `./macos/build-macos.sh`, generate the Xcode project with `xcodegen --spec macos/poc/project.yml`, and sign both `com.zackjackson.mqvpn.mac` and `com.zackjackson.mqvpn.mac.PacketTunnel` for team `5NDMQZP6KR`. The app never invokes the root CLI or `route`/`pfctl`.
+A development Network Extension app with an optional iPhone cellular relay lives
+under `macos/poc`. See [Apple clients](docs/apple-clients.md) for build, signing,
+relay setup, and validation instructions. The app manages its VPN profile through
+Network Extension; it does not invoke the root CLI or `route`/`pfctl`.
 
 ### Verifying downloads
 

@@ -1,4 +1,7 @@
-# macOS Network Extension client — Task 6 acceptance
+# macOS Network Extension client — 2026-08-24 acceptance
+
+Historical measurements for the build below; unchecked items are not a current
+task list. See [Apple clients](../apple-clients.md) for validation guidance.
 
 Branch: `codex/lan-relay`  
 Workspace: `/Volumes/bigssd/projects/mqvpn`  

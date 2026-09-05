@@ -25,7 +25,7 @@ RESOURCE PRIORITY
   `pct config 212 | grep -E '^(cores|cpuunits|memory|swap):'`
   `systemctl show pve-container@212.service -p CPUWeight -p IOWeight`
 
-CURRENT DEPLOYMENT
+DEPLOYMENT SNAPSHOT (2026-09-01; not live state)
 - Source fork: `ScriptedAlchemy/mqvpn`, consolidated through commit `95ce12fe1499f698e6a5bb16a6e0b36373b4a2d6`.
 - Installed server version: `mqvpn 0.16.2`.
 - Installed binary SHA-256: `6ad1cd64c58e2f41443e2e92e7b8416a0e9f3f5850e2df05ca053ddc6c350d6a`.
@@ -33,6 +33,7 @@ CURRENT DEPLOYMENT
 - The production binary was built and tested inside CT 212's Debian 12 / glibc 2.36 environment. Do not deploy an Ubuntu 24.04 build: its newer glibc is incompatible with this container.
 - Verification on 2026-09-01: 35/35 Linux tests, service/listener/TUN/NAT checks, one authenticated eight-path client stable for more than five minutes, and over 600 MiB transferred in each direction after restart.
 - A manual stop of `mqvpn-server.service` also stops `mqvpn-zerofs-alias.service`; start the alias unit after bringing the main server back, then verify all three `mqvpn-zerofs-alias` iptables rules.
+- Later deployment receipts: docs/report/2026-09-04-cellular-diagnostics.md. Verify the running binary and service before using any recorded version as current.
 
 SERVICES AND CHECKS
 - Main service: `mqvpn-server.service`.
@@ -59,7 +60,7 @@ PRIVATE ZEROFS ALIAS
 CLIENT DEVELOPMENT STATUS
 - iOS VPN client is signed as `com.zackjackson.mqvpn` with Packet Tunnel extension `com.zackjackson.mqvpn.PacketTunnel`.
 - macOS already has a native root-run CLI client using utun, route/DNS management, pf kill switch, direct interface paths, and Hybrid mode.
-- LAN relay work is in branch `codex/lan-relay`: Mac owns one mqvpn session; iPhone relay mode will forward one opaque QUIC path over cellular. It is not a second mqvpn client or a general router.
+- The macOS Network Extension app in `macos/poc` owns one mqvpn session; iPhone relay mode forwards opaque QUIC datagrams over cellular. It is not a second mqvpn client or a general router. See docs/apple-clients.md for setup and validation.
 - Relay credentials are separate from the mqvpn server key and must never be placed in Proxmox Notes.
 
 FAILURE BOUNDARIES

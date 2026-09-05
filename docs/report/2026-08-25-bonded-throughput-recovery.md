@@ -1,5 +1,7 @@
 # Bonded throughput recovery — WLB blackhole fix + Network.framework relay
 
+Historical measurements for the builds below, not current deployment status.
+
 Branch: `codex/lan-relay` at `ba4a6fd` (xquic `13f607d`)
 Mac extension build: 2026-08-25 11:39, running as PID 43149 from 11:43:27
 Physical rig: Mac (en0 wired + en1 Wi-Fi) + iPhone 17 Pro Max cellular relay,
@@ -63,8 +65,8 @@ downlink 180.8 ≈ line-rate parity through the tunnel.
 xquic pin `29fb1ca`). Apple Settings/engine leftovers and the three
 reviewer follow-ups below are still uncommitted.
 
-**Official spec:** `docs/superpowers/specs/2026-08-25-adaptive-throughput-scheduler-design.md`
-**Official plan:** `docs/superpowers/plans/2026-08-25-adaptive-throughput-scheduler.md`
+The implementation plan was retired; maintained guidance is in
+[Apple clients](../apple-clients.md).
 
 **Uncommitted dirty / new (excluding `DerivedData*` build trees):**
 - New: `src/performance_mode.{c,h}`, `ios/poc/Shared/SchedulerSettings.swift`
