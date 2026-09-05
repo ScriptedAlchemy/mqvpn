@@ -4,18 +4,9 @@
 import Foundation
 import Network
 
-/// Policy for the Network.framework relay transport, kept free of sockets and
-/// connection objects so the host suite can prove it without a LAN.
-///
-/// The relay hop is Mac -> iPhone over the shared Wi-Fi/wired LAN. It must
-/// never egress through this Mac's own packet tunnel: that is the loop which
-/// stranded the session when installing the default route let the kernel
-/// reselect a utun source address.
+/// Keeps the Mac-to-iPhone LAN hop outside the packet tunnel.
 enum MacRelayTransportPolicy {
-    /// `NWInterface.InterfaceType.other` is how Network.framework reports utun
-    /// and other virtual interfaces. Prohibiting it, rather than pinning one
-    /// exact source address, is what keeps the relay off our own tunnel while
-    /// still allowing the system to rebind within the LAN interface.
+    /// Exclude virtual interfaces (including utun) while allowing LAN rebinding.
     static let prohibitedInterfaceTypes: [NWInterface.InterfaceType] = [.other, .cellular]
 
     /// Bytes allowed in flight to Network.framework before the core is told to
@@ -29,9 +20,7 @@ enum MacRelayTransportPolicy {
         outstandingBytes + pendingBytes > sendHighWaterBytes
     }
 
-    /// Map a Network.framework failure onto the errno the mqvpn core expects.
-    /// Route-scoped failures keep the recovery behaviour the socket path had:
-    /// refresh and retry rather than tearing the authenticated session down.
+    /// Translate Network.framework failures to the core's socket error codes.
     static func errnoValue(for error: NWError) -> Int32 {
         switch error {
         case let .posix(code):

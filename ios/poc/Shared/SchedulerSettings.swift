@@ -2,11 +2,8 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 import Foundation
-import CoreFoundation
 
-/// Two-value path policy shared by both Apple apps. Product copy is
-/// "Optimize For" / Max Throughput / Low Latency — never xquic scheduler names.
-/// Missing or unknown provider values fail closed to Max Throughput.
+/// Shared path policy. Missing or unknown values default to Max Throughput.
 struct SchedulerSettings: Equatable {
     let policy: Int
 

@@ -15,7 +15,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // the start/stop lifecycle, so the reader must tolerate a nil cache.
     private var snapshot: SnapshotCache?
     private var snapshotReader: (() -> TunnelSnapshot?)?
-    private var liveActivityReporter: MqvpnLiveActivityReporting?
     private var defaultPathObservation: NSKeyValueObservation?
 
     override func startTunnel(options: [String: NSObject]?) async throws {
@@ -54,13 +53,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
             }
             relay.start()
-            if #available(iOS 16.2, *) {
-                let reporter = MqvpnLiveActivityReporter(mode: .macRelay) { [weak relay] in
-                    relay?.readSnapshot()
-                }
-                liveActivityReporter = reporter
-                reporter.start()
-            }
             return
         }
         let engine = MqvpnEngine()
@@ -119,13 +111,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                             self.readLoop()
                             metrics.start()
                             snapshot.start()
-                            if #available(iOS 16.2, *) {
-                                let reporter = MqvpnLiveActivityReporter(mode: .vpn) { [weak snapshot] in
-                                    snapshot?.read()
-                                }
-                                self.liveActivityReporter = reporter
-                                reporter.start()
-                            }
                             cont.resume()
                         }
                         if let pending = pendingConfig {
@@ -240,12 +225,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // just means the server falls back to its idle timeout) and gives
         // repeated gate runs a zero state start.
         providerLog.notice("STOP_BEGIN")
-        let reporter = liveActivityReporter
-        // ActivityKit is ancillary UI: it must never delay or precede the
-        // packet/relay transport teardown, so its cleanup is awaited second.
         await stopTransport()
-        await reporter?.stop()
-        liveActivityReporter = nil
     }
 
     /// Detaches engine callbacks and shuts the transport down, but leaves the

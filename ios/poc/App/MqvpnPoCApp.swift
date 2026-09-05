@@ -59,12 +59,7 @@ final class TunnelController: ObservableObject {
     private var lastIngestedSeq: UInt64 = 0
     private var lastIngestedTimestamp: Double = 0
     private var liveActivityStarted = false
-    // Holds the app runnable while the tunnel is up so the Live Activity
-    // keeps receiving updates after the user leaves the app. The tunnel
-    // extension cannot update it — Activity.activities lists only the
-    // activities the calling process created, and this app is the creator —
-    // and the Aug-30 cleanup removed the app-side publisher entirely, so
-    // nothing anywhere could reach the island and it sat stale at "--".
+    // Optional app-process keepalive for background Live Activity publishing.
     private let keepAlive = TunnelKeepAlive()
     /// Opt-in, default off. The tunnel itself needs no background execution —
     /// the extension runs regardless — so this trades a silent audio session
@@ -405,18 +400,11 @@ final class TunnelController: ObservableObject {
         return out
     }
 
-    /// Compute per-path rates from the previous sample, then publish. Live
-    /// Activity updates are NOT published here: the provider's
-    /// MqvpnLiveActivityReporter owns them for every state this app ever
-    /// covered (it runs whenever the tunnel is up, foreground or not).
+    /// Update dashboard rates and publish the accepted VPN or relay snapshot.
     private func ingest(_ snap: TunnelSnapshot) {
         if snap.operatingMode == .macRelay {
-            prevSnapshot = snap
-            snapshot = snap
             pathRates = [:]
-            return
-        }
-        if let prev = prevSnapshot {
+        } else if let prev = prevSnapshot {
             let dt = snap.timestamp - prev.timestamp
             if dt > 0.05 {
                 // Sum every outer flow on an interface before differencing.
@@ -442,10 +430,7 @@ final class TunnelController: ObservableObject {
         publishLiveActivity(snap)
     }
 
-    /// This app is the only process that can update the island, so every
-    /// ingested snapshot is a candidate. Same gate as the extension's
-    /// reporter used, for the same reason: publishing every 1.5 s poll blew
-    /// ActivityKit's background-update budget within minutes.
+    /// Throttle visible updates independently of the snapshot polling cadence.
     private func publishLiveActivity(_ snap: TunnelSnapshot) {
         guard liveActivityStarted else { return }
         if #available(iOS 16.2, *) {
@@ -512,15 +497,8 @@ final class NEConfigStore: ReorderConfigStore {
     func refresh() async throws { try await manager.loadFromPreferences() }
 }
 
-/// Holds the app runnable while the tunnel is up by looping silence.
-///
-/// iOS suspends an ordinary app moments after it leaves the foreground, and
-/// nothing else in this app can then publish to the Live Activity. An active
-/// audio session is the one first-class state that keeps a process running
-/// as long as it likes, so while the tunnel is connected we play a silent
-/// buffer on loop, mixed with (never ducking) whatever the user is actually
-/// listening to, and stop the moment the tunnel goes down. Same mechanism
-/// the ZeroFS Drop uploader relies on.
+/// Opt-in silent-audio keepalive for app-side Live Activity updates.
+/// This is independent of the packet tunnel and does not guarantee execution.
 @MainActor
 final class TunnelKeepAlive {
     private static let log = Logger(subsystem: "mqvpn.poc", category: "keepalive")

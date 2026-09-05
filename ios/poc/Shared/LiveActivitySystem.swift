@@ -7,10 +7,8 @@ import os
 
 private let liveActivityLog = Logger(subsystem: "mqvpn.poc", category: "live-activity")
 
-/// App-process lifecycle entry points. ActivityKit requires a foreground app
-/// to create a standard Live Activity, so Start requests it before launching
-/// the packet tunnel. The provider process subsequently updates that same
-/// activity from real counters while the app is backgrounded.
+/// App-process lifecycle entry points. Start creates the activity in the
+/// foreground; the app publishes tunnel counters while it remains runnable.
 @available(iOS 16.2, *)
 enum MqvpnLiveActivityLifecycle {
     @discardableResult
@@ -115,95 +113,6 @@ enum MqvpnLiveActivityLifecycle {
         let content = ActivityContent(state: state, staleDate: nil)
         for activity in activities where ids.contains(activity.id) {
             Task { await activity.end(content, dismissalPolicy: .immediate) }
-        }
-    }
-}
-
-protocol MqvpnLiveActivityReporting: AnyObject {
-    func start()
-    func stop() async
-}
-
-/// Packet-provider rate reporter. It reads only the lock-protected production
-/// snapshot, samples at a bounded cadence, and updates an activity that the
-/// foreground app already created. It never fabricates an activity in the
-/// background if ActivityKit has none to update.
-@available(iOS 16.2, *)
-final class MqvpnLiveActivityReporter: MqvpnLiveActivityReporting {
-    private let queue = DispatchQueue(label: "mqvpn.live-activity")
-    private let snapshotProvider: () -> TunnelSnapshot?
-    private let mode: OperatingMode
-    private var sampler = LiveActivityRateSampler()
-    private var timer: DispatchSourceTimer?
-    private var stopped = false
-    /// Publish-gate memory (queue-confined): the last state actually handed
-    /// to ActivityKit and when. Sampling stays at timer cadence; publishing
-    /// is budget-aware (see LiveActivityPublishGate).
-    private var lastPublished: LiveActivityContentState?
-    private var lastPublishedAt: Double?
-
-    init(mode: OperatingMode,
-         snapshotProvider: @escaping () -> TunnelSnapshot?) {
-        self.mode = mode
-        self.snapshotProvider = snapshotProvider
-    }
-
-    func start() {
-        queue.async { [weak self] in
-            guard let self, !self.stopped, self.timer == nil else { return }
-            self.publish()
-            let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            // One-second cadence: the target carries frequent-updates
-            // entitlement, and a speed readout that trails the line by
-            // several seconds reads as wrong rather than smoothed.
-            timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
-            timer.setEventHandler { [weak self] in self?.publish() }
-            self.timer = timer
-            timer.resume()
-        }
-    }
-
-    func stop() async {
-        let shouldEnd: Bool = queue.sync {
-            guard !stopped else { return false }
-            stopped = true
-            timer?.setEventHandler {}
-            timer?.cancel()
-            timer = nil
-            return true
-        }
-        guard shouldEnd else { return }
-        await MqvpnLiveActivityLifecycle.endImmediately()
-        liveActivityLog.notice("provider Live Activity cleanup completed after transport stop")
-    }
-
-    private func publish() {
-        guard !stopped, let snapshot = snapshotProvider() else { return }
-        let activities = Activity<MqvpnNetworkActivityAttributes>.activities
-        let plan = LiveActivitySelection.plan(
-            activities: activities.map {
-                LiveActivityDescriptor(id: $0.id, mode: $0.attributes.mode)
-            }, desiredMode: mode.rawValue)
-        // No exact-mode Island means this session never created one: stay
-        // silent instead of sampling or calling ActivityKit. That miss is
-        // steady-state, not an event worth logging every second.
-        guard plan.currentID != nil else { return }
-        let published = LiveActivityContentFactory.make(snapshot: snapshot, sampler: &sampler)
-        // Sample every tick (the sampler's EWMA needs continuity), publish
-        // only what a reader could distinguish: ActivityKit budgets
-        // background updates, and publishing every sample exhausted the
-        // budget within minutes — the island then missed its 6 s staleDate
-        // and sat grey for the rest of the session.
-        guard LiveActivityPublishGate.shouldPublish(candidate: published.state,
-                                                    lastPublished: lastPublished,
-                                                    lastPublishedAt: lastPublishedAt) else {
-            return
-        }
-        lastPublished = published.state
-        lastPublishedAt = published.state.sampledAt
-        Task {
-            _ = await MqvpnLiveActivityLifecycle.updateExisting(
-                mode: mode, state: published.state, staleDate: published.staleDate)
         }
     }
 }

@@ -1,19 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
-/*
- * relay_adapter.c — authenticated iPhone LAN relay path for Darwin
- *
- * Implements relay_adapter.h: one connected non-blocking UDP socket to the
- * iPhone relay endpoint, HELLO/HELLO_ACK session authentication with
- * replay protection, same-session HELLO keepalives, and rate-limited
- * transport recovery, surfaced to libmqvpn as a single callback-backed
- * path. Every production dependency (clock, RNG, socket ops, path ops) is
- * injectable through darwin_relay_adapter_ops_t so the state machine is
- * unit-testable without a network. Also compiled on Linux CI for
- * tests/test_relay_adapter_darwin.c — keep everything outside the
- * __APPLE__ guards portable POSIX.
- */
+/* Authenticated iPhone LAN relay exposed as a callback-backed path.
+ * Keep code outside __APPLE__ guards portable for the Linux host tests. */
 
 #include "relay_adapter.h"
 #include "log.h"

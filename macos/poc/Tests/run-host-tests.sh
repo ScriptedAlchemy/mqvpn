@@ -55,20 +55,7 @@ swiftc -o "$OUT" \
     -Xlinker -rpath -Xlinker "$ROOT/build" \
     -Xlinker -rpath -Xlinker "$XQUIC_BUILD_DIR"
 "$OUT"
-# Task 3 unsigned provider compile: typecheck the NE target against the
-# macOS SDK. Host tests cannot instantiate NEPacketTunnelProvider. A tiny
-# stub stands in for iOS-only snapshot types the engine references.
-cat > "$TMPD/ReorderStatsSnapshot.swift" <<'EOF'
-struct ReorderStatsSnapshot {
-    let delivered: UInt64
-    let gapCount: UInt64
-    let gapFilled: UInt64
-    let gapTimeout: UInt64
-    let ackDemote: UInt64
-    let bufferedP50Ms: Double
-    let bufferedP99Ms: Double
-}
-EOF
+# Typecheck the provider and app against the macOS SDK using production types.
 swiftc -typecheck \
     -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
     -import-objc-header "$ROOT/macos/poc/PacketTunnel/BridgingHeader.h" \
@@ -80,7 +67,7 @@ swiftc -typecheck \
     "$IOS/Shared/HybridSettings.swift" \
     "$IOS/Shared/SchedulerSettings.swift" \
     "$IOS/Shared/RelayBonjour.swift" \
-    "$TMPD/ReorderStatsSnapshot.swift" \
+    "$ROOT/macos/poc/Shared/ReorderStatsSnapshot.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$IOS/PacketTunnel/PathBinder.swift" \
     "$ROOT/macos/poc/Shared/MacRelayRuntimeState.swift" \
@@ -108,7 +95,7 @@ swiftc -typecheck \
     "$IOS/Shared/HybridSettings.swift" \
     "$IOS/Shared/SchedulerSettings.swift" \
     "$IOS/Shared/RelayBonjour.swift" \
-    "$TMPD/ReorderStatsSnapshot.swift" \
+    "$ROOT/macos/poc/Shared/ReorderStatsSnapshot.swift" \
     "$IOS/PacketTunnel/MqvpnEngine.swift" \
     "$ROOT/macos/poc/Shared/MacProviderPlan.swift" \
     "$ROOT/macos/poc/Shared/MacRelayDiscovery.swift" \
