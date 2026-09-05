@@ -25,6 +25,7 @@ struct SettingsView: View {
     @State private var hybridEnabled: Bool
     @State private var hybridMode: Int
     @State private var optimizeFor: Int
+    @State private var flowsPerInterface: Int
     @State private var operatingMode: OperatingMode
     @State private var relayKeyText: String
     @State private var relayPortText: String
@@ -47,6 +48,7 @@ struct SettingsView: View {
         _hybridEnabled = State(initialValue: controller.hybridSettings.enabled)
         _hybridMode = State(initialValue: controller.hybridSettings.tcpMode)
         _optimizeFor = State(initialValue: controller.schedulerSettings.policy)
+        _flowsPerInterface = State(initialValue: controller.schedulerSettings.flowsPerInterface)
         _operatingMode = State(initialValue: controller.operatingMode)
         let relay = controller.relaySettings ?? .emptyDraft
         _relayKeyText = State(initialValue: relay.keyBase64)
@@ -144,6 +146,15 @@ struct SettingsView: View {
                 }
                 if operatingMode == .vpn {
                     Section {
+                        Picker("Flows per interface", selection: $flowsPerInterface) {
+                            ForEach(SchedulerSettings.flowCounts, id: \.self) { count in
+                                Text("\(count)").tag(count)
+                            }
+                        }.disabled(!controller.isEditable)
+                    } header: { Text("Multipath") } footer: {
+                        Text("UDP flows on each Wi-Fi or cellular interface. Default: 4. More flows are not always faster. Applies on the next Start.")
+                    }
+                    Section {
                         Toggle("Enabled", isOn: $enabled).disabled(!controller.isEditable)
                         if enabled {
                             Picker("Profile", selection: $profile) {
@@ -202,7 +213,7 @@ struct SettingsView: View {
 
     private func save() async {
         let hybrid = HybridSettings(enabled: hybridEnabled, tcpMode: hybridMode)
-        let scheduler = SchedulerSettings(policy: optimizeFor)
+        let scheduler = SchedulerSettings(policy: optimizeFor, flowsPerInterface: flowsPerInterface)
         do {
             try await controller.saveSettings(
                 server: serverDraft, reorder: draft, hybrid: hybrid,

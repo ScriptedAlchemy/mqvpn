@@ -56,7 +56,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         let engine = MqvpnEngine()
-        let binder = PathBinder(engine: engine)
+        let binder = PathBinder(engine: engine,
+                                scheduler: SchedulerSettings(providerConfiguration: providerConfig))
         let metrics = GateMetrics(engine: engine, binder: binder)
         let snapshot = SnapshotCache(engine: engine)
         self.engine = engine

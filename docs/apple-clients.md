@@ -45,6 +45,12 @@ MinRTT. Hybrid STREAM traffic can be spread across paths with QUIC reassembly.
 Raw TCP needs the negotiated reorder shim to avoid flow pinning. Neither
 preference guarantees that combined speed will exceed the faster single path.
 
+In iOS VPN mode, **Multipath → Flows per interface** selects one to four UDP
+flows on each radio. Existing profiles keep four. Save while disconnected;
+the next Start uses the new count. Four per radio fits the core's eight local
+path slots without crowding out the other radio. This is independent of the
+number of files or HTTP connections in an uploader.
+
 The relay runs in the packet-tunnel extension, independently of the foreground
 app. Live Activity updates are separate: the app publishes measured counters
 while runnable. The optional silent-audio keepalive is off by default, is not

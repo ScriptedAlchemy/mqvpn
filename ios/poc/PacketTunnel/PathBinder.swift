@@ -43,24 +43,15 @@ final class PathBinder {
     }
     private let engine: MqvpnEngine
     private let interfaceTypes: [NWInterface.InterfaceType]
-    /// One entry per (interface, replica). Replicas exist because consumer
-    /// uplinks shape PER FLOW: measured on this link, one outer UDP flow
-    /// tops out near 5-10 Mbps while two independent tunnels running at once
-    /// reach ~21 Mbps combined. Every replica is a separate socket with its
-    /// own source port, so each earns its own allowance and the QUIC
-    /// scheduler stripes across all of them.
+    /// Each replica has a separate UDP socket/source port on its interface.
+    /// Multiple flows helped earlier throughput tests; the count is configurable
+    /// because those results do not establish a universal per-flow limit.
     struct PathKey: Hashable {
         let type: NWInterface.InterfaceType
         let replica: Int
     }
     private var slots: [PathKey: PathSlot] = [:]  // tick-thread confined
-    /// Outer flows per physical interface. Four doubled throughput (5 -> 11
-    /// Mbps measured) with both radios still attached. Eight starved the
-    /// cellular path entirely: Wi-Fi is probed first and its replicas
-    /// consumed the whole negotiated path-ID grant, so pdp_ip0 got nothing.
-    /// A second radio is worth far more than a fifth flow on the first, so
-    /// this stays at 4 until a raised grant is confirmed on the wire.
-    private static let replicasPerInterface = 4
+    private let replicasPerInterface: Int
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
     private var pollTimer: Timer?   // tick-thread confined
     /// Consecutive unsatisfied probe results per interface. A single stale
@@ -77,8 +68,10 @@ final class PathBinder {
     private let monitorQueue = DispatchQueue(label: "mqvpn.poc.pathmon")
 
     init(engine: MqvpnEngine,
-         interfaceTypes: [NWInterface.InterfaceType] = [.wifi, .cellular]) {
+         interfaceTypes: [NWInterface.InterfaceType] = [.wifi, .cellular],
+         scheduler: SchedulerSettings = .default) {
         self.engine = engine
+        self.replicasPerInterface = scheduler.flowsPerInterface
         self.interfaceTypes = interfaceTypes.reduce(into: []) { ordered, type in
             if !ordered.contains(type) { ordered.append(type) }
         }
@@ -188,14 +181,14 @@ final class PathBinder {
             self.engine.perform {   // hop to tick thread
                 if path.status == .satisfied, let iface {
                     self.unsatisfiedStreak[type] = 0
-                    for replica in 0 ..< Self.replicasPerInterface {
+                    for replica in 0 ..< self.replicasPerInterface {
                         self.addPath(type: type, replica: replica, iface: iface)
                     }
                 } else {
                     let streak = (self.unsatisfiedStreak[type] ?? 0) + 1
                     self.unsatisfiedStreak[type] = streak
                     if streak >= Self.removalStreak {
-                        for replica in 0 ..< Self.replicasPerInterface {
+                        for replica in 0 ..< self.replicasPerInterface {
                             self.removePath(key: PathKey(type: type, replica: replica))
                         }
                     }

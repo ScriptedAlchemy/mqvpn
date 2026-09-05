@@ -258,6 +258,22 @@ check(hyParsed.enabled == false, "int-backed enabled rejected (isBool strict)")
 check(hyParsed.tcpMode == 2, "bool-backed mode clamps to auto")
 
 // SchedulerSettings — Max Throughput is the default; unknown values clamp there.
+check(SchedulerSettings.flowCounts.upperBound * 2 <= Int(MQVPN_MAX_PATHS),
+      "flow picker reserves local path slots for both phone interfaces")
+for count in 1...4 {
+    let config: [String: Any] = ["flowsPerInterface": NSNumber(value: count)]
+    let settings = SchedulerSettings(providerConfiguration: config)
+    check(settings.toProviderConfiguration()["flowsPerInterface"] as? NSNumber == NSNumber(value: count),
+          "flow count persists through the provider configuration")
+}
+for value: Any in [NSNumber(value: 0), NSNumber(value: 5), NSNumber(value: -1),
+                   NSNumber(value: true), NSNumber(value: 1.5), "2"] {
+    let settings = SchedulerSettings(providerConfiguration: ["flowsPerInterface": value])
+    check(settings.toProviderConfiguration()["flowsPerInterface"] as? NSNumber == NSNumber(value: 4),
+          "invalid flow count falls back to four")
+}
+check(SchedulerSettings(providerConfiguration: nil).toProviderConfiguration()["flowsPerInterface"] as? NSNumber == NSNumber(value: 4),
+      "legacy profiles keep four flows per interface")
 let sched = SchedulerSettings(policy: SchedulerSettings.lowLatency)
 check(SchedulerSettings(providerConfiguration: sched.toProviderConfiguration()) == sched,
       "scheduler round-trip")
